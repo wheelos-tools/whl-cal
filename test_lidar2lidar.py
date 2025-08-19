@@ -1,7 +1,8 @@
 import open3d as o3d
 import numpy as np
 import logging
-import lidar_calibration as lc  # Import the calibration library
+import copy
+import lidar2lidar as lc
 
 # Configure logging for the test script
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -29,7 +30,7 @@ def generate_test_data():
     ground_truth_transform[0:3, 3] = true_translation
 
     # Create the source point cloud by transforming the target
-    source_cloud = target_cloud.deepcopy()
+    source_cloud = copy.deepcopy(target_cloud)
     source_cloud.transform(ground_truth_transform)
 
     return source_cloud, target_cloud, ground_truth_transform
@@ -43,7 +44,7 @@ def main_test():
 
     # --- Execute the calibration ---
     logging.info("\n--- Starting LiDAR Extrinsic Calibration ---")
-    final_extrinsic_transform = lc.calibrate_lidar_extrinsic(source_cloud, target_cloud)
+    final_extrinsic_transform, coarse_transform, reg_result = lc.calibrate_lidar_extrinsic(source_cloud, target_cloud)
 
     if final_extrinsic_transform is None:
         logging.error("Calibration failed.")
@@ -52,6 +53,7 @@ def main_test():
     # --- Result validation and visualization ---
     logging.info("\n--- Final Calibration Results ---")
     logging.info(f"Ground truth extrinsic matrix:\n{np.round(ground_truth_transform, 4)}")
+    logging.info(f"Coarse registration extrinsic matrix:\n{np.round(coarse_transform, 4)}")
     logging.info(f"Computed final extrinsic matrix:\n{np.round(final_extrinsic_transform, 4)}")
 
     # Visualize results
