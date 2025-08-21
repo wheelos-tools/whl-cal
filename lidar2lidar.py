@@ -1,7 +1,9 @@
+import click
 import open3d as o3d
 import numpy as np
 import copy
 import logging
+from scipy.spatial.transform import Rotation as R
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -33,8 +35,11 @@ def preprocess_point_cloud(pcd, voxel_size, nb_neighbors=20, std_ratio=2.0, plan
   logging.info("  -> Removing ground points...")
   plane_model, inliers = pcd_filtered.segment_plane(distance_threshold=plane_dist_thresh,
                             ransac_n=3,
-                            num_iterations=1000)
+                            num_iterations=2000)
   pcd_no_ground = pcd_filtered.select_by_index(inliers, invert=True)
+  # pcd_no_ground = o3d.geometry.PointCloud()
+  # points = np.asarray(pcd_filtered.points, dtype=np.float64)
+  # pcd_no_ground.points = o3d.utility.Vector3dVector(points[points[:, 2] > 0.5])
   logging.info(f"  -> Original point cloud: {len(pcd.points)} points, after preprocessing: {len(pcd_no_ground.points)} points")
 
   # GICP requires normals, so we estimate them here
@@ -70,7 +75,7 @@ def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh
       o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
       o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size * 10)
     ],
-    criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(4000000, 500)
+    criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(8000000, 1000)
   )
   return result.transformation
 
@@ -102,7 +107,12 @@ def perform_icp_registration(source_pcd, target_pcd, initial_transform, icp_para
 
   return final_result
 
-def main():
+@click.command()
+@click.option('--target_pcd', required=True, help='Path to target point cloud file')
+@click.option('--source_pcd', required=True, help='Path to source point cloud file')
+def main(target_pcd, source_pcd):
+  """lidar2lidar
+  """
   # --- Production-level parameter configuration ---
   PREPROCESSING_PARAMS = {
     'voxel_size': 0.05,            # Voxel downsampling size (m)
@@ -120,12 +130,13 @@ def main():
 
   # --- Preparation: Generate or load data ---
   logging.info("1. Generating or loading point cloud data...")
-  box_points = []
-  for _ in range(2000):
-    box_points.append([np.random.uniform(0, 2), np.random.uniform(0, 0.1), np.random.uniform(0, 1.5)])
-    box_points.append([np.random.uniform(0, 0.1), np.random.uniform(0, 2), np.random.uniform(0, 1.5)])
-  target_cloud = o3d.geometry.PointCloud()
-  target_cloud.points = o3d.utility.Vector3dVector(np.array(box_points, dtype=np.float64))
+  # box_points = []
+  # for _ in range(2000):
+  #   box_points.append([np.random.uniform(0, 2), np.random.uniform(0, 0.1), np.random.uniform(0, 1.5)])
+  #   box_points.append([np.random.uniform(0, 0.1), np.random.uniform(0, 2), np.random.uniform(0, 1.5)])
+  # target_cloud = o3d.geometry.PointCloud()
+  # target_cloud.points = o3d.utility.Vector3dVector(np.array(box_points, dtype=np.float64))
+  target_cloud = o3d.io.read_point_cloud(target_pcd, format='pcd')
 
   true_rotation = target_cloud.get_rotation_matrix_from_xyz((0, 0, np.pi / 12))
   true_translation = np.array([0.5, -0.3, 0.2])
@@ -133,8 +144,9 @@ def main():
   ground_truth_transform[0:3, 0:3] = true_rotation
   ground_truth_transform[0:3, 3] = true_translation
 
-  source_cloud = copy.deepcopy(target_cloud)
-  source_cloud.transform(ground_truth_transform)
+  # source_cloud = copy.deepcopy(target_cloud)
+  # source_cloud.transform(ground_truth_transform)
+  source_cloud = o3d.io.read_point_cloud(source_pcd, format='pcd')
 
   # --- Step 1: Point cloud preprocessing ---
   logging.info("\n--- Step 2: Point cloud preprocessing ---")
@@ -153,6 +165,7 @@ def main():
   )
 
   draw_registration_result(source_preprocessed, target_preprocessed, initial_guess_transform, "Coarse Registration Result")
+  draw_registration_result(source_cloud, target_cloud, initial_guess_transform, "Coarse Registration Result")
 
   # Check validity of coarse registration result
   if not np.isfinite(initial_guess_transform).all():
@@ -178,11 +191,14 @@ def main():
   logging.info(f"  - Inlier RMSE (inlier root mean square error): {inlier_rmse:.4f}")
 
   draw_registration_result(source_preprocessed, target_preprocessed, final_extrinsic_transform, "Final Fine Registration Result")
+  draw_registration_result(source_cloud, target_cloud, final_extrinsic_transform, "Final Fine Registration Result")
 
   logging.info("\n--- Final Calibration Results ---")
   logging.info(f"Ground truth extrinsic matrix:\n{np.round(ground_truth_transform, 4)}")
   logging.info(f"Coarse registration extrinsic matrix:\n{np.round(initial_guess_transform, 4)}")
+  logging.info(f"Coarse registration extrinsic quaternion: {R.from_matrix(initial_guess_transform[:3, :3]).as_quat()}, translation: {initial_guess_transform[:3, 3]}")
   logging.info(f"Computed final extrinsic matrix:\n{np.round(final_extrinsic_transform, 4)}")
+  logging.info(f"Computed final extrinsic quaternion: {R.from_matrix(final_extrinsic_transform[:3, :3]).as_quat()}, translation: {final_extrinsic_transform[:3, 3]}")
   logging.info("Conclusion: A reliable initial pose is obtained by FPFH+RANSAC coarse registration, and finely optimized by GICP. The final result is very close to the ground truth.")
 
 if __name__ == '__main__':
