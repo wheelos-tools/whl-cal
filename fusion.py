@@ -33,31 +33,31 @@ def load_static_tf(filepath: pathlib.Path) -> np.ndarray:
 @click.command()
 @click.option("--lf-pcd", type=pathlib.Path, required=True, help="Left front LiDAR PCD file")
 @click.option("--rf-pcd", type=pathlib.Path, required=True, help="Right front LiDAR PCD file")
-@click.option("--rr-pcd", type=pathlib.Path, required=True, help="Right back LiDAR PCD file")
-@click.option("--lr-pcd", type=pathlib.Path, required=True, help="Left back LiDAR PCD file")
+@click.option("--rb-pcd", type=pathlib.Path, required=True, help="Right back LiDAR PCD file")
+@click.option("--lb-pcd", type=pathlib.Path, required=True, help="Left back LiDAR PCD file")
 @click.option("--tf-dir", type=pathlib.Path, required=True, help="Directory containing YAML transform files")
 @click.option("--use-pclview", is_flag=True, default=False, help="Use PCLview for visualization")
-def main(lf_pcd, rf_pcd, rr_pcd, lr_pcd, tf_dir, use_pclview):
+def main(lf_pcd, rf_pcd, rb_pcd, lb_pcd, tf_dir, use_pclview):
     """Visualize fused LiDAR point clouds in a single frame."""
     # Load static transforms
-    lr2rr = load_static_tf(tf_dir / "left_back2right_back.yaml")
-    rr2rf = load_static_tf(tf_dir / "right_back2right_front.yaml")
+    lb2rb = load_static_tf(tf_dir / "left_back2right_back.yaml")
+    rb2rf = load_static_tf(tf_dir / "right_back2right_front.yaml")
     rf2lf = load_static_tf(tf_dir / "right_front2left_front.yaml")
 
     # Load point clouds
     lf_pcd = o3d.io.read_point_cloud(str(lf_pcd))
     rf_pcd = o3d.io.read_point_cloud(str(rf_pcd))
-    rr_pcd = o3d.io.read_point_cloud(str(rr_pcd))
-    lr_pcd = o3d.io.read_point_cloud(str(lr_pcd))
+    rb_pcd = o3d.io.read_point_cloud(str(rb_pcd))
+    lb_pcd = o3d.io.read_point_cloud(str(lb_pcd))
 
     # Apply transformations and coloring
     lf_pcd.paint_uniform_color([1, 0, 0])  # Red
     rf_pcd.transform(rf2lf).paint_uniform_color([0, 1, 0])  # Green
-    rr_pcd.transform(rr2rf).transform(rf2lf).paint_uniform_color([0, 0, 1])  # Blue
-    lr_pcd.transform(lr2rr).transform(rr2rf).transform(rf2lf).paint_uniform_color([1, 1, 0])  # Yellow
+    rb_pcd.transform(rb2rf).transform(rf2lf).paint_uniform_color([0, 0, 1])  # Blue
+    lb_pcd.transform(lb2rb).transform(rb2rf).transform(rf2lf).paint_uniform_color([1, 1, 0])  # Yellow
 
     # Fuse all clouds
-    fused_pcd = lf_pcd + rf_pcd + rr_pcd + lr_pcd
+    fused_pcd = lf_pcd + rf_pcd + rb_pcd + lb_pcd
 
     if use_pclview:
         # Save to temporary PCD and visualize
