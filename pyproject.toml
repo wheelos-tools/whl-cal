@@ -31,5 +31,5 @@ BugTracker = "https://github.com/wheelos-tools/whl-cal/issues"
 where = ["."]
 
 [project.scripts]
-lidar2lidartool = "lidar2lidartool.cli:main"
+lidar2lidartool = "lidar2lidar.cli:main"
 

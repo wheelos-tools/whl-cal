@@ -8,7 +8,7 @@ Repository: https://github.com/wheelos-tools/whl-cal
 
 ## Install dependencies
 
-pip install -r requirements.txt
+pip install -e .
 
 ## Extrinsic Calibration
 
