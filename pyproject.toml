@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whl-cal"
+version = "0.1.0"
+description = "LiDAR extrinsic calibration tool"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "Apache-2.0"
+authors = [
+  { name = "spidermaniron", email = "1195487354@qq.com" }
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent"
+]
+dependencies = [
+  "numpy",
+  "pandas",
+  "open3d",
+  "scipy"
+]
+
+[project.urls]
+Homepage = "https://github.com/wheelos-tools/whl-cal"
+BugTracker = "https://github.com/wheelos-tools/whl-cal/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[project.scripts]
+lidar2lidartool = "lidar2lidartool.cli:main"
+
