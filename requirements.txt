@@ -1,4 +1,0 @@
-numpy
-pandas
-open3d
-scipy
