@@ -210,7 +210,8 @@ def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh
 def perform_icp_registration(source_pcd,
                              target_pcd,
                              initial_transform: np.ndarray,
-                             icp_params: dict):
+                             icp_params: dict,
+                             method: int):
     """Perform iterative ICP fine registration.
 
     Args:
@@ -230,10 +231,24 @@ def perform_icp_registration(source_pcd,
             relative_fitness=icp_params['relative_fitness'],
             relative_rmse=icp_params['relative_rmse'],
             max_iteration=icp_params['max_iterations'][i])
-        result = o3d.pipelines.registration.registration_icp(
-            source_pcd, target_pcd, max_corr_dist, current_transform,
-            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-            criteria)
+        if method == 1:
+            logging.info("  -> Using point-to-plane ICP")
+            result = o3d.pipelines.registration.registration_icp(
+                source_pcd, target_pcd, max_corr_dist, current_transform,
+                o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                criteria)
+        elif method == 2:
+            logging.info("  -> Using GICP")
+            result = o3d.pipelines.registration.registration_generalized_icp(
+                 source_pcd, target_pcd, max_corr_dist, current_transform,
+                 o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
+                 criteria)
+        elif method == 3:
+            logging.info("  -> Using point-to-point ICP")
+            result = o3d.pipelines.registration.registration_icp(
+                source_pcd, target_pcd, max_corr_dist, current_transform,
+                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                criteria)
         current_transform = result.transformation
         final_result = result
     return final_result
@@ -241,7 +256,9 @@ def perform_icp_registration(source_pcd,
 
 def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
                               target_cloud: o3d.geometry.PointCloud,
-                              is_draw_registration: bool = False):
+                              is_draw_registration: bool = False,
+                              preprocessing_params: dict = None,
+                              method: int = 1):
     """Calibrate lidar extrinsic parameters using point cloud registration.
 
     Args:
@@ -255,14 +272,15 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
         - Initial coarse transformation matrix.
         - Final registration result.
     """
-    preprocessing_params = {
-        'voxel_size': 0.04,
-        'nb_neighbors': 20,
-        'std_ratio': 2.0,
-        'plane_dist_thresh': 0.05,
-        'height_range': 8,
-        'remove_walls': True
-    }
+    if preprocessing_params == None:
+        preprocessing_params = {
+            'voxel_size': 0.04,
+            'nb_neighbors': 20,
+            'std_ratio': 2.0,
+            'plane_dist_thresh': 0.05,
+            'height_range': None,
+            'remove_walls': True
+        }
     icp_params = {
         'max_correspondence_distances': [1.0, 0.5, 0.1, 0.05, 0.02],
         'max_iterations': [50, 100, 100, 200, 200],
@@ -303,7 +321,7 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
 
     logging.info("--- Step 4: Fine Registration (Iterative GICP) ---")
     registration_result = perform_icp_registration(
-        source_preprocessed, target_preprocessed, initial_guess_transform, icp_params)
+        source_preprocessed, target_preprocessed, initial_guess_transform, icp_params, method)
     final_extrinsic_transform = registration_result.transformation
 
     if not np.isfinite(final_extrinsic_transform).all():
