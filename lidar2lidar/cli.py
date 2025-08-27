@@ -73,16 +73,46 @@ def main() -> None:
         action="store_true",
         help="Visualize the registration results.",
     )
-
+    parser.add_argument(
+        "--voxel-size",
+        type=float,
+        default=0.04,
+        help="Voxel size for point cloud downsampling.",
+    )
+    parser.add_argument(
+        "--max-height",
+        type=float,
+        default=None,
+        help="Maximum height to keep points (height_range in preprocessing).",
+    )
+    parser.add_argument(
+        "--method",
+        type=int,
+        default=1,
+        help="Method for registration (1: point_to_plane, 2: GICP, 3: point_to_point).",
+    )
     args = parser.parse_args()
 
     # Load point clouds
     source_cloud, target_cloud = load_point_clouds(args.source_pcd, args.target_pcd)
 
+    # Modify the original parameters
+    preprocessing_params = {
+        'voxel_size': args.voxel_size,
+        'nb_neighbors': 20,
+        'std_ratio': 2.0,
+        'plane_dist_thresh': 0.05,
+        'height_range': args.max_height,
+        'remove_walls': True
+    }
+
+    # Load the method
+    method = args.method
+
     # Perform calibration
     logging.info("--- Starting LiDAR extrinsic calibration ---")
     final_extrinsic_transform, coarse_transform, reg_result = lc.calibrate_lidar_extrinsic(
-        source_cloud, target_cloud, args.visualize
+        source_cloud, target_cloud, args.visualize, preprocessing_params, method
     )
 
     if final_extrinsic_transform is None:
@@ -105,6 +135,7 @@ def main() -> None:
         json.dump(transform_dict, f, indent=4)
 
     logging.info("Final extrinsic matrix saved to %s", args.output_json)
+
 
 
 if __name__ == "__main__":
