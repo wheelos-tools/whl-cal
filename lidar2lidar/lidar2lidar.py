@@ -182,6 +182,7 @@ def compute_fpfh_features(pcd: o3d.geometry.PointCloud, voxel_size: float):
 
 def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh, voxel_size: float):
     """Perform coarse registration using FPFH + RANSAC.
+       Parameters should be tuned according to the specific case.
 
     Args:
         source_pcd (o3d.geometry.PointCloud): Source point cloud.
@@ -213,7 +214,8 @@ def perform_icp_registration(source_pcd,
                              icp_params: dict,
                              method: int):
     """Perform iterative ICP fine registration.
-
+       Parameters should be tuned according to the specific case.
+    
     Args:
         source_pcd (o3d.geometry.PointCloud): Source point cloud.
         target_pcd (o3d.geometry.PointCloud): Target point cloud.
