@@ -121,19 +121,33 @@ def preprocess_point_cloud(pcd: o3d.geometry.PointCloud,
     Returns:
         o3d.geometry.PointCloud: Preprocessed point cloud.
     """
+    logging.info("  -> Cleaning invalid points...")
+    points = np.asarray(pcd.points)
+    mask = np.isfinite(points).all(axis=1)
+    if not mask.all():
+        logging.info("     Cleaning invalid points: removed %d NaN/Inf points",
+                    (~mask).sum()
+    )
+    pcd = pcd.select_by_index(np.where(mask)[0])
+    
+    logging.info("  -> Input points: %d", len(pcd.points))
+    
     logging.info("  -> Voxel downsampling...")
     pcd_down = pcd.voxel_down_sample(voxel_size)
+    logging.info("     After downsampling: %d points", len(pcd_down.points))
 
     logging.info("  -> Removing statistical outliers...")
     _, ind = pcd_down.remove_statistical_outlier(nb_neighbors=nb_neighbors,
                                                  std_ratio=std_ratio)
     pcd_filtered = pcd_down.select_by_index(ind)
+    logging.info("     After outlier removal: %d points", len(pcd_filtered.points))
 
     logging.info("  -> Removing ground points...")
     plane_model, inliers = pcd_filtered.segment_plane(distance_threshold=plane_dist_thresh,
                                                       ransac_n=3,
                                                       num_iterations=1000)
     pcd_no_ground = pcd_filtered.select_by_index(inliers, invert=True)
+    logging.info("     After ground removal: %d points", len(pcd_no_ground.points))
 
     if height_range is not None:
         points = np.asarray(pcd_no_ground.points)
