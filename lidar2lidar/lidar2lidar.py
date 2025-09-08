@@ -178,6 +178,21 @@ def preprocess_point_cloud(pcd: o3d.geometry.PointCloud,
     return pcd_no_ground
 
 
+def preprocess_point_cloud_light(pcd: o3d.geometry.PointCloud,
+                                 voxel_size: float) -> o3d.geometry.PointCloud:
+    """Lightweight preprocessing for large target maps to speed up registration.
+
+    - Only voxel downsample and normal estimation (skip outlier removal and plane segmentation).
+    """
+    logging.info("  -> [Light] Voxel downsampling target map...")
+    pcd_down = pcd.voxel_down_sample(voxel_size)
+    logging.info("     [Light] After downsampling: %d points", len(pcd_down.points))
+    logging.info("  -> [Light] Estimating normals for target map...")
+    pcd_down.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30))
+    return pcd_down
+
+
 def compute_fpfh_features(pcd: o3d.geometry.PointCloud, voxel_size: float):
     """Compute FPFH features.
 
@@ -194,9 +209,9 @@ def compute_fpfh_features(pcd: o3d.geometry.PointCloud, voxel_size: float):
         pcd, o3d.geometry.KDTreeSearchParamHybrid(radius=radius_feature, max_nn=100))
 
 
-def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh, voxel_size: float):
-    """Perform coarse registration using FPFH + RANSAC.
-       Parameters should be tuned according to the specific case.
+def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh, voxel_size: float,
+                                method: str = "ransac"):
+    """Perform coarse registration using feature matching.
 
     Args:
         source_pcd (o3d.geometry.PointCloud): Source point cloud.
@@ -204,22 +219,36 @@ def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh
         source_fpfh (Feature): Source FPFH features.
         target_fpfh (Feature): Target FPFH features.
         voxel_size (float): Voxel size.
+        method (str): 'ransac' or 'fast'.
 
     Returns:
         o3d.pipelines.registration.RegistrationResult: Coarse registration result.
     """
+    if method == "fast":
+        logging.info("  -> Performing coarse registration (Fast Global Registration)...")
+        try:
+            option = o3d.pipelines.registration.FastGlobalRegistrationOption(
+                maximum_correspondence_distance=voxel_size * 5.0,
+                iteration_number=64,
+            )
+            return o3d.pipelines.registration.registration_fast_based_on_feature_matching(
+                source_pcd, target_pcd, source_fpfh, target_fpfh, option)
+        except AttributeError:
+            logging.warning("Fast Global Registration not available in this Open3D version; falling back to RANSAC.")
+            method = "ransac"
+
     logging.info("  -> Performing coarse registration (FPFH + RANSAC)...")
     return o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
         source_pcd, target_pcd, source_fpfh, target_fpfh,
         mutual_filter=True,
-        max_correspondence_distance=voxel_size * 10,
+        max_correspondence_distance=voxel_size * 8.0,
         estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
         ransac_n=3,
         checkers=[
             o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size * 10)
+            o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(voxel_size * 8.0)
         ],
-        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(4000000, 500))
+        criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(200000, 200))
 
 
 def perform_icp_registration(source_pcd,
@@ -274,7 +303,13 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
                               target_cloud: o3d.geometry.PointCloud,
                               is_draw_registration: bool = False,
                               preprocessing_params: dict = None,
-                              method: int = 1):
+                              method: int = 1,
+                              initial_transform: np.ndarray | None = None,
+                              coarse_method: str = "auto",
+                              coarse_voxel_factor: float = 2.5,
+                              quality_gate: dict | None = None,
+                              target_light_preprocess: bool = False,
+                              target_max_points: int = 150000):
     """Calibrate lidar extrinsic parameters using point cloud registration.
 
     Args:
@@ -303,39 +338,76 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
         'relative_fitness': 1e-7,
         'relative_rmse': 1e-7
     }
+    if quality_gate is None:
+        quality_gate = {
+            'min_fitness': 0.10,
+            'max_rmse': 0.05,
+            'max_translation': 3.0,  # meters
+            'max_rotation_deg': 20.0,
+        }
 
     logging.info("--- Step 1: Point Cloud Preprocessing ---")
     source_preprocessed = preprocess_point_cloud(source_cloud, **preprocessing_params)
-    target_preprocessed = preprocess_point_cloud(target_cloud, **preprocessing_params)
+    if target_light_preprocess:
+        target_preprocessed = preprocess_point_cloud_light(target_cloud, preprocessing_params['voxel_size'])
+    else:
+        target_preprocessed = preprocess_point_cloud(target_cloud, **preprocessing_params)
+
+    # If target is still very large, adaptively increase its voxel size to cap points
+    if len(target_preprocessed.points) > target_max_points:
+        factor = min(3.0, max(1.2, np.sqrt(len(target_preprocessed.points) / target_max_points)))
+        new_voxel = preprocessing_params['voxel_size'] * factor
+        logging.info("  -> [Light] Target map too large (%d), extra downsample x%.2f (voxel=%.3f)",
+                     len(target_preprocessed.points), factor, new_voxel)
+        target_preprocessed = target_preprocessed.voxel_down_sample(new_voxel)
+        target_preprocessed.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=new_voxel * 2, max_nn=30))
 
     if len(source_preprocessed.points) == 0 or len(target_preprocessed.points) == 0:
         logging.error("Preprocessed point cloud is empty, calibration failed.")
         return None, None, None
 
-    logging.info("--- Step 2: FPFH Feature Extraction ---")
-    source_fpfh = compute_fpfh_features(source_preprocessed, preprocessing_params['voxel_size'])
-    target_fpfh = compute_fpfh_features(target_preprocessed, preprocessing_params['voxel_size'])
+    # Prepare coarse-level downsampling for faster feature matching
+    coarse_voxel = max(preprocessing_params['voxel_size'] * coarse_voxel_factor, preprocessing_params['voxel_size'])
+    source_coarse = source_preprocessed.voxel_down_sample(coarse_voxel)
+    target_coarse = target_preprocessed.voxel_down_sample(coarse_voxel)
+    source_coarse.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=coarse_voxel * 2, max_nn=30))
+    target_coarse.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=coarse_voxel * 2, max_nn=30))
 
-    logging.info("--- Step 3: Coarse Registration (FPFH + RANSAC) ---")
-    initial_guess = perform_coarse_registration(
-        source_preprocessed, target_preprocessed, source_fpfh, target_fpfh, preprocessing_params['voxel_size'])
-    initial_guess_transform = initial_guess.transformation
+    # If an initial transform is provided, try skipping coarse matching first.
+    initial_guess = None
+    initial_guess_transform = None
 
-    logging.info("\n--- Coarse Calibration Metrics ---")
-    logging.info("Coarse registration matched points: %d", len(initial_guess.correspondence_set))
-    logging.info("  - Fitness (overlap): %.4f", initial_guess.fitness)
-    logging.info("  - Inlier RMSE: %.4f", initial_guess.inlier_rmse)
-    logging.info("  - Transformation Matrix:\n%s", initial_guess_transform)
+    def pick_coarse_method():
+        if coarse_method == "auto":
+            # Heuristic: prefer 'fast' for larger clouds
+            return "fast" if (len(source_coarse.points) + len(target_coarse.points)) > 8000 else "ransac"
+        return coarse_method
 
-    quat, trans = matrix_to_quaternion_and_translation(initial_guess_transform)
-    logging.info("  - Rotation (quaternion wxyz): %s", quat)
-    logging.info("  - Translation (xyz): %s", trans)
+    if initial_transform is None:
+        logging.info("--- Step 2: FPFH Feature Extraction (coarse) ---")
+        source_fpfh = compute_fpfh_features(source_coarse, coarse_voxel)
+        target_fpfh = compute_fpfh_features(target_coarse, coarse_voxel)
 
-    if not np.isfinite(initial_guess_transform).all():
-        logging.error("Coarse registration failed, invalid initial transformation matrix.")
-        return None, None, None
+        logging.info("--- Step 3: Coarse Registration ---")
+        initial_guess = perform_coarse_registration(
+            source_coarse, target_coarse, source_fpfh, target_fpfh, coarse_voxel, method=pick_coarse_method())
+        initial_guess_transform = initial_guess.transformation
 
-    logging.info("--- Step 4: Fine Registration (Iterative GICP) ---")
+        logging.info("\n--- Coarse Calibration Metrics ---")
+        logging.info("Coarse registration matched points: %d", len(initial_guess.correspondence_set))
+        logging.info("  - Fitness (overlap): %.4f", initial_guess.fitness)
+        logging.info("  - Inlier RMSE: %.4f", initial_guess.inlier_rmse)
+        logging.info("  - Transformation Matrix:\n%s", initial_guess_transform)
+
+        if not np.isfinite(initial_guess_transform).all():
+            logging.error("Coarse registration failed, invalid initial transformation matrix.")
+            return None, None, None
+    else:
+        initial_guess_transform = initial_transform
+        logging.info("--- Skipping coarse registration (using provided initial transform) ---")
+
+    logging.info("--- Step 4: Fine Registration (ICP/GICP) ---")
     registration_result = perform_icp_registration(
         source_preprocessed, target_preprocessed, initial_guess_transform, icp_params, method)
     final_extrinsic_transform = registration_result.transformation
@@ -361,6 +433,27 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
     quat_final, trans_final = matrix_to_quaternion_and_translation(final_extrinsic_transform)
     logging.info("  - Rotation (quaternion wxyz): %s", quat_final)
     logging.info("  - Translation (xyz): %s", trans_final)
+
+    # Quality gate and optional fallback when using an initial guess
+    def _transform_ok(mat: np.ndarray) -> bool:
+        Rm = mat[:3, :3]
+        t = mat[:3, 3]
+        # rotation delta in deg from trace
+        angle = np.degrees(np.arccos(max(-1.0, min(1.0, (np.trace(Rm) - 1.0) / 2.0))))
+        return (np.linalg.norm(t) <= quality_gate['max_translation'] and angle <= quality_gate['max_rotation_deg'])
+
+    if (registration_result.fitness < quality_gate['min_fitness'] or
+        registration_result.inlier_rmse > quality_gate['max_rmse'] or
+        not _transform_ok(final_extrinsic_transform)) and initial_transform is not None:
+        logging.warning("Quality gate failed with initial guess; falling back to coarse matching...")
+        # Run a one-shot coarse + fine on coarse clouds to recover
+        source_fpfh = compute_fpfh_features(source_coarse, coarse_voxel)
+        target_fpfh = compute_fpfh_features(target_coarse, coarse_voxel)
+        coarse_result = perform_coarse_registration(
+            source_coarse, target_coarse, source_fpfh, target_fpfh, coarse_voxel, method=pick_coarse_method())
+        registration_result = perform_icp_registration(
+            source_preprocessed, target_preprocessed, coarse_result.transformation, icp_params, method)
+        final_extrinsic_transform = registration_result.transformation
 
     if is_draw_registration:
         logging.info("Visualizing coarse registration...")

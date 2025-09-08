@@ -1,5 +1,8 @@
 # Prerequisites
 *.d
+*.pyc
+recorded_frames
+__pycache__
 
 # Compiled Object files
 *.slo
