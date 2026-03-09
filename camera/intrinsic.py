@@ -78,6 +78,12 @@ class CameraCalibrator:
             print("[ERROR] Cannot open camera index", self.cfg["camera_index"])
             return
 
+        # Try to request the display resolution from the camera (may be ignored by some drivers)
+        req_w = int(self.cfg.get("window_width", 1280))
+        req_h = int(self.cfg.get("window_height", 720))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, req_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, req_h)
+
         # Force window size
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(
@@ -97,6 +103,13 @@ class CameraCalibrator:
 
             if h is None:
                 h, w = frame.shape[:2]
+                # Log the actual captured frame size (helps debug capture vs window size)
+                print("[DEBUG] first captured frame.shape:", frame.shape)
+                print(
+                    "[DEBUG] cap reported (w,h):",
+                    int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                )
                 grid_overlay = self._generate_grid_overlay(w, h)
 
             display = frame.copy()
@@ -138,7 +151,25 @@ class CameraCalibrator:
                     display, "R: Restart | V: Validate | ESC: Exit", (50, h - 40)
                 )
 
-            cv2.imshow(self.window_name, display)
+            # Render to window: preserve aspect ratio and center-pad to avoid distortion
+            win_w = int(self.cfg.get("window_width", 1280))
+            win_h = int(self.cfg.get("window_height", 720))
+
+            src_h, src_w = display.shape[:2]
+            if src_w == 0 or src_h == 0:
+                # fallback
+                render_frame = display
+            else:
+                scale = min(win_w / src_w, win_h / src_h)
+                nw, nh = max(1, int(src_w * scale)), max(1, int(src_h * scale))
+                resized = cv2.resize(display, (nw, nh))
+                canvas = np.zeros((win_h, win_w, 3), dtype=np.uint8)
+                x0 = (win_w - nw) // 2
+                y0 = (win_h - nh) // 2
+                canvas[y0 : y0 + nh, x0 : x0 + nw] = resized
+                render_frame = canvas
+
+            cv2.imshow(self.window_name, render_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
