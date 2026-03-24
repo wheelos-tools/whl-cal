@@ -59,19 +59,35 @@ def draw_registration_result(source: o3d.geometry.PointCloud,
     if (registration_result is not None and
             hasattr(registration_result, 'correspondence_set') and
             len(registration_result.correspondence_set) > 0):
-        corr = np.asarray(registration_result.correspondence_set)
-        matched_source_points = np.asarray(source.points)[corr[:, 0]]
-        matched_target_points = np.asarray(target.points)[corr[:, 1]]
+        corr = np.asarray(registration_result.correspondence_set, dtype=int)
+        source_points = np.asarray(source.points)
+        target_points = np.asarray(target.points)
+        valid_mask = (
+            (corr[:, 0] >= 0) & (corr[:, 0] < len(source_points)) &
+            (corr[:, 1] >= 0) & (corr[:, 1] < len(target_points))
+        )
 
-        matched_source_points_h = np.hstack(
-            (matched_source_points, np.ones((matched_source_points.shape[0], 1))))
-        matched_source_points_trans = (transformation @ matched_source_points_h.T).T[:, :3]
+        if not valid_mask.all():
+            invalid_count = int((~valid_mask).sum())
+            logging.warning(
+                "Skipping %d out-of-range correspondences during visualization.",
+                invalid_count,
+            )
+            corr = corr[valid_mask]
 
-        line_points = np.vstack((matched_source_points_trans, matched_target_points))
-        line_indices = [[i, i + len(matched_source_points_trans)]
-                        for i in range(len(matched_source_points_trans))]
+        if len(corr) > 0:
+            matched_source_points = source_points[corr[:, 0]]
+            matched_target_points = target_points[corr[:, 1]]
 
-    elif registration_result is not None:
+            matched_source_points_h = np.hstack(
+                (matched_source_points, np.ones((matched_source_points.shape[0], 1))))
+            matched_source_points_trans = (transformation @ matched_source_points_h.T).T[:, :3]
+
+            line_points = np.vstack((matched_source_points_trans, matched_target_points))
+            line_indices = [[i, i + len(matched_source_points_trans)]
+                            for i in range(len(matched_source_points_trans))]
+
+    if registration_result is not None and len(line_indices) == 0:
         target_points = np.asarray(target_temp.points)
         source_points = np.asarray(source_temp.points)
         tree = o3d.geometry.KDTreeFlann(target_temp)
@@ -102,7 +118,9 @@ def preprocess_point_cloud(pcd: o3d.geometry.PointCloud,
                            std_ratio: float = 2.0,
                            plane_dist_thresh: float = 0.05,
                            height_range: float | None = None,
+                           remove_ground: bool = False,
                            remove_walls: bool = False,
+                           ground_normal_threshold: float = 0.9,
                            wall_angle_threshold: float = 0.1,
                            max_wall_planes: int = 2) -> o3d.geometry.PointCloud:
     """Preprocess point cloud (downsample, denoise, remove ground/walls).
@@ -114,7 +132,9 @@ def preprocess_point_cloud(pcd: o3d.geometry.PointCloud,
         std_ratio (float): Standard deviation ratio for outlier removal.
         plane_dist_thresh (float): Distance threshold for plane segmentation.
         height_range (float | None): Max height to keep points.
+        remove_ground (bool): Whether to remove the ground plane.
         remove_walls (bool): Whether to remove vertical walls.
+        ground_normal_threshold (float): Threshold for ground plane detection.
         wall_angle_threshold (float): Threshold for wall detection.
         max_wall_planes (int): Maximum number of wall planes to remove.
 
@@ -142,12 +162,19 @@ def preprocess_point_cloud(pcd: o3d.geometry.PointCloud,
     pcd_filtered = pcd_down.select_by_index(ind)
     logging.info("     After outlier removal: %d points", len(pcd_filtered.points))
 
-    logging.info("  -> Removing ground points...")
-    plane_model, inliers = pcd_filtered.segment_plane(distance_threshold=plane_dist_thresh,
-                                                      ransac_n=3,
-                                                      num_iterations=1000)
-    pcd_no_ground = pcd_filtered.select_by_index(inliers, invert=True)
-    logging.info("     After ground removal: %d points", len(pcd_no_ground.points))
+    pcd_no_ground = pcd_filtered
+    if remove_ground:
+        logging.info("  -> Removing ground points...")
+        plane_model, inliers = pcd_filtered.segment_plane(distance_threshold=plane_dist_thresh,
+                                                          ransac_n=3,
+                                                          num_iterations=1000)
+        a, b, c, _ = plane_model
+        normal = np.array([a, b, c]) / np.linalg.norm([a, b, c])
+        if abs(normal[2]) >= ground_normal_threshold:
+            pcd_no_ground = pcd_filtered.select_by_index(inliers, invert=True)
+            logging.info("     After ground removal: %d points", len(pcd_no_ground.points))
+        else:
+            logging.info("     Skipped ground removal: dominant plane is not ground-like")
 
     if height_range is not None:
         points = np.asarray(pcd_no_ground.points)
@@ -225,7 +252,8 @@ def perform_coarse_registration(source_pcd, target_pcd, source_fpfh, target_fpfh
 def perform_icp_registration(source_pcd,
                              target_pcd,
                              initial_transform: np.ndarray,
-                             icp_params: dict,
+                             max_correspondence_distance: float,
+                             max_iteration: int,
                              method: int):
     """Perform iterative ICP fine registration.
        Parameters should be tuned according to the specific case.
@@ -234,47 +262,96 @@ def perform_icp_registration(source_pcd,
         source_pcd (o3d.geometry.PointCloud): Source point cloud.
         target_pcd (o3d.geometry.PointCloud): Target point cloud.
         initial_transform (np.ndarray): Initial transformation matrix.
-        icp_params (dict): ICP parameters.
+        max_correspondence_distance (float): ICP correspondence threshold.
+        max_iteration (int): Maximum ICP iterations.
 
     Returns:
         o3d.pipelines.registration.RegistrationResult: Final ICP registration result.
     """
+    criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
+        relative_fitness=1e-7,
+        relative_rmse=1e-7,
+        max_iteration=max_iteration)
+    if method == 1:
+        logging.info("  -> Using point-to-plane ICP")
+        return o3d.pipelines.registration.registration_icp(
+            source_pcd, target_pcd, max_correspondence_distance, initial_transform,
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+            criteria)
+    if method == 2:
+        logging.info("  -> Using GICP")
+        return o3d.pipelines.registration.registration_generalized_icp(
+            source_pcd, target_pcd, max_correspondence_distance, initial_transform,
+            o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
+            criteria)
+    logging.info("  -> Using point-to-point ICP")
+    return o3d.pipelines.registration.registration_icp(
+        source_pcd, target_pcd, max_correspondence_distance, initial_transform,
+        o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+        criteria)
+
+
+def build_refinement_stage_voxels(base_voxel_size: float) -> list[float]:
+    """Build voxel sizes for multi-stage refinement from coarse to fine."""
+    stage_voxels = []
+    for scale in (1.0, 0.5, 0.25):
+        voxel_size = max(base_voxel_size * scale, 0.01)
+        voxel_size = round(voxel_size, 6)
+        if voxel_size not in stage_voxels:
+            stage_voxels.append(voxel_size)
+    return stage_voxels
+
+
+def perform_multistage_refinement(source_cloud: o3d.geometry.PointCloud,
+                                  target_cloud: o3d.geometry.PointCloud,
+                                  initial_transform: np.ndarray,
+                                  preprocessing_params: dict,
+                                  method: int):
+    """Refine the extrinsic transform with a voxel pyramid."""
     current_transform = initial_transform
     final_result = None
-    for i, max_corr_dist in enumerate(icp_params['max_correspondence_distances']):
-        logging.info("  -> Iteration %d: Max correspondence distance %.3f m", i + 1, max_corr_dist)
-        criteria = o3d.pipelines.registration.ICPConvergenceCriteria(
-            relative_fitness=icp_params['relative_fitness'],
-            relative_rmse=icp_params['relative_rmse'],
-            max_iteration=icp_params['max_iterations'][i])
-        if method == 1:
-            logging.info("  -> Using point-to-plane ICP")
-            result = o3d.pipelines.registration.registration_icp(
-                source_pcd, target_pcd, max_corr_dist, current_transform,
-                o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-                criteria)
-        elif method == 2:
-            logging.info("  -> Using GICP")
-            result = o3d.pipelines.registration.registration_generalized_icp(
-                 source_pcd, target_pcd, max_corr_dist, current_transform,
-                 o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
-                 criteria)
-        elif method == 3:
-            logging.info("  -> Using point-to-point ICP")
-            result = o3d.pipelines.registration.registration_icp(
-                source_pcd, target_pcd, max_corr_dist, current_transform,
-                o3d.pipelines.registration.TransformationEstimationPointToPoint(),
-                criteria)
+    final_source_stage = None
+    final_target_stage = None
+    stage_voxels = build_refinement_stage_voxels(preprocessing_params['voxel_size'])
+
+    for stage_index, voxel_size in enumerate(stage_voxels, start=1):
+        logging.info("--- Refinement Stage %d/%d: voxel size %.3f m ---",
+                     stage_index, len(stage_voxels), voxel_size)
+        stage_params = dict(preprocessing_params)
+        stage_params['voxel_size'] = voxel_size
+        source_stage = preprocess_point_cloud(source_cloud, **stage_params)
+        target_stage = preprocess_point_cloud(target_cloud, **stage_params)
+
+        if len(source_stage.points) == 0 or len(target_stage.points) == 0:
+            logging.error("Refinement stage %d produced an empty point cloud.", stage_index)
+            return None, None, None
+
+        max_correspondence_distance = max(voxel_size * 5, 0.02)
+        max_iteration = 120 if stage_index == 1 else 80
+        logging.info("  -> Max correspondence distance %.3f m", max_correspondence_distance)
+
+        result = perform_icp_registration(
+            source_stage,
+            target_stage,
+            current_transform,
+            max_correspondence_distance,
+            max_iteration,
+            method,
+        )
         current_transform = result.transformation
         final_result = result
-    return final_result
+        final_source_stage = source_stage
+        final_target_stage = target_stage
+
+    return final_result, final_source_stage, final_target_stage
 
 
 def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
                               target_cloud: o3d.geometry.PointCloud,
                               is_draw_registration: bool = False,
                               preprocessing_params: dict = None,
-                              method: int = 1):
+                              method: int = 1,
+                              initial_transform: np.ndarray | None = None):
     """Calibrate lidar extrinsic parameters using point cloud registration.
 
     Args:
@@ -295,14 +372,16 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
             'std_ratio': 2.0,
             'plane_dist_thresh': 0.05,
             'height_range': None,
-            'remove_walls': True
+            'remove_ground': False,
+            'remove_walls': False
         }
-    icp_params = {
-        'max_correspondence_distances': [1.0, 0.5, 0.1, 0.05, 0.02],
-        'max_iterations': [50, 100, 100, 200, 200],
-        'relative_fitness': 1e-7,
-        'relative_rmse': 1e-7
-    }
+    else:
+        preprocessing_params = dict(preprocessing_params)
+        preprocessing_params.setdefault('remove_ground', False)
+        preprocessing_params.setdefault('remove_walls', False)
+        preprocessing_params.setdefault('ground_normal_threshold', 0.9)
+        preprocessing_params.setdefault('wall_angle_threshold', 0.1)
+        preprocessing_params.setdefault('max_wall_planes', 2)
 
     logging.info("--- Step 1: Point Cloud Preprocessing ---")
     source_preprocessed = preprocess_point_cloud(source_cloud, **preprocessing_params)
@@ -312,32 +391,43 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
         logging.error("Preprocessed point cloud is empty, calibration failed.")
         return None, None, None
 
-    logging.info("--- Step 2: FPFH Feature Extraction ---")
-    source_fpfh = compute_fpfh_features(source_preprocessed, preprocessing_params['voxel_size'])
-    target_fpfh = compute_fpfh_features(target_preprocessed, preprocessing_params['voxel_size'])
+    initial_guess = None
+    if initial_transform is None:
+        logging.info("--- Step 2: FPFH Feature Extraction ---")
+        source_fpfh = compute_fpfh_features(source_preprocessed, preprocessing_params['voxel_size'])
+        target_fpfh = compute_fpfh_features(target_preprocessed, preprocessing_params['voxel_size'])
+        logging.info("--- Step 3: Coarse Registration (FPFH + RANSAC) ---")
+        initial_guess = perform_coarse_registration(
+            source_preprocessed, target_preprocessed, source_fpfh, target_fpfh, preprocessing_params['voxel_size'])
+        initial_guess_transform = initial_guess.transformation
 
-    logging.info("--- Step 3: Coarse Registration (FPFH + RANSAC) ---")
-    initial_guess = perform_coarse_registration(
-        source_preprocessed, target_preprocessed, source_fpfh, target_fpfh, preprocessing_params['voxel_size'])
-    initial_guess_transform = initial_guess.transformation
+        logging.info("\n--- Coarse Calibration Metrics ---")
+        logging.info("Coarse registration matched points: %d", len(initial_guess.correspondence_set))
+        logging.info("  - Fitness (overlap): %.4f", initial_guess.fitness)
+        logging.info("  - Inlier RMSE: %.4f", initial_guess.inlier_rmse)
+        logging.info("  - Transformation Matrix:\n%s", initial_guess_transform)
 
-    logging.info("\n--- Coarse Calibration Metrics ---")
-    logging.info("Coarse registration matched points: %d", len(initial_guess.correspondence_set))
-    logging.info("  - Fitness (overlap): %.4f", initial_guess.fitness)
-    logging.info("  - Inlier RMSE: %.4f", initial_guess.inlier_rmse)
-    logging.info("  - Transformation Matrix:\n%s", initial_guess_transform)
-
-    quat, trans = matrix_to_quaternion_and_translation(initial_guess_transform)
-    logging.info("  - Rotation (quaternion wxyz): %s", quat)
-    logging.info("  - Translation (xyz): %s", trans)
+        quat, trans = matrix_to_quaternion_and_translation(initial_guess_transform)
+        logging.info("  - Rotation (quaternion wxyz): %s", quat)
+        logging.info("  - Translation (xyz): %s", trans)
+    else:
+        logging.info("--- Step 2: Skipping FPFH Feature Extraction ---")
+        logging.info("--- Step 3: Using Provided Initial Transform ---")
+        initial_guess_transform = np.asarray(initial_transform, dtype=float)
+        logging.info("  - Initial transformation matrix:\n%s", initial_guess_transform)
+        quat, trans = matrix_to_quaternion_and_translation(initial_guess_transform)
+        logging.info("  - Rotation (quaternion wxyz): %s", quat)
+        logging.info("  - Translation (xyz): %s", trans)
 
     if not np.isfinite(initial_guess_transform).all():
         logging.error("Coarse registration failed, invalid initial transformation matrix.")
         return None, None, None
 
-    logging.info("--- Step 4: Fine Registration (Iterative GICP) ---")
-    registration_result = perform_icp_registration(
-        source_preprocessed, target_preprocessed, initial_guess_transform, icp_params, method)
+    logging.info("--- Step 4: Fine Registration (Multi-stage Refinement) ---")
+    registration_result, source_final_stage, target_final_stage = perform_multistage_refinement(
+        source_cloud, target_cloud, initial_guess_transform, preprocessing_params, method)
+    if registration_result is None:
+        return None, initial_guess_transform, None
     final_extrinsic_transform = registration_result.transformation
 
     if not np.isfinite(final_extrinsic_transform).all():
@@ -345,12 +435,18 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
         return None, initial_guess_transform, registration_result
 
     logging.info("\n--- Final Calibration Metrics ---")
-    source_points = np.asarray(source_preprocessed.points)
-    target_points = np.asarray(target_preprocessed.points)
-    tree = o3d.geometry.KDTreeFlann(target_preprocessed)
+    eval_params = dict(preprocessing_params)
+    eval_params['voxel_size'] = build_refinement_stage_voxels(preprocessing_params['voxel_size'])[-1]
+    source_eval = preprocess_point_cloud(source_cloud, **eval_params)
+    target_eval = preprocess_point_cloud(target_cloud, **eval_params)
+    source_points = np.asarray(source_eval.points)
+    target_points = np.asarray(target_eval.points)
+    source_points_h = np.hstack((source_points, np.ones((source_points.shape[0], 1))))
+    source_points_transformed = (final_extrinsic_transform @ source_points_h.T).T[:, :3]
+    tree = o3d.geometry.KDTreeFlann(target_eval)
     max_icp_corr_dist = 0.4
     matched_count = sum(
-        1 for p in source_points
+        1 for p in source_points_transformed
         if tree.search_knn_vector_3d(p, 1)[0] > 0 and
         np.linalg.norm(p - target_points[tree.search_knn_vector_3d(p, 1)[1][0]]) < max_icp_corr_dist)
     logging.info("Fine registration matched points (within %.2f m): %d", max_icp_corr_dist, matched_count)
@@ -363,14 +459,16 @@ def calibrate_lidar_extrinsic(source_cloud: o3d.geometry.PointCloud,
     logging.info("  - Translation (xyz): %s", trans_final)
 
     if is_draw_registration:
-        logging.info("Visualizing coarse registration...")
-        draw_registration_result(source_preprocessed, target_preprocessed,
-                                 initial_guess_transform, window_name="Coarse Registration",
-                                 registration_result=initial_guess)
+        if initial_guess is not None:
+            logging.info("Visualizing coarse registration...")
+            draw_registration_result(source_preprocessed, target_preprocessed,
+                                     initial_guess_transform, window_name="Coarse Registration",
+                                     registration_result=initial_guess)
         logging.info("Visualizing fine registration...")
-        draw_registration_result(source_preprocessed, target_preprocessed,
+        draw_registration_result(source_final_stage, target_final_stage,
                                  final_extrinsic_transform, window_name="Fine Registration",
                                  registration_result=registration_result,
                                  max_icp_corr_dist=max_icp_corr_dist)
 
     return final_extrinsic_transform, initial_guess_transform, registration_result
+

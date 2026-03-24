@@ -20,7 +20,8 @@ dependencies = [
   "numpy",
   "pandas",
   "open3d",
-  "scipy"
+  "scipy",
+  "pyyaml"
 ]
 
 [project.urls]

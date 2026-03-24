@@ -1,10 +1,10 @@
 # Requirement
 
-Register LiDAR point cloud data to obtain the extrinsic matrix.  
+Register LiDAR point cloud data to obtain the extrinsic matrix.
 
 # Quick Start
 
-Repository: https://github.com/wheelos-tools/whl-cal  
+Repository: https://github.com/wheelos-tools/whl-cal
 
 ## Install dependencies
 
@@ -16,13 +16,15 @@ pip install -e .
 
 Run command:
 
-python3 cli.py --source-pcd your_source_pcd --target-pcd your_target_pcd [--output-json PATH] [--visualize][--voxel-size FLOAT][--max-height FLOAT][--method INT]
+python3 cli.py --source-pcd your_source_pcd --target-pcd your_target_pcd [--output-transform PATH] [--visualize] [--voxel-size FLOAT] [--max-height FLOAT] [--method INT] [--initial-transform PATH]
 
 Note: [ ] means optional parameters
 
 - --source-pcd: source point cloud file path
 - --target-pcd: target point cloud file path
-- --output-json: output result JSON file path, default is calibration_result.json in the current directory
+- --output-transform: output result file path, supports JSON and YAML, default is calibration_result.json in the current directory
+- --output-json: backward-compatible alias of --output-transform, also accepts .yaml/.yml paths
+- --output-yaml: save the result as YAML
 - --visualize: visualize the registration result
   - Green: source point cloud after registration
   - Blue: target point cloud
@@ -33,6 +35,63 @@ Note: [ ] means optional parameters
   - 1: point to plane
   - 2: GICP
   - 3: point to point
+- --initial-transform: initial transform file path, supports JSON 4x4 matrices and YAML files like lidar2lidar/tf_init.yaml
+- --initial-transform-json: backward-compatible alias of --initial-transform
+- --initial-transform-yaml: explicit YAML alias of --initial-transform
+
+YAML initial transform example:
+```yaml
+transform:
+  translation:
+    x: -0.1941689746184177
+    y: 1.438544324620427
+    z: 0
+  rotation:
+    x: -0.00971305
+    y: 0.00327669
+    z: 0.7157
+    w: 0.698332
+```
+
+Recommended starting point:
+```bash
+python3 lidar2lidar/cli.py \
+  --source-pcd source.pcd \
+  --target-pcd target.pcd \
+  --initial-transform lidar2lidar/tf_init.yaml \
+  --output-transform calibration_result.yaml \
+  --voxel-size 0.04 \
+  --method 2 \
+  --visualize
+```
+
+For scenes with large walls or when GICP does not align well, also try:
+```bash
+python3 lidar2lidar/cli.py \
+  --source-pcd source.pcd \
+  --target-pcd target.pcd \
+  --initial-transform lidar2lidar/tf_init.yaml \
+  --output-transform calibration_result.yaml \
+  --voxel-size 0.04 \
+  --method 3 \
+  --visualize
+```
+
+How to choose a method:
+- Start with `--voxel-size 0.04`. In many cases it is more stable than `0.02`. Use `0.02` only as a later refinement attempt, not the default full pipeline setting.
+- If you already have a reasonable initial extrinsic, pass it with `--initial-transform`. This usually makes the result more stable than relying only on FPFH + RANSAC.
+- `--method 2` (GICP): try this first when the scene has rich 3D structure and the local geometry is reliable.
+- `--method 3` (point-to-point): prefer this when the scene is wall-dominant, when the two LiDARs have noticeably different density, or when GICP leaves visible wall misalignment.
+- `--method 1` (point-to-plane): use as an additional fallback when `2` and `3` are both unsatisfactory.
+- Use `--remove-ground` only when the ground plane is strong and not the main constraint you need for alignment.
+- Do not enable `--remove-walls` if walls are the main structures you want to align.
+
+How to choose the best result:
+- Keep `source-pcd`, `target-pcd`, `initial-transform`, `voxel-size`, and filtering options fixed, then compare only the registration method.
+- Run at least `--method 2` and `--method 3`. If the results are close, repeat each method 2-3 times because preprocessing and RANSAC can introduce run-to-run variation.
+- First check the visualization. If walls, corners, poles, or other rigid structures are visibly misaligned, do not trust the metric alone.
+- Then compare `fitness` and `inlier_rmse`. Higher `fitness` and lower `inlier_rmse` are better only when the point clouds are also visually aligned.
+- Prefer the method whose extrinsic is stable across repeated runs. A slightly lower metric with stable output is usually better than a higher metric with several-centimeter drift.
 
 
 ### Result Example
@@ -71,7 +130,7 @@ Note: [ ] means optional parameters
 2025-09-05 16:34:18,215 - INFO -   -> Computing FPFH features...
 2025-09-05 16:34:18,249 - INFO - --- Step 3: Coarse Registration (FPFH + RANSAC) ---
 2025-09-05 16:34:18,249 - INFO -   -> Performing coarse registration (FPFH + RANSAC)...
-2025-09-05 16:34:25,886 - INFO - 
+2025-09-05 16:34:25,886 - INFO -
 --- Coarse Calibration Metrics ---
 2025-09-05 16:34:25,887 - INFO - Coarse registration matched points: 4503
 2025-09-05 16:34:25,887 - INFO -   - Fitness (overlap): 0.9364
@@ -94,7 +153,7 @@ Note: [ ] means optional parameters
 2025-09-05 16:34:26,056 - INFO -   -> Using point-to-plane ICP
 2025-09-05 16:34:26,113 - INFO -   -> Iteration 5: Max correspondence distance 0.020 m
 2025-09-05 16:34:26,113 - INFO -   -> Using point-to-plane ICP
-2025-09-05 16:34:26,270 - INFO - 
+2025-09-05 16:34:26,270 - INFO -
 --- Final Calibration Metrics ---
 2025-09-05 16:34:26,296 - INFO - Fine registration matched points (within 0.40 m): 1533
 2025-09-05 16:34:26,296 - INFO -   - Fitness (overlap): 0.1485
@@ -108,7 +167,7 @@ Note: [ ] means optional parameters
 2025-09-05 16:34:26,297 - INFO -   - Translation (xyz): [-0.11084946  0.56048105 -0.01395672]
 2025-09-05 16:34:26,297 - INFO - Visualizing coarse registration...
 2025-09-05 16:34:31,883 - INFO - Visualizing fine registration...
-2025-09-05 16:34:35,931 - INFO - 
+2025-09-05 16:34:35,931 - INFO -
 --- Final calibration result ---
 2025-09-05 16:34:35,932 - INFO - Computed final extrinsic matrix:
 [[ 0.29708  -0.954852 -0.00136  -0.110849]
@@ -123,7 +182,7 @@ Note: [ ] means optional parameters
 
 ### Explanation
 
-- Fitness: ratio of valid correspondences to source points  
-- Inlier RMSE: root mean square error of inlier correspondences (sensitive to threshold)  
-- Extrinsic matrix: the computed rigid transformation matrix (rotation + translation)  
+- Fitness: ratio of valid correspondences to source points
+- Inlier RMSE: root mean square error of inlier correspondences (sensitive to threshold)
+- Extrinsic matrix: the computed rigid transformation matrix (rotation + translation)
 
