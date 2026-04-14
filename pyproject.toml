@@ -17,9 +17,11 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = [
+  "click",
+  "cyber_record",
   "numpy",
-  "pandas",
   "open3d",
+  "record_msg",
   "scipy",
   "pyyaml"
 ]
@@ -31,6 +33,14 @@ BugTracker = "https://github.com/wheelos-tools/whl-cal/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 
+[tool.setuptools.package-data]
+lidar2lidar = ["conf/*.yaml", "conf/*.md"]
+
 [project.scripts]
+lidar2lidar-calibrate = "lidar2lidar.cli:main"
 lidar2lidartool = "lidar2lidar.cli:main"
+lidar2lidar-auto = "lidar2lidar.auto_calib:main"
+lidar2lidar-extract = "tools.lidar2lidar.extract_pcd:main"
+lidar2lidar-topics = "tools.lidar2lidar.list_topics:main"
+lidar2lidar-merge = "tools.lidar2lidar.merge_pcd:main"
 

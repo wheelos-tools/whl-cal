@@ -8,12 +8,13 @@ import sys
 import numpy as np
 import open3d as o3d
 import yaml
-from scipy.spatial.transform import Rotation as R
 
 try:
     from lidar2lidar import lidar2lidar as lc
+    from lidar2lidar.extrinsic_io import build_extrinsics_payload, load_extrinsics_file
 except ImportError:
     import lidar2lidar as lc
+    from extrinsic_io import build_extrinsics_payload, load_extrinsics_file
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -68,55 +69,18 @@ def detect_transform_format(path: str) -> str:
     sys.exit(1)
 
 
-def matrix_from_transform_dict(transform_dict: dict) -> np.ndarray:
-    """Build a 4x4 matrix from a translation + quaternion mapping."""
-    try:
-        translation = transform_dict["translation"]
-        rotation = transform_dict["rotation"]
-        tx = float(translation["x"])
-        ty = float(translation["y"])
-        tz = float(translation["z"])
-        qx = float(rotation["x"])
-        qy = float(rotation["y"])
-        qz = float(rotation["z"])
-        qw = float(rotation["w"])
-    except (KeyError, TypeError, ValueError) as exc:
-        logging.error("Invalid YAML transform structure: %s", exc)
-        sys.exit(1)
-
-    transform = np.eye(4, dtype=float)
-    transform[:3, :3] = R.from_quat([qx, qy, qz, qw]).as_matrix()
-    transform[:3, 3] = [tx, ty, tz]
-    return transform
-
-
-def parse_transform_payload(payload) -> np.ndarray:
-    """Parse a JSON/YAML payload into a 4x4 transform matrix."""
-    if isinstance(payload, dict):
-        if "extrinsic_matrix" in payload:
-            payload = payload["extrinsic_matrix"]
-        elif "transform" in payload:
-            return matrix_from_transform_dict(payload["transform"])
-        elif "translation" in payload and "rotation" in payload:
-            return matrix_from_transform_dict(payload)
-
-    try:
-        return np.array(payload, dtype=float)
-    except (TypeError, ValueError) as exc:
-        logging.error("Failed to parse transform matrix: %s", exc)
-        sys.exit(1)
-
-
 def load_initial_transform(path: str) -> np.ndarray:
-    """Load a 4x4 transform matrix from a JSON or YAML file."""
-    transform_format = detect_transform_format(path)
-    with open(path, "r", encoding="utf-8") as file:
-        if transform_format == "json":
-            payload = json.load(file)
-        else:
-            payload = yaml.safe_load(file)
+    """Load a 4x4 transform matrix from a JSON or YAML file.
 
-    transform = parse_transform_payload(payload)
+    YAML inputs may use either the legacy compact transform form or the
+    standardized extrinsics schema under `lidar2lidar/conf/`.
+    """
+    try:
+        transform, _, _, _, _ = load_extrinsics_file(path)
+    except Exception as exc:
+        logging.error("Failed to load initial transform from %s: %s", path, exc)
+        sys.exit(1)
+
     if transform.shape != (4, 4):
         logging.error("Initial transform must be a 4x4 matrix, got %s", transform.shape)
         sys.exit(1)
@@ -126,32 +90,29 @@ def load_initial_transform(path: str) -> np.ndarray:
     return transform
 
 
-def build_yaml_result_payload(transformation: np.ndarray, fitness: float, inlier_rmse: float) -> dict:
-    """Build a YAML-friendly result payload with both pose and matrix forms."""
-    quat_wxyz, trans = lc.matrix_to_quaternion_and_translation(transformation)
-    return {
-        "transform": {
-            "translation": {
-                "x": float(trans[0]),
-                "y": float(trans[1]),
-                "z": float(trans[2]),
-            },
-            "rotation": {
-                "x": float(quat_wxyz[1]),
-                "y": float(quat_wxyz[2]),
-                "z": float(quat_wxyz[3]),
-                "w": float(quat_wxyz[0]),
-            },
-        },
-        "extrinsic_matrix": transformation.tolist(),
-        "metrics": {
+def build_yaml_result_payload(transformation: np.ndarray,
+                              fitness: float,
+                              inlier_rmse: float,
+                              source_frame: str,
+                              target_frame: str) -> dict:
+    """Build a YAML payload using the standardized extrinsics schema."""
+    return build_extrinsics_payload(
+        parent_frame=target_frame,
+        child_frame=source_frame,
+        matrix=transformation,
+        metrics={
             "fitness": float(fitness),
             "inlier_rmse": float(inlier_rmse),
         },
-    }
+    )
 
 
-def save_transform_result(path: str, transformation: np.ndarray, fitness: float, inlier_rmse: float) -> None:
+def save_transform_result(path: str,
+                          transformation: np.ndarray,
+                          fitness: float,
+                          inlier_rmse: float,
+                          source_frame: str,
+                          target_frame: str) -> None:
     """Save calibration results to JSON or YAML based on file extension."""
     transform_format = detect_transform_format(path)
 
@@ -165,7 +126,13 @@ def save_transform_result(path: str, transformation: np.ndarray, fitness: float,
             json.dump(payload, file, indent=4)
         return
 
-    payload = build_yaml_result_payload(transformation, fitness, inlier_rmse)
+    payload = build_yaml_result_payload(
+        transformation,
+        fitness,
+        inlier_rmse,
+        source_frame=source_frame,
+        target_frame=target_frame,
+    )
     with open(path, "w", encoding="utf-8") as file:
         yaml.safe_dump(payload, file, sort_keys=False)
 
@@ -266,21 +233,21 @@ def main() -> None:
         dest="initial_transform_path",
         type=str,
         default=None,
-        help="Path to an initial transform file. Supports JSON 4x4 matrices and YAML transforms.",
+        help="Path to an initial transform file. Supports JSON matrices and standardized YAML extrinsics files.",
     )
     initial_group.add_argument(
         "--initial-transform-yaml",
         dest="initial_transform_path",
         type=str,
         default=None,
-        help="Path to an initial transform YAML file with translation and quaternion fields.",
+        help="Path to an initial transform YAML file, preferably from lidar2lidar/conf/*.yaml.",
     )
     initial_group.add_argument(
         "--initial-transform",
         dest="initial_transform_path",
         type=str,
         default=None,
-        help="Path to an initial transform file. Supports .json, .yaml, and .yml.",
+        help="Path to an initial transform file. Prefer standardized YAML extrinsics files under lidar2lidar/conf/.",
     )
     args = parser.parse_args()
 
@@ -330,6 +297,8 @@ def main() -> None:
         final_extrinsic_transform,
         reg_result.fitness,
         reg_result.inlier_rmse,
+        source_frame=Path(args.source_pcd).stem,
+        target_frame=Path(args.target_pcd).stem,
     )
 
     logging.info("Final extrinsic matrix saved to %s", args.output_transform)

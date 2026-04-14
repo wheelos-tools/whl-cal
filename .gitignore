@@ -30,3 +30,9 @@
 *.exe
 *.out
 *.app
+
+.venv
+__pycache__/
+*.egg-info/
+outputs/
+lidar2lidar/output_pcds/
