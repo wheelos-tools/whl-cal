@@ -17,4 +17,10 @@
 # Created Date: 2026-02-09
 # Author: daohu527
 
-"""LiDAR-to-LiDAR operational helper scripts."""
+"""Core APIs for LiDAR-to-IMU calibration."""
+
+from lidar2imu.pipeline import run_calibration
+
+__all__ = [
+    "run_calibration",
+]

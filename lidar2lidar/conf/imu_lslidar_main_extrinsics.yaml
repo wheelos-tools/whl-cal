@@ -1,0 +1,20 @@
+header:
+  stamp:
+    secs: 1775121912
+    nsecs: 689624095
+  seq: 0
+  frame_id: imu
+transform:
+  translation:
+    x: 0.0
+    y: 1.05
+    z: 0.8
+  rotation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    w: 1.0
+child_frame_id: lslidar_main
+metadata:
+  source_topic: /tf_static
+  is_static: true

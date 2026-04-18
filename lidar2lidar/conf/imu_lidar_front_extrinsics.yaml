@@ -1,0 +1,19 @@
+header:
+  stamp:
+    secs: 0
+    nsecs: 0
+  seq: 0
+  frame_id: imu
+transform:
+  translation:
+    x: 0.0
+    y: 6.643
+    z: 0.806
+  rotation:
+    x: 0.0
+    y: 0.0
+    z: 0.7071
+    w: 0.7071
+child_frame_id: lidar_front
+metadata:
+  source: user_provided_initial_guess

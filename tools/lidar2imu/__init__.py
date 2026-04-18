@@ -17,4 +17,4 @@
 # Created Date: 2026-02-09
 # Author: daohu527
 
-"""LiDAR-to-LiDAR operational helper scripts."""
+"""LiDAR-to-IMU operational helper scripts."""

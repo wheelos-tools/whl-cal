@@ -1,0 +1,20 @@
+header:
+  stamp:
+    secs: 1775121912
+    nsecs: 689624095
+  seq: 0
+  frame_id: lslidar_main
+transform:
+  translation:
+    x: 0.72069698
+    y: 0.51930225
+    z: -1.10128831
+  rotation:
+    x: 0.0028087740502051955
+    y: -0.004213304688165618
+    z: -0.6811936299962634
+    w: 0.7320857854817654
+child_frame_id: lslidar_right
+metadata:
+  source_topic: /tf_static
+  is_static: true

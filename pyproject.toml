@@ -18,10 +18,10 @@ classifiers = [
 ]
 dependencies = [
   "click",
-  "cyber_record",
   "numpy",
   "open3d",
-  "record_msg",
+  "protobuf>=5.29,<6",
+  "pycyber",
   "scipy",
   "pyyaml"
 ]
@@ -40,7 +40,12 @@ lidar2lidar = ["conf/*.yaml", "conf/*.md"]
 lidar2lidar-calibrate = "lidar2lidar.cli:main"
 lidar2lidartool = "lidar2lidar.cli:main"
 lidar2lidar-auto = "lidar2lidar.auto_calib:main"
+lidar2lidar-scan2map = "lidar2lidar.scan2map_calib:main"
+lidar2lidar-scan2map-dataset = "lidar2lidar.scan2map_dataset:main"
+lidar2lidar-temporal = "lidar2lidar.temporal_calib:main"
+lidar2imu-calibrate = "lidar2imu.cli:main"
+lidar2imu-convert-record = "lidar2imu.record_converter:main"
+lidar2imu-tune-record = "tools.lidar2imu.tune_record:main"
 lidar2lidar-extract = "tools.lidar2lidar.extract_pcd:main"
 lidar2lidar-topics = "tools.lidar2lidar.list_topics:main"
 lidar2lidar-merge = "tools.lidar2lidar.merge_pcd:main"
-
