@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 The WheelOS Team. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Created Date: 2026-02-09
+# Author: daohu527
+
 """Extract PointCloud2 messages from Apollo record files into PCD files."""
 
 from __future__ import annotations
@@ -8,15 +26,15 @@ import os
 import sys
 
 import click
-from cyber_record.record import Record
-from record_msg.parser import PointCloudParser
+import open3d as o3d
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lidar2lidar.record_utils import discover_record_files
+from lidar2lidar.record_adapter import Record, ensure_record_available
+from lidar2lidar.record_utils import discover_record_files, pointcloud_message_to_open3d
 
 
 def should_extract_channel(channel: str, exact_topics: list[str], prefix_patterns: list[str]) -> bool:
@@ -62,13 +80,13 @@ def output_file_stem(channel: str, timestamp_ns: int) -> tuple[str, str]:
     help="Exact topic or topic-prefix ending with '/'. Repeat to extract multiple channels.",
 )
 def main(input_dir: str, output_dir: str, channels: tuple[str, ...]) -> None:
+    ensure_record_available()
     record_files = discover_record_files(input_dir)
     os.makedirs(output_dir, exist_ok=True)
 
     exact_topics = [channel for channel in channels if not channel.endswith("/")]
     prefix_patterns = [channel for channel in channels if channel.endswith("/")]
 
-    parser = PointCloudParser(output_dir, True, ".pcd")
     for record_file in record_files:
         with Record(record_file) as record:
             message_iter = record.read_messages(topics=tuple(exact_topics)) if not prefix_patterns else record.read_messages()
@@ -79,8 +97,12 @@ def main(input_dir: str, output_dir: str, channels: tuple[str, ...]) -> None:
                     continue
 
                 sensor_name, file_stem = output_file_stem(channel, timestamp_ns)
-                os.makedirs(os.path.join(output_dir, sensor_name), exist_ok=True)
-                parser.parse(message, file_name=f"{sensor_name}/{file_stem}", mode="ascii")
+                sensor_dir = os.path.join(output_dir, sensor_name)
+                os.makedirs(sensor_dir, exist_ok=True)
+                cloud = pointcloud_message_to_open3d(message)
+                output_path = os.path.join(sensor_dir, f"{file_stem}.pcd")
+                if not o3d.io.write_point_cloud(output_path, cloud, write_ascii=True):
+                    raise RuntimeError(f"Failed to write point cloud to {output_path}.")
 
 
 if __name__ == "__main__":

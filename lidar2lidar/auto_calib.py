@@ -1,7 +1,26 @@
 #!/usr/bin/env python3
+
+# Copyright 2026 The WheelOS Team. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Created Date: 2026-02-09
+# Author: daohu527
+
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -43,6 +62,31 @@ from lidar2lidar.record_utils import (
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+
+def summarize_values(values: list[float]) -> dict:
+    if not values:
+        return {
+            "count": 0,
+            "mean": None,
+            "median": None,
+            "std": None,
+            "p95": None,
+            "max": None,
+            "min": None,
+        }
+    array = np.asarray(values, dtype=float)
+    return {
+        "count": int(array.size),
+        "mean": float(np.mean(array)),
+        "median": float(np.median(array)),
+        "std": float(np.std(array)),
+        "p95": float(np.percentile(array, 95)),
+        "max": float(np.max(array)),
+        "min": float(np.min(array)),
+    }
+
+
 def topic_priority(topic: str) -> float:
     priority = 0.0
     lowered = topic.lower()
@@ -104,11 +148,104 @@ def choose_target_topic(topic_infos: dict[str, dict],
     return max(raw_candidates, key=lambda topic: scores[topic])
 
 
+def select_edges_for_target(topic_infos: dict[str, dict],
+                            candidate_pairs: list[dict],
+                            tf_graph: dict,
+                            target_topic: str,
+                            target_frame: str,
+                            source_topics: list[str] | None,
+                            min_overlap: float) -> tuple[list[dict], list[dict]]:
+    requested_sources = set(source_topics or [])
+    selected_edges = []
+    skipped_precheck = []
+    same_frame_target_topics = [
+        topic for topic, info in topic_infos.items()
+        if info["frame_id"] == target_frame
+    ]
+
+    for topic, info in topic_infos.items():
+        if topic == target_topic:
+            continue
+        if requested_sources and topic not in requested_sources:
+            continue
+        if info["frame_id"] == target_frame:
+            skipped_precheck.append({
+                "source_topic": topic,
+                "target_topic": target_topic,
+                "reason": "same_target_frame",
+            })
+            continue
+
+        initial_transform = lookup_transform(tf_graph, info["frame_id"], target_frame)
+        if initial_transform is None:
+            skipped_precheck.append({
+                "source_topic": topic,
+                "target_topic": target_topic,
+                "reason": "no_tf_path",
+            })
+            continue
+
+        proxy_candidates = [
+            pair for pair in candidate_pairs
+            if topic in {pair["topic_a"], pair["topic_b"]}
+            and ({pair["topic_a"], pair["topic_b"]} & set(same_frame_target_topics))
+        ]
+        proxy_candidates = [
+            pair for pair in proxy_candidates
+            if pair["overlap_ratio"] is not None
+        ]
+        if not proxy_candidates:
+            skipped_precheck.append({
+                "source_topic": topic,
+                "target_topic": target_topic,
+                "reason": "no_overlap_probe",
+            })
+            continue
+
+        pair_match = max(proxy_candidates, key=lambda pair: pair["overlap_ratio"])
+        registration_target_topic = (
+            pair_match["topic_b"] if pair_match["topic_a"] == topic else pair_match["topic_a"]
+        )
+
+        if pair_match["overlap_ratio"] < min_overlap:
+            skipped_precheck.append({
+                "source_topic": topic,
+                "target_topic": target_topic,
+                "registration_target_topic": registration_target_topic,
+                "reason": "low_overlap",
+                "overlap_ratio": float(pair_match["overlap_ratio"]),
+            })
+            continue
+
+        selected_edges.append({
+            "source_topic": topic,
+            "target_topic": target_topic,
+            "registration_target_topic": registration_target_topic,
+            "source_frame": info["frame_id"],
+            "target_frame": target_frame,
+            "overlap_ratio": float(pair_match["overlap_ratio"]),
+            "sync_dt_ms": pair_match["sync_dt_ms"],
+            "initial_transform": initial_transform.tolist(),
+        })
+
+    return selected_edges, skipped_precheck
+
+
+def load_cached_cloud(meta, cloud_cache: dict) -> o3d.geometry.PointCloud:
+    key = (meta.topic, int(meta.timestamp_ns))
+    if key not in cloud_cache:
+        cloud_cache[key] = load_pointcloud_from_meta(meta)
+    return cloud_cache[key]
+
+
 def build_candidate_pairs(topic_infos: dict[str, dict],
                           metadata_by_topic: dict,
                           tf_graph: dict,
                           sync_threshold_ns: int,
-                          overlap_voxel_size: float) -> list[dict]:
+                          overlap_voxel_size: float,
+                          cloud_cache: dict | None = None) -> list[dict]:
+    if cloud_cache is None:
+        cloud_cache = {}
     topics = list(topic_infos)
     candidate_pairs: list[dict] = []
 
@@ -158,8 +295,8 @@ def build_candidate_pairs(topic_infos: dict[str, dict],
                 continue
 
             source_meta, target_meta, delta_ns = matches[0]
-            source_cloud = load_pointcloud_from_meta(source_meta)
-            target_cloud = load_pointcloud_from_meta(target_meta)
+            source_cloud = load_cached_cloud(source_meta, cloud_cache)
+            target_cloud = load_cached_cloud(target_meta, cloud_cache)
             overlap_ratio = voxel_overlap_ratio(source_cloud, target_cloud, initial_transform, overlap_voxel_size)
 
             pair_record["overlap_ratio"] = float(overlap_ratio)
@@ -178,10 +315,15 @@ def build_candidate_pairs(topic_infos: dict[str, dict],
 
 
 def summarize_method_runs(method: int, runs: list[dict]) -> dict:
-    avg_fitness = float(np.mean([run["fitness"] for run in runs]))
-    avg_rmse = float(np.mean([run["inlier_rmse"] for run in runs]))
-    avg_delta_translation = float(np.mean([run["delta_to_initial"]["translation_norm_m"] for run in runs]))
-    avg_delta_rotation = float(np.mean([run["delta_to_initial"]["rotation_deg"] for run in runs]))
+    fitness_values = [run["fitness"] for run in runs]
+    rmse_values = [run["inlier_rmse"] for run in runs]
+    delta_translation_values = [run["delta_to_initial"]["translation_norm_m"] for run in runs]
+    delta_rotation_values = [run["delta_to_initial"]["rotation_deg"] for run in runs]
+    condition_number_values = [run["information_matrix"]["condition_number"] for run in runs]
+    avg_fitness = float(np.mean(fitness_values))
+    avg_rmse = float(np.mean(rmse_values))
+    avg_delta_translation = float(np.mean(delta_translation_values))
+    avg_delta_rotation = float(np.mean(delta_rotation_values))
     degenerate_runs = int(sum(1 for run in runs if run["information_matrix"]["degenerate"]))
     best_run = sorted(
         runs,
@@ -199,6 +341,11 @@ def summarize_method_runs(method: int, runs: list[dict]) -> dict:
         "avg_inlier_rmse": avg_rmse,
         "avg_delta_translation_m": avg_delta_translation,
         "avg_delta_rotation_deg": avg_delta_rotation,
+        "fitness_distribution": summarize_values(fitness_values),
+        "rmse_distribution": summarize_values(rmse_values),
+        "delta_translation_distribution_m": summarize_values(delta_translation_values),
+        "delta_rotation_distribution_deg": summarize_values(delta_rotation_values),
+        "condition_number_distribution": summarize_values(condition_number_values),
         "degenerate_runs": degenerate_runs,
         "best_run": best_run,
     }
@@ -218,6 +365,7 @@ def prepare_output_layout(output_dir: Path) -> tuple[Path, Path, Path]:
     for legacy_file in (
         output_dir / "manifest.yaml",
         output_dir / "topology.yaml",
+        output_dir / "extraction.yaml",
         output_dir / "tf_tree.yaml",
         output_dir / "calibration.yaml",
         output_dir / "merged_cloud.pcd",
@@ -228,6 +376,7 @@ def prepare_output_layout(output_dir: Path) -> tuple[Path, Path, Path]:
     for diagnostics_file in (
         diagnostics_dir / "manifest.yaml",
         diagnostics_dir / "topology.yaml",
+        diagnostics_dir / "extraction.yaml",
         diagnostics_dir / "tf_tree.yaml",
         diagnostics_dir / "calibration.yaml",
         diagnostics_dir / "merged_cloud.pcd",
@@ -263,7 +412,10 @@ def save_merged_cloud(output_path: Path,
                       metadata_by_topic: dict,
                       target_topic: str,
                       edge_results: list[dict],
-                      sync_threshold_ns: int) -> dict:
+                      sync_threshold_ns: int,
+                      cloud_cache: dict | None = None) -> dict:
+    if cloud_cache is None:
+        cloud_cache = {}
     reference_target_meta = pick_reference_target_meta(
         metadata_by_topic,
         target_topic,
@@ -273,7 +425,7 @@ def save_merged_cloud(output_path: Path,
     if reference_target_meta is None:
         return {"saved": False, "reason": "no_target_frame"}
 
-    merged_cloud = load_pointcloud_from_meta(reference_target_meta)
+    merged_cloud = copy.deepcopy(load_cached_cloud(reference_target_meta, cloud_cache))
     used_sources = []
     merge_sync_threshold_ns = max(sync_threshold_ns, int(50e6))
 
@@ -288,7 +440,7 @@ def save_merged_cloud(output_path: Path,
             continue
 
         source_meta, _, delta_ns = matches[0]
-        source_cloud = load_pointcloud_from_meta(source_meta)
+        source_cloud = copy.deepcopy(load_cached_cloud(source_meta, cloud_cache))
         source_cloud.transform(np.array(edge_result["best_run"]["transformation"], dtype=float))
         merged_cloud += source_cloud
         used_sources.append({
@@ -310,7 +462,10 @@ def save_merged_cloud(output_path: Path,
 def calibrate_selected_edges(selected_edges: list[dict],
                              metadata_by_topic: dict,
                              sync_threshold_ns: int,
-                             args) -> tuple[list[dict], list[dict]]:
+                             args,
+                             cloud_cache: dict | None = None) -> tuple[list[dict], list[dict]]:
+    if cloud_cache is None:
+        cloud_cache = {}
     edge_results: list[dict] = []
     skipped_edges: list[dict] = []
 
@@ -347,8 +502,8 @@ def calibrate_selected_edges(selected_edges: list[dict],
 
         method_runs: dict[int, list[dict]] = defaultdict(list)
         for source_meta, target_meta, delta_ns in matches:
-            source_cloud = load_pointcloud_from_meta(source_meta)
-            target_cloud = load_pointcloud_from_meta(target_meta)
+            source_cloud = load_cached_cloud(source_meta, cloud_cache)
+            target_cloud = load_cached_cloud(target_meta, cloud_cache)
             if len(source_cloud.points) == 0 or len(target_cloud.points) == 0:
                 continue
 
@@ -405,6 +560,22 @@ def calibrate_selected_edges(selected_edges: list[dict],
         )
         chosen_summary = method_summaries[0]
         chosen_run = chosen_summary["best_run"]
+        quality_gate_reasons = []
+        if chosen_run["information_matrix"]["degenerate"]:
+            quality_gate_reasons.append("degenerate_information_matrix")
+        if float(chosen_run["information_matrix"]["condition_number"]) > float(args.max_condition_number):
+            quality_gate_reasons.append("condition_number_above_threshold")
+        if float(chosen_run["fitness"]) < float(args.min_fitness):
+            quality_gate_reasons.append("fitness_below_threshold")
+        if quality_gate_reasons:
+            skipped_edges.append({
+                **edge,
+                "reason": "quality_gate_failed",
+                "quality_gate_reasons": quality_gate_reasons,
+                "candidate_best_run": chosen_run,
+                "candidate_method_summaries": method_summaries,
+            })
+            continue
         edge_results.append({
             **edge,
             "method_summaries": method_summaries,
@@ -414,6 +585,58 @@ def calibrate_selected_edges(selected_edges: list[dict],
 
     edge_results.sort(key=lambda item: (-item["best_run"]["fitness"], item["best_run"]["inlier_rmse"]))
     return edge_results, skipped_edges
+
+
+def build_extraction_output(record_files: list[str],
+                            conf_dir: str,
+                            topic_counts: dict[str, int],
+                            pointcloud_topics: list[str],
+                            topic_infos: dict[str, dict],
+                            record_tf_edges: list,
+                            conf_tf_edges: list,
+                            root_analysis: dict,
+                            candidate_pairs: list[dict],
+                            selected_edges: list[dict],
+                            skipped_precheck: list[dict]) -> dict:
+    overlap_values = [
+        float(pair["overlap_ratio"])
+        for pair in candidate_pairs
+        if pair.get("overlap_ratio") is not None
+    ]
+    sync_values = [
+        float(pair["sync_dt_ms"])
+        for pair in candidate_pairs
+        if pair.get("sync_dt_ms") is not None
+    ]
+    return {
+        "record_files": record_files,
+        "conf_dir": conf_dir,
+        "summary": {
+            "pointcloud_topic_count": len(pointcloud_topics),
+            "record_tf_edges": len(record_tf_edges),
+            "conf_tf_edges": len(conf_tf_edges),
+            "candidate_pair_count": len(candidate_pairs),
+            "selected_edge_count": len(selected_edges),
+            "skipped_precheck_count": len(skipped_precheck),
+            "candidate_overlap_ratio": summarize_values(overlap_values),
+            "candidate_sync_dt_ms": summarize_values(sync_values),
+        },
+        "topic_counts": topic_counts,
+        "pointcloud_topics": pointcloud_topics,
+        "topics": topic_infos,
+        "root_analysis": root_analysis,
+        "candidate_pairs": candidate_pairs,
+        "selected_edges": selected_edges,
+        "skipped_precheck": skipped_precheck,
+    }
+
+
+def _quality_status(value: float | None, threshold: float, *, smaller_is_better: bool) -> str:
+    if value is None:
+        return "unknown"
+    if smaller_is_better:
+        return "pass" if value <= threshold else "warning"
+    return "pass" if value >= threshold else "warning"
 
 
 def build_tf_output(base_frame: str, target_topic: str, edge_results: list[dict]) -> dict:
@@ -446,6 +669,8 @@ def build_metrics_output(record_files: list[str],
                          root_analysis: dict,
                          edge_results: list[dict],
                          skipped_edges: list[dict],
+                         extraction_output: dict,
+                         args,
                          output_dir: Path,
                          merged_summary: dict | None) -> dict:
     per_edge = []
@@ -478,6 +703,7 @@ def build_metrics_output(record_files: list[str],
                 "degenerate": bool(info_metrics["degenerate"]),
                 "eigenvalues": info_metrics["eigenvalues"],
             },
+            "method_summaries": edge_result["method_summaries"],
         })
 
     summary = {
@@ -487,6 +713,30 @@ def build_metrics_output(record_files: list[str],
         "average_inlier_rmse": float(np.mean(rmse_values)) if rmse_values else None,
         "min_overlap_ratio": float(min(overlap_values)) if overlap_values else None,
         "max_condition_number": float(max(condition_numbers)) if condition_numbers else None,
+    }
+
+    coarse_metrics = {
+        **summary,
+        "statuses": {
+            "coverage": "pass" if edge_results else "warning",
+            "overlap": _quality_status(summary["min_overlap_ratio"], float(args.min_overlap), smaller_is_better=False),
+            "fitness": _quality_status(summary["average_fitness"], float(args.min_fitness), smaller_is_better=False),
+            "condition_number": _quality_status(summary["max_condition_number"], float(args.max_condition_number), smaller_is_better=True),
+            "degeneracy": "warning" if any(
+                edge_result["best_run"]["information_matrix"]["degenerate"] for edge_result in edge_results
+            ) else "pass",
+        },
+    }
+
+    fine_metrics = {
+        "per_edge": per_edge,
+        "skipped_edges": skipped_edges,
+        "target_selection": {
+            "preferred_root_frame": root_analysis.get("preferred_root_frame"),
+            "strategy": root_analysis.get("target_selection_strategy"),
+            "missing_transform_frames_to_target": root_analysis.get("missing_transform_frames_to_target", []),
+        },
+        "extraction_summary": extraction_output["summary"],
     }
 
     return {
@@ -501,6 +751,8 @@ def build_metrics_output(record_files: list[str],
         "summary": summary,
         "per_edge": per_edge,
         "skipped_edges": skipped_edges,
+        "coarse_metrics": coarse_metrics,
+        "fine_metrics": fine_metrics,
         "artifacts": {
             "calibrated_tf": str(output_dir / "calibrated_tf.yaml"),
             "initial_guess_dir": str(output_dir / "initial_guess"),
@@ -550,6 +802,8 @@ def main() -> None:
     parser.add_argument("--max-height", type=float, default=None, help="Optional max height filter for preprocessing.")
     parser.add_argument("--remove-ground", action="store_true", help="Remove the dominant ground plane during preprocessing.")
     parser.add_argument("--remove-walls", action="store_true", help="Remove vertical planes during preprocessing.")
+    parser.add_argument("--min-fitness", type=float, default=0.0, help="Minimum fitness required to keep a calibrated edge.")
+    parser.add_argument("--max-condition-number", type=float, default=1e6, help="Maximum information-matrix condition number allowed for accepted edges.")
     parser.add_argument("--save-merged-pcd", action="store_true", help="Save a merged point cloud for one synchronized reference timestamp.")
     args = parser.parse_args()
 
@@ -592,6 +846,7 @@ def main() -> None:
         save_transform_edges_to_dir(args.conf_dir, pointcloud_related_static_edges)
 
     metadata_by_topic = collect_pointcloud_metadata(record_files, pointcloud_topics)
+    cloud_cache = {}
     sync_threshold_ns = int(args.sync_threshold_ms * 1e6)
     root_analysis = analyze_pointcloud_roots(pointcloud_frames, tf_edges)
     candidate_pairs = build_candidate_pairs(
@@ -600,6 +855,7 @@ def main() -> None:
         tf_graph,
         sync_threshold_ns,
         args.overlap_voxel_size,
+        cloud_cache=cloud_cache,
     )
 
     target_topic = choose_target_topic(topic_infos, candidate_pairs, root_analysis, args.target_topic)
@@ -620,85 +876,38 @@ def main() -> None:
     )
     logging.info("Selected target topic: %s (%s)", target_topic, target_frame)
 
-    requested_sources = set(args.source_topics or [])
-    selected_edges = []
-    skipped_precheck = []
-    same_frame_target_topics = [
-        topic for topic, info in topic_infos.items()
-        if info["frame_id"] == target_frame
-    ]
-    for topic, info in topic_infos.items():
-        if topic == target_topic:
-            continue
-        if requested_sources and topic not in requested_sources:
-            continue
-        if info["frame_id"] == target_frame:
-            skipped_precheck.append({
-                "source_topic": topic,
-                "target_topic": target_topic,
-                "reason": "same_target_frame",
-            })
-            continue
-
-        initial_transform = lookup_transform(tf_graph, info["frame_id"], target_frame)
-        if initial_transform is None:
-            skipped_precheck.append({
-                "source_topic": topic,
-                "target_topic": target_topic,
-                "reason": "no_tf_path",
-            })
-            continue
-
-        proxy_candidates = [
-            pair for pair in candidate_pairs
-            if topic in {pair["topic_a"], pair["topic_b"]}
-            and ({pair["topic_a"], pair["topic_b"]} & set(same_frame_target_topics))
-        ]
-        proxy_candidates = [
-            pair for pair in proxy_candidates
-            if pair["overlap_ratio"] is not None
-        ]
-        if not proxy_candidates:
-            skipped_precheck.append({
-                "source_topic": topic,
-                "target_topic": target_topic,
-                "reason": "no_overlap_probe",
-            })
-            continue
-
-        pair_match = max(proxy_candidates, key=lambda pair: pair["overlap_ratio"])
-        registration_target_topic = (
-            pair_match["topic_b"] if pair_match["topic_a"] == topic else pair_match["topic_a"]
-        )
-
-        if pair_match["overlap_ratio"] < args.min_overlap:
-            skipped_precheck.append({
-                "source_topic": topic,
-                "target_topic": target_topic,
-                "registration_target_topic": registration_target_topic,
-                "reason": "low_overlap",
-                "overlap_ratio": float(pair_match["overlap_ratio"]),
-            })
-            continue
-
-        selected_edges.append({
-            "source_topic": topic,
-            "target_topic": target_topic,
-            "registration_target_topic": registration_target_topic,
-            "source_frame": info["frame_id"],
-            "target_frame": target_frame,
-            "overlap_ratio": float(pair_match["overlap_ratio"]),
-            "sync_dt_ms": pair_match["sync_dt_ms"],
-            "initial_transform": initial_transform.tolist(),
-        })
+    selected_edges, skipped_precheck = select_edges_for_target(
+        topic_infos=topic_infos,
+        candidate_pairs=candidate_pairs,
+        tf_graph=tf_graph,
+        target_topic=target_topic,
+        target_frame=target_frame,
+        source_topics=args.source_topics,
+        min_overlap=args.min_overlap,
+    )
 
     edge_results, skipped_edges = calibrate_selected_edges(
         selected_edges,
         metadata_by_topic,
         sync_threshold_ns,
         args,
+        cloud_cache=cloud_cache,
     )
     skipped_edges = skipped_precheck + skipped_edges
+
+    extraction_report = build_extraction_output(
+        record_files=record_files,
+        conf_dir=args.conf_dir,
+        topic_counts=topic_counts,
+        pointcloud_topics=pointcloud_topics,
+        topic_infos=topic_infos,
+        record_tf_edges=record_tf_edges,
+        conf_tf_edges=conf_tf_edges,
+        root_analysis=root_analysis,
+        candidate_pairs=candidate_pairs,
+        selected_edges=selected_edges,
+        skipped_precheck=skipped_precheck,
+    )
 
     initial_guess_files = save_transform_edges_to_dir(initial_guess_dir, pointcloud_related_static_edges)
     calibrated_files = write_calibrated_edge_files(calibrated_dir, target_frame, edge_results)
@@ -718,6 +927,9 @@ def main() -> None:
     }
     with open(diagnostics_dir / "topology.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(topology_report, file, sort_keys=False)
+
+    with open(diagnostics_dir / "extraction.yaml", "w", encoding="utf-8") as file:
+        yaml.safe_dump(extraction_report, file, sort_keys=False)
 
     with open(diagnostics_dir / "tf_tree.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump({
@@ -747,6 +959,7 @@ def main() -> None:
             target_topic,
             edge_results,
             sync_threshold_ns,
+            cloud_cache=cloud_cache,
         )
 
     metrics_output = build_metrics_output(
@@ -756,6 +969,8 @@ def main() -> None:
         root_analysis,
         edge_results,
         skipped_edges,
+        extraction_report,
+        args,
         output_dir,
         merged_summary,
     )
@@ -778,6 +993,7 @@ def main() -> None:
             "initial_guess_files": initial_guess_files,
             "calibrated_files": calibrated_files,
             "diagnostics": {
+                "extraction": str(diagnostics_dir / "extraction.yaml"),
                 "topology": str(diagnostics_dir / "topology.yaml"),
                 "tf_tree": str(diagnostics_dir / "tf_tree.yaml"),
                 "calibration": str(diagnostics_dir / "calibration.yaml"),

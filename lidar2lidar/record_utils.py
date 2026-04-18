@@ -1,3 +1,22 @@
+#!/usr/bin/env python3
+
+# Copyright 2026 The WheelOS Team. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Created Date: 2026-02-09
+# Author: daohu527
+
 from __future__ import annotations
 
 import bisect
@@ -12,11 +31,7 @@ import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 
 from lidar2lidar.extrinsic_io import extrinsics_filename, load_extrinsics_file, save_extrinsics_yaml
-
-try:
-    from cyber_record.record import Record
-except ImportError:
-    Record = None
+from lidar2lidar.record_adapter import Record, ensure_record_available
 
 
 @dataclass(frozen=True)
@@ -37,13 +52,6 @@ class TransformEdge:
     is_static: bool
 
 
-def ensure_cyber_record_available() -> None:
-    if Record is None:
-        raise RuntimeError(
-            "cyber_record is not installed. Use `pip install -e .` or install `cyber_record` and `record_msg`."
-        )
-
-
 def discover_record_files(input_path: str) -> list[str]:
     path = Path(input_path)
     if path.is_file():
@@ -62,11 +70,11 @@ def discover_record_files(input_path: str) -> list[str]:
 
 
 def list_topics(record_files: Iterable[str]) -> dict[str, int]:
-    ensure_cyber_record_available()
+    ensure_record_available()
     counts: Counter[str] = Counter()
     for record_file in record_files:
         with Record(record_file) as record:
-            for channel, _, _ in record.read_messages():
+            for channel, _, _, _ in record.read_raw_messages():
                 counts[channel] += 1
     return dict(counts.most_common())
 
@@ -83,7 +91,7 @@ def topic_sensor_name(topic: str) -> str:
 
 
 def get_topic_frame_ids(record_files: Iterable[str], topics: Iterable[str]) -> dict[str, str]:
-    ensure_cyber_record_available()
+    ensure_record_available()
     pending = set(topics)
     frame_ids: dict[str, str] = {}
 
@@ -106,7 +114,7 @@ def get_topic_frame_ids(record_files: Iterable[str], topics: Iterable[str]) -> d
 
 
 def collect_pointcloud_metadata(record_files: Iterable[str], topics: Iterable[str]) -> dict[str, list[PointCloudMeta]]:
-    ensure_cyber_record_available()
+    ensure_record_available()
     metadata: dict[str, list[PointCloudMeta]] = defaultdict(list)
     topic_set = tuple(topics)
 
@@ -146,7 +154,7 @@ def pointcloud_message_to_open3d(msg) -> o3d.geometry.PointCloud:
 
 
 def load_pointcloud_from_meta(meta: PointCloudMeta) -> o3d.geometry.PointCloud:
-    ensure_cyber_record_available()
+    ensure_record_available()
     with Record(meta.record_path) as record:
         for channel, msg, timestamp_ns in record.read_messages(topics=[meta.topic]):
             if channel == meta.topic and int(timestamp_ns) == meta.timestamp_ns:
@@ -221,7 +229,7 @@ def proto_transform_to_matrix(transform_proto) -> np.ndarray:
 
 
 def extract_tf_edges(record_files: Iterable[str]) -> list[TransformEdge]:
-    ensure_cyber_record_available()
+    ensure_record_available()
     static_edges: dict[tuple[str, str], TransformEdge] = {}
     dynamic_edges: dict[tuple[str, str], TransformEdge] = {}
 
