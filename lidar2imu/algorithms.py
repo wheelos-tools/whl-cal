@@ -71,11 +71,30 @@ def rotation_angle_degrees(rotation_matrix: np.ndarray) -> float:
 
 def transform_delta_metrics(
     initial_transform: np.ndarray, refined_transform: np.ndarray
-) -> dict[str, float]:
+) -> dict[str, object]:
     delta = refined_transform @ np.linalg.inv(initial_transform)
+    translation_delta = np.asarray(refined_transform[:3, 3], dtype=float) - np.asarray(
+        initial_transform[:3, 3], dtype=float
+    )
+    yaw_deg, roll_deg, pitch_deg = yaw_roll_pitch_from_matrix(delta)
+    reference_z = float(initial_transform[2, 3])
+    vertical_error_ratio = None
+    if abs(reference_z) > 1e-9:
+        vertical_error_ratio = float(abs(translation_delta[2]) / abs(reference_z))
     return {
         "translation_norm_m": float(np.linalg.norm(delta[:3, 3])),
         "rotation_deg": rotation_angle_degrees(delta[:3, :3]),
+        "translation_xyz_m": {
+            "x": float(translation_delta[0]),
+            "y": float(translation_delta[1]),
+            "z": float(translation_delta[2]),
+        },
+        "rotation_yaw_roll_pitch_deg": {
+            "yaw": float(np.degrees(yaw_deg)),
+            "roll": float(np.degrees(roll_deg)),
+            "pitch": float(np.degrees(pitch_deg)),
+        },
+        "vertical_error_ratio": vertical_error_ratio,
     }
 
 
@@ -104,26 +123,82 @@ def summarize_values(values: list[float] | np.ndarray) -> dict:
     }
 
 
-def observability_from_matrix(matrix: np.ndarray, threshold: float = 1e-9) -> dict:
+def circular_span_deg(values_deg: list[float] | np.ndarray) -> float:
+    array = np.asarray(values_deg, dtype=float).reshape(-1)
+    if array.size == 0:
+        return 0.0
+    normalized = np.mod(array, 360.0)
+    normalized.sort()
+    wrapped = np.concatenate([normalized, normalized[:1] + 360.0])
+    largest_gap = float(np.max(np.diff(wrapped)))
+    return float(360.0 - largest_gap)
+
+
+def scan_periodic_scalar_cost(
+    cost_function,
+    *,
+    start_deg: float = -180.0,
+    stop_deg: float = 180.0,
+    step_deg: float = 0.5,
+    within_best_ratio: float = 1.05,
+) -> dict:
+    angles_deg = np.arange(
+        start_deg, stop_deg + (step_deg * 0.5), step_deg, dtype=float
+    )
+    costs = np.asarray(
+        [float(cost_function(float(angle_deg))) for angle_deg in angles_deg],
+        dtype=float,
+    )
+    best_index = int(np.argmin(costs))
+    best_cost = float(costs[best_index])
+    max_cost = float(np.max(costs))
+    within_best = angles_deg[costs <= (best_cost * within_best_ratio)]
+    return {
+        "step_deg": float(step_deg),
+        "sample_count": int(angles_deg.size),
+        "best_yaw_deg": float(angles_deg[best_index]),
+        "best_cost": best_cost,
+        "max_cost": max_cost,
+        "max_cost_ratio": (
+            float(max_cost / best_cost) if best_cost > 1e-12 else float("inf")
+        ),
+        "within_5pct_span_deg": circular_span_deg(within_best),
+    }
+
+
+def observability_from_matrix(
+    matrix: np.ndarray,
+    threshold: float = 1e-9,
+    expected_rank: int | None = None,
+) -> dict:
+    matrix = np.asarray(matrix, dtype=float)
+    if expected_rank is None:
+        expected_rank = min(matrix.shape) if matrix.ndim == 2 else 0
+    expected_rank = max(int(expected_rank), 0)
     if matrix.size == 0:
         return {
             "rank": 0,
-            "condition_number": None,
+            "expected_rank": expected_rank,
+            "condition_number": (1.0 if expected_rank == 0 else float("inf")),
             "singular_values": [],
-            "degenerate": True,
+            "degenerate": bool(expected_rank > 0),
         }
     singular_values = np.linalg.svd(matrix, compute_uv=False)
     positive = singular_values[singular_values > threshold]
     if positive.size >= 2:
         condition_number = float(positive[0] / positive[-1])
+    elif positive.size == 1:
+        condition_number = 1.0 if expected_rank <= 1 else float("inf")
     else:
         condition_number = float("inf")
     return {
         "rank": int(positive.size),
+        "expected_rank": expected_rank,
         "condition_number": condition_number,
         "singular_values": [float(value) for value in singular_values.tolist()],
         "degenerate": bool(
-            positive.size < min(matrix.shape) or not np.isfinite(condition_number)
+            positive.size < expected_rank
+            or (expected_rank > 1 and not np.isfinite(condition_number))
         ),
     }
 
@@ -188,7 +263,7 @@ def solve_roll_pitch_from_ground(
         "residuals": {
             "normal_angle_deg": summarize_values(angle_errors),
         },
-        "observability": observability_from_matrix(result.jac),
+        "observability": observability_from_matrix(result.jac, expected_rank=2),
     }
 
 
@@ -237,7 +312,7 @@ def solve_ground_translation(
         "residuals": {
             "height_linear_residual_m": summarize_values(np.abs(residuals)),
         },
-        "observability": observability_from_matrix(design_matrix),
+        "observability": observability_from_matrix(design_matrix, expected_rank=3),
     }
 
 
@@ -300,6 +375,33 @@ def solve_yaw_from_motion(
         angle_errors.append(
             float(np.degrees(np.linalg.norm(R.from_matrix(rotation_error).as_rotvec())))
         )
+    observability = observability_from_matrix(result.jac, expected_rank=1)
+    scalar_sensitivity = (
+        float(observability["singular_values"][0])
+        if observability["singular_values"]
+        else 0.0
+    )
+
+    def _yaw_cost(yaw_deg: float) -> float:
+        residual_vector = residuals(np.array([float(np.radians(yaw_deg))], dtype=float))
+        return float(np.mean(np.square(residual_vector)))
+
+    cost_scan = scan_periodic_scalar_cost(_yaw_cost)
+    observability_reasons = []
+    if cost_scan["max_cost_ratio"] < config.metrics_min_yaw_cost_ratio:
+        observability_reasons.append("flat_cost_scan")
+    if cost_scan["within_5pct_span_deg"] > config.metrics_max_yaw_5pct_span_deg:
+        observability_reasons.append("wide_cost_plateau")
+    if scalar_sensitivity <= 1e-12:
+        observability_reasons.append("zero_scalar_sensitivity")
+    observability.update(
+        {
+            "scalar_sensitivity": scalar_sensitivity,
+            "cost_scan": cost_scan,
+            "reasons": observability_reasons,
+            "degenerate": bool(observability["degenerate"] or observability_reasons),
+        }
+    )
 
     return yaw, {
         "success": bool(result.success),
@@ -314,7 +416,7 @@ def solve_yaw_from_motion(
         "residuals": {
             "rotation_residual_deg": summarize_values(angle_errors),
         },
-        "observability": observability_from_matrix(result.jac),
+        "observability": observability,
     }
 
 
@@ -387,7 +489,9 @@ def solve_translation_from_motion(
         "residuals": {
             "translation_residual_m": summarize_values(residual_norms),
         },
-        "observability": observability_from_matrix(observability_matrix),
+        "observability": observability_from_matrix(
+            observability_matrix, expected_rank=len(free_indices)
+        ),
     }
 
 
@@ -503,5 +607,7 @@ def refine_joint_solution(
                 name for name, locked in zip(component_names, locked_mask) if locked
             ],
         },
-        "observability": observability_from_matrix(result.jac),
+        "observability": observability_from_matrix(
+            result.jac, expected_rank=len(active_indices)
+        ),
     }

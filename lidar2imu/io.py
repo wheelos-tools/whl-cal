@@ -67,6 +67,29 @@ def load_dataset(path: str,
     initial_transform = np.eye(4, dtype=float)
     if "initial_transform" in payload:
         initial_transform, _, _, _ = parse_transform_payload(payload["initial_transform"])
+    extraction_transform = None
+    if "extraction_transform" in payload:
+        extraction_transform, _, _, _ = parse_transform_payload(payload["extraction_transform"])
+    reference_transform = None
+    if "reference_transform" in payload:
+        reference_transform, _, _, _ = parse_transform_payload(payload["reference_transform"])
+    dataset_metadata = dict(payload.get("metadata", {}))
+    extraction_transform_source = dataset_metadata.get("extraction_transform_source")
+    if extraction_transform is None:
+        if (
+            extraction_transform_source is not None
+            and extraction_transform_source
+            == dataset_metadata.get("reference_transform_source")
+            and reference_transform is not None
+        ):
+            extraction_transform = reference_transform
+        elif (
+            extraction_transform_source is not None
+            and extraction_transform_source == dataset_metadata.get("initial_transform_source")
+        ):
+            extraction_transform = initial_transform
+        else:
+            extraction_transform = initial_transform
 
     ground_samples = []
     for raw_sample in payload.get("ground_samples", []):
@@ -80,7 +103,7 @@ def load_dataset(path: str,
             raise ValueError("Each ground sample must contain lidar_plane_normal and lidar_plane_offset.")
         normal, offset = normalize_plane(_vector_from_payload(normal_payload, "normal"), float(offset_value))
         gravity = normalize_vector(_vector_from_payload(raw_sample, "imu_gravity"))
-        metadata = dict(raw_sample.get("metadata", {}))
+        sample_metadata = dict(raw_sample.get("metadata", {}))
         for reserved_key in (
             "timestamp_ns",
             "lidar_plane_normal",
@@ -93,7 +116,7 @@ def load_dataset(path: str,
             "weight",
             "sync_dt_ms",
         ):
-            metadata.pop(reserved_key, None)
+            sample_metadata.pop(reserved_key, None)
         ground_samples.append(
             GroundSample(
                 timestamp_ns=_sample_timestamp(raw_sample, "timestamp_ns"),
@@ -111,7 +134,7 @@ def load_dataset(path: str,
                     if raw_sample.get("sync_dt_ms") is not None
                     else None
                 ),
-                metadata=metadata,
+                metadata=sample_metadata,
             )
         )
 
@@ -121,7 +144,7 @@ def load_dataset(path: str,
             raise ValueError("Each motion sample must contain imu_delta and lidar_delta.")
         imu_delta, _, _, _ = parse_transform_payload(raw_sample["imu_delta"])
         lidar_delta, _, _, _ = parse_transform_payload(raw_sample["lidar_delta"])
-        metadata = dict(raw_sample.get("metadata", {}))
+        sample_metadata = dict(raw_sample.get("metadata", {}))
         for reserved_key in (
             "start_timestamp_ns",
             "end_timestamp_ns",
@@ -130,7 +153,7 @@ def load_dataset(path: str,
             "weight",
             "sync_dt_ms",
         ):
-            metadata.pop(reserved_key, None)
+            sample_metadata.pop(reserved_key, None)
         motion_samples.append(
             MotionSample(
                 start_timestamp_ns=_sample_timestamp(raw_sample, "start_timestamp_ns"),
@@ -145,7 +168,7 @@ def load_dataset(path: str,
                     if raw_sample.get("sync_dt_ms") is not None
                     else None
                 ),
-                metadata=metadata,
+                metadata=sample_metadata,
             )
         )
 
@@ -159,7 +182,9 @@ def load_dataset(path: str,
         ground_samples=ground_samples,
         motion_samples=motion_samples,
         initial_transform=initial_transform,
-        metadata=dict(payload.get("metadata", {})),
+        extraction_transform=extraction_transform,
+        reference_transform=reference_transform,
+        metadata=dataset_metadata,
     )
     return dataset, config, payload
 

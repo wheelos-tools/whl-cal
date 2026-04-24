@@ -22,7 +22,10 @@ from __future__ import annotations
 # isort: off
 import argparse
 import bisect
+import copy
 import logging
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +34,11 @@ import open3d as o3d
 import yaml
 from scipy.spatial.transform import Rotation as R
 
-from lidar2imu.algorithms import normalize_plane, normalize_vector
+from lidar2imu.algorithms import (
+    circular_span_deg,
+    normalize_plane,
+    normalize_vector,
+)
 from lidar2imu.io import load_dataset, write_outputs
 from lidar2imu.models import CalibrationConfig
 from lidar2imu.pipeline import run_calibration
@@ -54,6 +61,46 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+RUN_PROFILE_PRESETS = {
+    "baseline": {
+        "gravity_source": "pose",
+        "motion_frame_stride": 5,
+        "min_registration_fitness": 0.55,
+        "motion_registration_mode": "scan_to_scan",
+        "planar_motion_policy": "auto",
+        "auto_reextract_if_needed": False,
+    },
+    "production": {
+        "gravity_source": "pose",
+        "motion_frame_stride": 5,
+        "min_registration_fitness": 0.55,
+        "motion_registration_mode": "submap_to_map",
+        "submap_half_window": 2,
+        "submap_support_stride": 5,
+        "submap_min_support_frames": 3,
+        "map_half_window": 6,
+        "map_support_stride": 10,
+        "map_min_support_frames": 5,
+        "planar_motion_policy": "auto",
+        "auto_reextract_if_needed": True,
+    },
+}
+
+RUN_PROFILE_OPTION_NAMES = {
+    "gravity_source": ("--gravity-source",),
+    "motion_frame_stride": ("--motion-frame-stride",),
+    "min_registration_fitness": ("--min-registration-fitness",),
+    "motion_registration_mode": ("--motion-registration-mode",),
+    "planar_motion_policy": ("--planar-motion-policy",),
+    "submap_half_window": ("--submap-half-window",),
+    "submap_support_stride": ("--submap-support-stride",),
+    "submap_min_support_frames": ("--submap-min-support-frames",),
+    "map_half_window": ("--map-half-window",),
+    "map_support_stride": ("--map-support-stride",),
+    "map_min_support_frames": ("--map-min-support-frames",),
+    "auto_reextract_if_needed": ("--auto-reextract-if-needed",),
+}
+
 
 @dataclass(frozen=True)
 class PoseSample:
@@ -68,6 +115,26 @@ class ImuSample:
     timestamp_ns: int
     linear_acceleration: np.ndarray
     angular_velocity: np.ndarray
+
+
+def _explicit_cli_options(argv: list[str]) -> set[str]:
+    options = set()
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        options.add(token.split("=", 1)[0])
+    return options
+
+
+def _apply_run_profile(args: argparse.Namespace, explicit_options: set[str]) -> None:
+    if args.profile is None:
+        return
+    preset = RUN_PROFILE_PRESETS[args.profile]
+    for field_name, value in preset.items():
+        option_names = RUN_PROFILE_OPTION_NAMES.get(field_name, ())
+        if any(option_name in explicit_options for option_name in option_names):
+            continue
+        setattr(args, field_name, value)
 
 
 def _pose_to_matrix(position, orientation) -> np.ndarray:
@@ -300,6 +367,219 @@ def _motion_excitation(delta_transform: np.ndarray) -> tuple[float, float]:
     return rotation_deg, translation_m
 
 
+def _motion_translation_heading_deg(delta_transform: np.ndarray) -> float | None:
+    translation = np.asarray(delta_transform[:3, 3], dtype=float).reshape(3)
+    if np.linalg.norm(translation[:2]) <= 1e-9:
+        return None
+    return float(np.degrees(np.arctan2(translation[1], translation[0])))
+
+
+def _motion_signed_yaw_deg(delta_transform: np.ndarray) -> float:
+    try:
+        return float(
+            np.degrees(R.from_matrix(delta_transform[:3, :3]).as_euler("ZYX")[0])
+        )
+    except ValueError:
+        return 0.0
+
+
+def _motion_rotation_axis_abs(delta_transform: np.ndarray) -> list[float]:
+    rotvec = R.from_matrix(delta_transform[:3, :3]).as_rotvec()
+    norm = float(np.linalg.norm(rotvec))
+    if norm <= 1e-12:
+        return [0.0, 0.0, 0.0]
+    axis = np.abs(rotvec / norm)
+    return [float(axis[0]), float(axis[1]), float(axis[2])]
+
+
+def _candidate_identity(candidate: dict) -> tuple[int, int, int]:
+    return (
+        int(candidate["start_index"]),
+        int(candidate["end_index"]),
+        int(candidate["stride"]),
+    )
+
+
+def _circular_distance_deg(angle_a: float, angle_b: float) -> float:
+    return float(abs(((angle_a - angle_b) + 180.0) % 360.0 - 180.0))
+
+
+def _motion_turn_sign(signed_yaw_deg: float) -> str | None:
+    if signed_yaw_deg > 0.5:
+        return "left"
+    if signed_yaw_deg < -0.5:
+        return "right"
+    return None
+
+
+def _heading_bin(heading_deg: float | None, bin_width_deg: float = 45.0) -> int | None:
+    if heading_deg is None:
+        return None
+    return int(np.floor((float(heading_deg) + 180.0) / float(bin_width_deg))) % int(
+        round(360.0 / float(bin_width_deg))
+    )
+
+
+def _candidate_axis_abs_vector(candidate: dict) -> np.ndarray:
+    axis = candidate.get("imu_rotation_axis_abs") or [0.0, 0.0, 0.0]
+    return np.asarray(axis, dtype=float).reshape(3)
+
+
+def _load_cached_cloud(meta, cloud_cache: dict) -> o3d.geometry.PointCloud:
+    cache_key = (meta.topic, int(meta.timestamp_ns))
+    if cache_key not in cloud_cache:
+        cloud_cache[cache_key] = load_pointcloud_from_meta(meta)
+    return cloud_cache[cache_key]
+
+
+def _resolve_world_lidar_transform(
+    meta_index: int,
+    *,
+    lidar_metas: list,
+    pose_samples: list[PoseSample],
+    pose_timestamps: list[int],
+    sync_threshold_ns: int,
+    extraction_transform: np.ndarray,
+    alignment_cache: dict[int, dict],
+) -> dict:
+    if meta_index in alignment_cache:
+        return alignment_cache[meta_index]
+    meta = lidar_metas[meta_index]
+    pose_sample, pose_dt_ns = _nearest_sample(
+        pose_samples,
+        pose_timestamps,
+        meta.timestamp_ns,
+        sync_threshold_ns,
+    )
+    if pose_sample is None:
+        alignment_cache[meta_index] = {
+            "valid": False,
+            "pose_sync_dt_ms": (
+                None if pose_dt_ns is None else float(pose_dt_ns / 1e6)
+            ),
+            "reason": "missing_pose_sync",
+        }
+        return alignment_cache[meta_index]
+    alignment_cache[meta_index] = {
+        "valid": True,
+        "transform_world_lidar": pose_sample.transform_world_imu @ extraction_transform,
+        "pose_sync_dt_ms": float(pose_dt_ns / 1e6),
+    }
+    return alignment_cache[meta_index]
+
+
+def _build_local_lidar_submap(
+    anchor_index: int,
+    *,
+    lidar_metas: list,
+    pose_samples: list[PoseSample],
+    pose_timestamps: list[int],
+    sync_threshold_ns: int,
+    extraction_transform: np.ndarray,
+    submap_half_window: int,
+    submap_support_stride: int,
+    submap_min_support_frames: int,
+    submap_voxel_size: float,
+    alignment_cache: dict[int, dict],
+    cloud_cache: dict,
+    submap_cache: dict,
+) -> tuple[o3d.geometry.PointCloud | None, dict]:
+    cache_key = (
+        int(anchor_index),
+        int(submap_half_window),
+        int(submap_support_stride),
+        int(submap_min_support_frames),
+        float(submap_voxel_size),
+    )
+    if cache_key in submap_cache:
+        cloud, info = submap_cache[cache_key]
+        return copy.deepcopy(cloud), dict(info)
+
+    anchor_alignment = _resolve_world_lidar_transform(
+        anchor_index,
+        lidar_metas=lidar_metas,
+        pose_samples=pose_samples,
+        pose_timestamps=pose_timestamps,
+        sync_threshold_ns=sync_threshold_ns,
+        extraction_transform=extraction_transform,
+        alignment_cache=alignment_cache,
+    )
+    if not anchor_alignment["valid"]:
+        info = {
+            "valid": False,
+            "reason": "anchor_missing_pose_sync",
+            "anchor_index": int(anchor_index),
+            "support_frame_count": 0,
+        }
+        submap_cache[cache_key] = (None, info)
+        return None, dict(info)
+
+    anchor_pose = np.asarray(anchor_alignment["transform_world_lidar"], dtype=float)
+    merged_cloud = o3d.geometry.PointCloud()
+    support_records = []
+    max_index = len(lidar_metas) - 1
+    support_indices = []
+    for offset in range(-int(submap_half_window), int(submap_half_window) + 1):
+        support_index = anchor_index + (offset * int(submap_support_stride))
+        if 0 <= support_index <= max_index:
+            support_indices.append(int(support_index))
+    support_indices = sorted(set(support_indices))
+
+    for support_index in support_indices:
+        support_alignment = _resolve_world_lidar_transform(
+            support_index,
+            lidar_metas=lidar_metas,
+            pose_samples=pose_samples,
+            pose_timestamps=pose_timestamps,
+            sync_threshold_ns=sync_threshold_ns,
+            extraction_transform=extraction_transform,
+            alignment_cache=alignment_cache,
+        )
+        if not support_alignment["valid"]:
+            continue
+        support_pose = np.asarray(
+            support_alignment["transform_world_lidar"], dtype=float
+        )
+        support_cloud = copy.deepcopy(
+            _load_cached_cloud(lidar_metas[support_index], cloud_cache)
+        )
+        transform_anchor_support = np.linalg.inv(anchor_pose) @ support_pose
+        support_cloud.transform(transform_anchor_support)
+        merged_cloud += support_cloud
+        support_records.append(
+            {
+                "meta_index": int(support_index),
+                "timestamp_ns": int(lidar_metas[support_index].timestamp_ns),
+                "pose_sync_dt_ms": float(support_alignment["pose_sync_dt_ms"]),
+                "point_count": int(len(support_cloud.points)),
+            }
+        )
+
+    if len(support_records) < int(submap_min_support_frames):
+        info = {
+            "valid": False,
+            "reason": "insufficient_submap_support",
+            "anchor_index": int(anchor_index),
+            "support_frame_count": int(len(support_records)),
+            "support_records": support_records,
+        }
+        submap_cache[cache_key] = (None, info)
+        return None, dict(info)
+
+    if submap_voxel_size > 0.0:
+        merged_cloud = merged_cloud.voxel_down_sample(float(submap_voxel_size))
+
+    info = {
+        "valid": True,
+        "anchor_index": int(anchor_index),
+        "support_frame_count": int(len(support_records)),
+        "point_count": int(len(merged_cloud.points)),
+        "support_records": support_records,
+    }
+    submap_cache[cache_key] = (merged_cloud, info)
+    return copy.deepcopy(merged_cloud), dict(info)
+
+
 def _build_motion_candidates(
     lidar_metas: list,
     pose_samples: list[PoseSample],
@@ -341,6 +621,7 @@ def _build_motion_candidates(
                 start_pose.transform_world_imu, end_pose.transform_world_imu
             )
             rotation_deg, translation_m = _motion_excitation(imu_delta)
+            information_score = rotation_deg * 10.0 + translation_m
             candidate_records.append(
                 {
                     "start_index": start_index,
@@ -355,7 +636,13 @@ def _build_motion_candidates(
                     "imu_delta": imu_delta,
                     "pose_rotation_deg": rotation_deg,
                     "pose_translation_m": translation_m,
-                    "score": (rotation_deg * 10.0 + translation_m) / float(stride),
+                    "imu_translation_heading_deg": _motion_translation_heading_deg(
+                        imu_delta
+                    ),
+                    "imu_signed_yaw_deg": _motion_signed_yaw_deg(imu_delta),
+                    "imu_rotation_axis_abs": _motion_rotation_axis_abs(imu_delta),
+                    "information_score": information_score,
+                    "score": information_score / float(stride),
                 }
             )
 
@@ -380,6 +667,190 @@ def _candidate_overlaps_used_ranges(
         ):
             return True
     return False
+
+
+def _select_window_candidates(
+    candidates: list[dict], max_candidates_per_window: int
+) -> list[dict]:
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -item["information_score"],
+            -item["pose_rotation_deg"],
+            -item["pose_translation_m"],
+            -item["stride"],
+            item["start_index"],
+            item["end_index"],
+        ),
+    )
+    selected: list[dict] = []
+    selected_ids: set[tuple[int, int, int]] = set()
+
+    stride_best: dict[int, dict] = {}
+    for candidate in ranked:
+        stride_best.setdefault(int(candidate["stride"]), candidate)
+    for stride in sorted(
+        stride_best, key=lambda value: -stride_best[value]["information_score"]
+    ):
+        candidate = stride_best[stride]
+        candidate_id = _candidate_identity(candidate)
+        if candidate_id in selected_ids:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate_id)
+        if len(selected) >= max_candidates_per_window:
+            return selected
+
+    heading_best: dict[int, dict] = {}
+    for candidate in ranked:
+        heading_deg = candidate.get("imu_translation_heading_deg")
+        if heading_deg is None:
+            continue
+        heading_bin = int(np.floor((float(heading_deg) + 180.0) / 45.0))
+        heading_best.setdefault(heading_bin, candidate)
+    for heading_bin in sorted(
+        heading_best, key=lambda value: -heading_best[value]["information_score"]
+    ):
+        candidate = heading_best[heading_bin]
+        candidate_id = _candidate_identity(candidate)
+        if candidate_id in selected_ids:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate_id)
+        if len(selected) >= max_candidates_per_window:
+            return selected
+
+    for candidate in ranked:
+        candidate_id = _candidate_identity(candidate)
+        if candidate_id in selected_ids:
+            continue
+        selected.append(candidate)
+        selected_ids.add(candidate_id)
+        if len(selected) >= max_candidates_per_window:
+            break
+    return selected
+
+
+def _summarize_motion_candidate(candidate: dict) -> dict:
+    return {
+        "start_timestamp_ns": int(candidate["start_meta"].timestamp_ns),
+        "end_timestamp_ns": int(candidate["end_meta"].timestamp_ns),
+        "frame_stride": int(candidate["stride"]),
+        "pose_rotation_deg": float(candidate["pose_rotation_deg"]),
+        "pose_translation_m": float(candidate["pose_translation_m"]),
+        "window_score": float(candidate["score"]),
+        "information_score": float(candidate["information_score"]),
+        "imu_signed_yaw_deg": float(candidate["imu_signed_yaw_deg"]),
+        "imu_translation_heading_deg": (
+            None
+            if candidate.get("imu_translation_heading_deg") is None
+            else float(candidate["imu_translation_heading_deg"])
+        ),
+    }
+
+
+def _global_motion_selection_score(
+    candidate: dict, selected_candidates: list[dict], base_stride: int
+) -> float:
+    base_quality = max(float(candidate["registration_fitness"]), 1e-3) * max(
+        float(candidate["information_score"]), 1e-6
+    )
+    stride_bonus = min(
+        np.log2(float(candidate["stride"]) / float(max(base_stride, 1)) + 1.0),
+        2.0,
+    )
+    multiplier = 1.0 + (0.08 * float(stride_bonus))
+
+    candidate_stride = int(candidate["stride"])
+    selected_stride_counts: dict[int, int] = {}
+    for item in selected_candidates:
+        stride = int(item["stride"])
+        selected_stride_counts[stride] = selected_stride_counts.get(stride, 0) + 1
+    same_stride_count = selected_stride_counts.get(candidate_stride, 0)
+    if same_stride_count == 0:
+        multiplier += 0.35
+    else:
+        multiplier -= min(0.10 * float(same_stride_count), 0.30)
+
+    turn_sign = _motion_turn_sign(float(candidate["imu_signed_yaw_deg"]))
+    selected_turn_counts = {"left": 0, "right": 0}
+    for item in selected_candidates:
+        item_turn_sign = _motion_turn_sign(float(item["imu_signed_yaw_deg"]))
+        if item_turn_sign in selected_turn_counts:
+            selected_turn_counts[item_turn_sign] += 1
+    if turn_sign is not None:
+        opposite_turn_sign = "right" if turn_sign == "left" else "left"
+        if selected_turn_counts[turn_sign] == 0:
+            multiplier += 0.20
+        if selected_turn_counts[turn_sign] < selected_turn_counts[opposite_turn_sign]:
+            multiplier += 0.20
+        elif selected_turn_counts[turn_sign] > selected_turn_counts[opposite_turn_sign]:
+            multiplier -= min(
+                0.06
+                * float(
+                    selected_turn_counts[turn_sign]
+                    - selected_turn_counts[opposite_turn_sign]
+                ),
+                0.18,
+            )
+
+    heading_deg = candidate.get("imu_translation_heading_deg")
+    selected_headings = [
+        float(item["imu_translation_heading_deg"])
+        for item in selected_candidates
+        if item.get("imu_translation_heading_deg") is not None
+    ]
+    candidate_heading_bin = _heading_bin(
+        None if heading_deg is None else float(heading_deg)
+    )
+    selected_heading_bin_counts: dict[int, int] = {}
+    for existing_heading in selected_headings:
+        heading_bin = _heading_bin(existing_heading)
+        if heading_bin is None:
+            continue
+        selected_heading_bin_counts[heading_bin] = (
+            selected_heading_bin_counts.get(heading_bin, 0) + 1
+        )
+    if heading_deg is not None:
+        same_heading_bin_count = (
+            0
+            if candidate_heading_bin is None
+            else selected_heading_bin_counts.get(candidate_heading_bin, 0)
+        )
+        if same_heading_bin_count == 0:
+            multiplier += 0.35
+        else:
+            multiplier -= min(0.08 * float(same_heading_bin_count), 0.24)
+        if not selected_headings:
+            multiplier += 0.15
+        else:
+            min_heading_distance = min(
+                _circular_distance_deg(float(heading_deg), existing_heading)
+                for existing_heading in selected_headings
+            )
+            multiplier += min_heading_distance / 240.0
+            if min_heading_distance < 20.0:
+                multiplier -= 0.12
+
+    candidate_axis = _candidate_axis_abs_vector(candidate)
+    selected_axes = [_candidate_axis_abs_vector(item) for item in selected_candidates]
+    if selected_axes:
+        min_axis_distance = min(
+            float(np.linalg.norm(candidate_axis - existing_axis))
+            for existing_axis in selected_axes
+        )
+        multiplier += 0.20 * min(min_axis_distance, 1.0)
+        selected_axis_z_mean = float(
+            np.mean([float(existing_axis[2]) for existing_axis in selected_axes])
+        )
+        if candidate_axis[2] < 0.95 and selected_axis_z_mean >= 0.95:
+            multiplier += 0.20
+        elif candidate_axis[2] >= 0.98 and selected_axis_z_mean >= 0.95:
+            multiplier -= 0.08
+    elif candidate_axis[2] < 0.95:
+        multiplier += 0.10
+
+    return float(base_quality * max(multiplier, 0.45))
 
 
 def _build_motion_windows(
@@ -426,6 +897,7 @@ def _build_motion_windows(
         candidates = sorted(
             window_record["candidates"],
             key=lambda item: (
+                -item["information_score"],
                 -item["score"],
                 -item["pose_rotation_deg"],
                 -item["pose_translation_m"],
@@ -455,24 +927,20 @@ def _build_motion_windows(
                 "rotation_candidate_count": len(rotation_candidates),
                 "has_rotation_candidate": bool(rotation_candidates),
                 "best_score": float(best_candidate["score"]),
+                "best_information_score": float(best_candidate["information_score"]),
                 "best_pose_rotation_deg": float(best_candidate["pose_rotation_deg"]),
-                "best_pose_translation_m": float(
-                    best_candidate["pose_translation_m"]
+                "best_pose_translation_m": float(best_candidate["pose_translation_m"]),
+                "stride_values": sorted(
+                    {int(candidate["stride"]) for candidate in preferred_candidates}
                 ),
                 "valid": not gate_reasons,
                 "gate_reasons": gate_reasons,
-                "candidates": preferred_candidates[:max_candidates_per_window],
+                "candidates": _select_window_candidates(
+                    preferred_candidates, max_candidates_per_window
+                ),
             }
         )
-    return sorted(
-        windows,
-        key=lambda item: (
-            -int(item["valid"]),
-            -int(item["has_rotation_candidate"]),
-            -item["best_score"],
-            item["window_start_index"],
-        ),
-    )
+    return sorted(windows, key=lambda item: item["window_start_index"])
 
 
 def convert_record_to_standardized_samples(
@@ -499,6 +967,16 @@ def convert_record_to_standardized_samples(
     calibration_loss: str,
     calibration_motion_rotation_deg: float,
     calibration_planar_motion_policy: str,
+    motion_registration_mode: str = "scan_to_scan",
+    submap_half_window: int = 2,
+    submap_support_stride: int | None = None,
+    submap_min_support_frames: int = 3,
+    submap_voxel_size: float | None = None,
+    map_half_window: int | None = None,
+    map_support_stride: int | None = None,
+    map_min_support_frames: int | None = None,
+    map_voxel_size: float | None = None,
+    run_profile: str | None = None,
 ) -> tuple[Path, dict]:
     record_files = discover_record_files(record_path)
     topic_frame_ids = get_topic_frame_ids(record_files, [lidar_topic])
@@ -508,7 +986,9 @@ def convert_record_to_standardized_samples(
 
     tf_edges = extract_tf_edges(record_files)
     tf_graph = build_transform_graph(tf_edges)
-    initial_transform_source = "/tf_static or merged tf graph"
+    record_reference_transform = lookup_transform(tf_graph, lidar_frame, parent_frame)
+    reference_transform_source = "/tf_static or merged tf graph"
+    initial_transform_source = reference_transform_source
     if initial_transform_path is not None:
         initial_transform, file_parent_frame, file_child_frame, _, _ = (
             load_extrinsics_file(initial_transform_path)
@@ -525,7 +1005,7 @@ def convert_record_to_standardized_samples(
             )
         initial_transform_source = str(Path(initial_transform_path).resolve())
     else:
-        initial_transform = lookup_transform(tf_graph, lidar_frame, parent_frame)
+        initial_transform = record_reference_transform
         if initial_transform is None:
             if not identity_initial_transform:
                 raise RuntimeError(
@@ -535,6 +1015,20 @@ def convert_record_to_standardized_samples(
                 )
             initial_transform = np.eye(4, dtype=float)
             initial_transform_source = "identity_fallback"
+            reference_transform_source = None
+    extraction_transform = np.asarray(
+        (
+            record_reference_transform
+            if record_reference_transform is not None
+            else initial_transform
+        ),
+        dtype=float,
+    )
+    extraction_transform_source = (
+        reference_transform_source
+        if record_reference_transform is not None
+        else initial_transform_source
+    )
 
     localization_to_imu = lookup_transform(tf_graph, parent_frame, "localization")
     if localization_to_imu is None:
@@ -601,7 +1095,7 @@ def convert_record_to_standardized_samples(
         cloud = load_pointcloud_from_meta(lidar_meta)
         expected_up_imu = -normalize_vector(gravity_imu)
         expected_up_lidar = normalize_vector(
-            initial_transform[:3, :3].T @ expected_up_imu
+            extraction_transform[:3, :3].T @ expected_up_imu
         )
         plane_result, plane_diag = _extract_ground_plane(
             cloud,
@@ -616,9 +1110,9 @@ def convert_record_to_standardized_samples(
 
         lidar_plane_normal = np.asarray(plane_result["lidar_plane_normal"], dtype=float)
         lidar_plane_offset = float(plane_result["lidar_plane_offset"])
-        imu_plane_normal = initial_transform[:3, :3] @ lidar_plane_normal
+        imu_plane_normal = extraction_transform[:3, :3] @ lidar_plane_normal
         imu_ground_height = float(
-            lidar_plane_offset - imu_plane_normal @ initial_transform[:3, 3]
+            lidar_plane_offset - imu_plane_normal @ extraction_transform[:3, 3]
         )
         weight = max(float(plane_result["inlier_ratio"]), 1e-3)
 
@@ -653,7 +1147,56 @@ def convert_record_to_standardized_samples(
     motion_diagnostics = []
     motion_window_diagnostics = []
     motion_rejected_low_fitness = 0
+    motion_registered_candidates: list[dict] = []
     motion_sync_threshold_ns = int(motion_pose_sync_threshold_ms * 1e6)
+    submap_support_stride = int(
+        motion_frame_stride if submap_support_stride is None else submap_support_stride
+    )
+    if motion_registration_mode not in (
+        "scan_to_scan",
+        "submap_to_submap",
+        "submap_to_map",
+    ):
+        raise ValueError(
+            "motion_registration_mode must be 'scan_to_scan', "
+            "'submap_to_submap', or 'submap_to_map'."
+        )
+    if (
+        motion_registration_mode in ("submap_to_submap", "submap_to_map")
+        and submap_half_window < 1
+    ):
+        raise ValueError(
+            "submap_half_window must be >= 1 for submap_to_submap/submap_to_map."
+        )
+    if submap_support_stride < 1:
+        raise ValueError("submap_support_stride must be >= 1.")
+    if submap_min_support_frames < 1:
+        raise ValueError("submap_min_support_frames must be >= 1.")
+    submap_voxel_size = float(
+        registration_voxel_size if submap_voxel_size is None else submap_voxel_size
+    )
+    map_half_window = int(
+        max(submap_half_window + 1, submap_half_window * 2)
+        if map_half_window is None
+        else map_half_window
+    )
+    map_support_stride = int(
+        submap_support_stride if map_support_stride is None else map_support_stride
+    )
+    map_min_support_frames = int(
+        max(submap_min_support_frames + 2, submap_min_support_frames)
+        if map_min_support_frames is None
+        else map_min_support_frames
+    )
+    map_voxel_size = float(
+        submap_voxel_size if map_voxel_size is None else map_voxel_size
+    )
+    if motion_registration_mode == "submap_to_map" and map_half_window < 1:
+        raise ValueError("map_half_window must be >= 1 for submap_to_map.")
+    if map_support_stride < 1:
+        raise ValueError("map_support_stride must be >= 1.")
+    if map_min_support_frames < 1:
+        raise ValueError("map_min_support_frames must be >= 1.")
     motion_candidates = _build_motion_candidates(
         lidar_metas=lidar_metas,
         pose_samples=pose_samples,
@@ -678,7 +1221,9 @@ def convert_record_to_standardized_samples(
         "remove_ground": False,
         "remove_walls": False,
     }
-    used_motion_ranges: list[tuple[int, int]] = []
+    cloud_cache = {}
+    alignment_cache: dict[int, dict] = {}
+    submap_cache = {}
 
     for window in motion_windows:
         window_diagnostic = {
@@ -686,8 +1231,10 @@ def convert_record_to_standardized_samples(
             "window_start_index": int(window["window_start_index"]),
             "window_end_index": int(window["window_end_index"]),
             "candidate_count": int(window["candidate_count"]),
+            "attempt_candidate_count": int(len(window["candidates"])),
             "best_pose_rotation_deg": float(window["best_pose_rotation_deg"]),
             "best_pose_translation_m": float(window["best_pose_translation_m"]),
+            "stride_values": list(window.get("stride_values", [])),
             "valid": bool(window["valid"]),
             "gate_reasons": list(window["gate_reasons"]),
         }
@@ -695,17 +1242,10 @@ def convert_record_to_standardized_samples(
             motion_window_diagnostics.append(window_diagnostic)
             continue
 
-        selected_candidate_summary = None
         attempt_count = 0
-        overlap_skipped = 0
         rejection_reasons = []
+        registered_candidate_summaries = []
         for candidate in window["candidates"]:
-            if len(motion_samples) >= max_motion_samples:
-                break
-            if _candidate_overlaps_used_ranges(candidate, used_motion_ranges):
-                overlap_skipped += 1
-                continue
-
             start_meta = candidate["start_meta"]
             end_meta = candidate["end_meta"]
             start_pose_dt_ns = candidate["start_pose_dt_ns"]
@@ -724,14 +1264,88 @@ def convert_record_to_standardized_samples(
                 "pose_rotation_deg": float(candidate["pose_rotation_deg"]),
                 "pose_translation_m": float(candidate["pose_translation_m"]),
                 "window_score": float(candidate["score"]),
+                "information_score": float(candidate["information_score"]),
+                "imu_signed_yaw_deg": float(candidate["imu_signed_yaw_deg"]),
+                "imu_translation_heading_deg": (
+                    None
+                    if candidate.get("imu_translation_heading_deg") is None
+                    else float(candidate["imu_translation_heading_deg"])
+                ),
+                "motion_registration_mode": motion_registration_mode,
+                "registered": False,
+                "passed_registration_gate": False,
+                "selected": False,
             }
             attempt_count += 1
             imu_delta = candidate["imu_delta"]
             lidar_initial_guess = (
-                np.linalg.inv(initial_transform) @ imu_delta @ initial_transform
+                np.linalg.inv(extraction_transform) @ imu_delta @ extraction_transform
             )
-            source_cloud = load_pointcloud_from_meta(start_meta)
-            target_cloud = load_pointcloud_from_meta(end_meta)
+            if motion_registration_mode in ("submap_to_submap", "submap_to_map"):
+                source_cloud, source_submap_info = _build_local_lidar_submap(
+                    int(candidate["start_index"]),
+                    lidar_metas=lidar_metas,
+                    pose_samples=pose_samples,
+                    pose_timestamps=pose_timestamps,
+                    sync_threshold_ns=motion_sync_threshold_ns,
+                    extraction_transform=extraction_transform,
+                    submap_half_window=int(submap_half_window),
+                    submap_support_stride=int(submap_support_stride),
+                    submap_min_support_frames=int(submap_min_support_frames),
+                    submap_voxel_size=float(submap_voxel_size),
+                    alignment_cache=alignment_cache,
+                    cloud_cache=cloud_cache,
+                    submap_cache=submap_cache,
+                )
+                if motion_registration_mode == "submap_to_map":
+                    target_cloud, target_submap_info = _build_local_lidar_submap(
+                        int(candidate["end_index"]),
+                        lidar_metas=lidar_metas,
+                        pose_samples=pose_samples,
+                        pose_timestamps=pose_timestamps,
+                        sync_threshold_ns=motion_sync_threshold_ns,
+                        extraction_transform=extraction_transform,
+                        submap_half_window=int(map_half_window),
+                        submap_support_stride=int(map_support_stride),
+                        submap_min_support_frames=int(map_min_support_frames),
+                        submap_voxel_size=float(map_voxel_size),
+                        alignment_cache=alignment_cache,
+                        cloud_cache=cloud_cache,
+                        submap_cache=submap_cache,
+                    )
+                else:
+                    target_cloud, target_submap_info = _build_local_lidar_submap(
+                        int(candidate["end_index"]),
+                        lidar_metas=lidar_metas,
+                        pose_samples=pose_samples,
+                        pose_timestamps=pose_timestamps,
+                        sync_threshold_ns=motion_sync_threshold_ns,
+                        extraction_transform=extraction_transform,
+                        submap_half_window=int(submap_half_window),
+                        submap_support_stride=int(submap_support_stride),
+                        submap_min_support_frames=int(submap_min_support_frames),
+                        submap_voxel_size=float(submap_voxel_size),
+                        alignment_cache=alignment_cache,
+                        cloud_cache=cloud_cache,
+                        submap_cache=submap_cache,
+                    )
+                diagnostic["source_submap"] = source_submap_info
+                if motion_registration_mode == "submap_to_map":
+                    diagnostic["target_map"] = target_submap_info
+                else:
+                    diagnostic["target_submap"] = target_submap_info
+                if source_cloud is None or target_cloud is None:
+                    diagnostic["reason"] = (
+                        "local_map_build_failed"
+                        if motion_registration_mode == "submap_to_map"
+                        else "submap_build_failed"
+                    )
+                    rejection_reasons.append(diagnostic["reason"])
+                    motion_diagnostics.append(diagnostic)
+                    continue
+            else:
+                source_cloud = load_pointcloud_from_meta(start_meta)
+                target_cloud = load_pointcloud_from_meta(end_meta)
             lidar_delta, _, registration_result = calibrate_lidar_extrinsic(
                 source_cloud,
                 target_cloud,
@@ -750,100 +1364,213 @@ def convert_record_to_standardized_samples(
             registration_inlier_rmse = float(registration_result.inlier_rmse)
             diagnostic.update(
                 {
-                    "selected": True,
+                    "registered": True,
                     "registration_fitness": registration_fitness,
                     "registration_inlier_rmse": registration_inlier_rmse,
                 }
             )
             if registration_fitness < min_registration_fitness:
-                diagnostic["selected"] = False
                 diagnostic["reason"] = "low_registration_fitness"
                 motion_rejected_low_fitness += 1
                 rejection_reasons.append("low_registration_fitness")
                 motion_diagnostics.append(diagnostic)
                 continue
 
+            diagnostic["passed_registration_gate"] = True
             weight = max(registration_fitness, 1e-3)
             imu_quat = R.from_matrix(imu_delta[:3, :3]).as_quat()
             lidar_quat = R.from_matrix(lidar_delta[:3, :3]).as_quat()
-            motion_samples.append(
-                {
-                    "start_timestamp_ns": int(start_meta.timestamp_ns),
-                    "end_timestamp_ns": int(end_meta.timestamp_ns),
-                    "imu_delta": {
-                        "translation": {
-                            "x": float(imu_delta[0, 3]),
-                            "y": float(imu_delta[1, 3]),
-                            "z": float(imu_delta[2, 3]),
-                        },
-                        "rotation": {
-                            "x": float(imu_quat[0]),
-                            "y": float(imu_quat[1]),
-                            "z": float(imu_quat[2]),
-                            "w": float(imu_quat[3]),
-                        },
-                    },
-                    "lidar_delta": {
-                        "translation": {
-                            "x": float(lidar_delta[0, 3]),
-                            "y": float(lidar_delta[1, 3]),
-                            "z": float(lidar_delta[2, 3]),
-                        },
-                        "rotation": {
-                            "x": float(lidar_quat[0]),
-                            "y": float(lidar_quat[1]),
-                            "z": float(lidar_quat[2]),
-                            "w": float(lidar_quat[3]),
-                        },
-                    },
-                    "weight": weight,
-                    "sync_dt_ms": float(max(start_pose_dt_ns, end_pose_dt_ns) / 1e6),
-                    "metadata": {
-                        "record_path_start": start_meta.record_path,
-                        "record_path_end": end_meta.record_path,
-                        "lidar_topic": lidar_topic,
-                        "pose_topic": pose_topic,
-                        "window_id": int(window["window_id"]),
-                        "frame_stride": int(candidate["stride"]),
-                        "pose_rotation_deg": float(candidate["pose_rotation_deg"]),
-                        "pose_translation_m": float(candidate["pose_translation_m"]),
-                        "registration_fitness": registration_fitness,
-                        "registration_inlier_rmse": registration_inlier_rmse,
-                    },
-                }
-            )
-            used_motion_ranges.append((candidate["start_index"], candidate["end_index"]))
-            selected_candidate_summary = {
-                "start_timestamp_ns": int(start_meta.timestamp_ns),
-                "end_timestamp_ns": int(end_meta.timestamp_ns),
-                "frame_stride": int(candidate["stride"]),
-                "pose_rotation_deg": float(candidate["pose_rotation_deg"]),
-                "pose_translation_m": float(candidate["pose_translation_m"]),
+            registered_candidate = {
+                **candidate,
+                "lidar_delta": lidar_delta,
                 "registration_fitness": registration_fitness,
                 "registration_inlier_rmse": registration_inlier_rmse,
+                "weight": weight,
+                "sync_dt_ms": float(max(start_pose_dt_ns, end_pose_dt_ns) / 1e6),
+                "imu_quat": imu_quat,
+                "lidar_quat": lidar_quat,
             }
+            motion_registered_candidates.append(registered_candidate)
+            registered_candidate_summaries.append(
+                {
+                    **_summarize_motion_candidate(candidate),
+                    "registration_fitness": registration_fitness,
+                    "registration_inlier_rmse": registration_inlier_rmse,
+                }
+            )
             motion_diagnostics.append(diagnostic)
-            break
 
         window_diagnostic["attempt_count"] = int(attempt_count)
-        window_diagnostic["overlap_skipped"] = int(overlap_skipped)
-        if selected_candidate_summary is not None:
-            window_diagnostic["selected"] = True
-            window_diagnostic["selected_candidate"] = selected_candidate_summary
+        window_diagnostic["registered_candidate_count"] = int(
+            len(registered_candidate_summaries)
+        )
+        if registered_candidate_summaries:
+            window_diagnostic["registered_candidates"] = registered_candidate_summaries
+            window_diagnostic["selected"] = False
         else:
             window_diagnostic["selected"] = False
-            if len(motion_samples) >= max_motion_samples:
-                window_diagnostic["reason"] = "max_motion_samples_reached"
-            elif attempt_count <= 0 and overlap_skipped > 0:
-                window_diagnostic["reason"] = "window_candidates_overlap_selected_ranges"
-            elif rejection_reasons:
+            if rejection_reasons:
                 window_diagnostic["reason"] = "window_no_candidate_passing_gate"
                 window_diagnostic["candidate_rejection_reasons"] = rejection_reasons
             else:
                 window_diagnostic["reason"] = "window_not_selected"
         motion_window_diagnostics.append(window_diagnostic)
-        if len(motion_samples) >= max_motion_samples:
+
+    motion_window_diagnostics_by_id = {
+        int(item["window_id"]): item for item in motion_window_diagnostics
+    }
+    selected_registered_candidates = []
+    used_motion_ranges: list[tuple[int, int]] = []
+    for window in motion_windows:
+        if len(selected_registered_candidates) >= max_motion_samples:
             break
+        window_candidates = [
+            candidate
+            for candidate in motion_registered_candidates
+            if int(candidate["window_id"]) == int(window["window_id"])
+        ]
+        if not window_candidates:
+            continue
+
+        best_candidate = None
+        best_selection_score = None
+        overlap_rejected = 0
+        for candidate in window_candidates:
+            if _candidate_overlaps_used_ranges(candidate, used_motion_ranges):
+                overlap_rejected += 1
+                continue
+            selection_score = _global_motion_selection_score(
+                candidate, selected_registered_candidates, motion_frame_stride
+            )
+            if best_candidate is None or selection_score > best_selection_score:
+                best_candidate = candidate
+                best_selection_score = selection_score
+
+        window_diagnostic = motion_window_diagnostics_by_id[int(window["window_id"])]
+        window_diagnostic["global_overlap_rejected"] = int(overlap_rejected)
+        if best_candidate is None:
+            window_diagnostic["reason"] = "window_candidates_overlap_selected_ranges"
+            continue
+
+        best_candidate["global_selection_score"] = float(best_selection_score)
+        selected_registered_candidates.append(best_candidate)
+        used_motion_ranges.append(
+            (int(best_candidate["start_index"]), int(best_candidate["end_index"]))
+        )
+        window_diagnostic["selected"] = True
+        window_diagnostic["selected_candidate"] = {
+            **_summarize_motion_candidate(best_candidate),
+            "registration_fitness": float(best_candidate["registration_fitness"]),
+            "registration_inlier_rmse": float(
+                best_candidate["registration_inlier_rmse"]
+            ),
+            "global_selection_score": float(best_selection_score),
+        }
+
+    selected_candidate_keys = {
+        (
+            int(candidate["start_meta"].timestamp_ns),
+            int(candidate["end_meta"].timestamp_ns),
+            int(candidate["stride"]),
+        )
+        for candidate in selected_registered_candidates
+    }
+    for diagnostic in motion_diagnostics:
+        candidate_key = (
+            int(diagnostic["start_timestamp_ns"]),
+            int(diagnostic["end_timestamp_ns"]),
+            int(diagnostic["frame_stride"]),
+        )
+        if candidate_key in selected_candidate_keys:
+            diagnostic["selected"] = True
+
+    for candidate in sorted(
+        selected_registered_candidates,
+        key=lambda item: int(item["start_meta"].timestamp_ns),
+    ):
+        imu_delta = candidate["imu_delta"]
+        lidar_delta = candidate["lidar_delta"]
+        motion_samples.append(
+            {
+                "start_timestamp_ns": int(candidate["start_meta"].timestamp_ns),
+                "end_timestamp_ns": int(candidate["end_meta"].timestamp_ns),
+                "imu_delta": {
+                    "translation": {
+                        "x": float(imu_delta[0, 3]),
+                        "y": float(imu_delta[1, 3]),
+                        "z": float(imu_delta[2, 3]),
+                    },
+                    "rotation": {
+                        "x": float(candidate["imu_quat"][0]),
+                        "y": float(candidate["imu_quat"][1]),
+                        "z": float(candidate["imu_quat"][2]),
+                        "w": float(candidate["imu_quat"][3]),
+                    },
+                },
+                "lidar_delta": {
+                    "translation": {
+                        "x": float(lidar_delta[0, 3]),
+                        "y": float(lidar_delta[1, 3]),
+                        "z": float(lidar_delta[2, 3]),
+                    },
+                    "rotation": {
+                        "x": float(candidate["lidar_quat"][0]),
+                        "y": float(candidate["lidar_quat"][1]),
+                        "z": float(candidate["lidar_quat"][2]),
+                        "w": float(candidate["lidar_quat"][3]),
+                    },
+                },
+                "weight": float(candidate["weight"]),
+                "sync_dt_ms": float(candidate["sync_dt_ms"]),
+                "metadata": {
+                    "record_path_start": candidate["start_meta"].record_path,
+                    "record_path_end": candidate["end_meta"].record_path,
+                    "lidar_topic": lidar_topic,
+                    "pose_topic": pose_topic,
+                    "window_id": int(candidate["window_id"]),
+                    "motion_registration_mode": motion_registration_mode,
+                    "frame_stride": int(candidate["stride"]),
+                    "pose_rotation_deg": float(candidate["pose_rotation_deg"]),
+                    "pose_translation_m": float(candidate["pose_translation_m"]),
+                    "information_score": float(candidate["information_score"]),
+                    "imu_signed_yaw_deg": float(candidate["imu_signed_yaw_deg"]),
+                    "imu_translation_heading_deg": (
+                        None
+                        if candidate.get("imu_translation_heading_deg") is None
+                        else float(candidate["imu_translation_heading_deg"])
+                    ),
+                    "registration_fitness": float(candidate["registration_fitness"]),
+                    "registration_inlier_rmse": float(
+                        candidate["registration_inlier_rmse"]
+                    ),
+                    "global_selection_score": float(
+                        candidate["global_selection_score"]
+                    ),
+                },
+            }
+        )
+
+    selected_motion_headings = [
+        float(sample["metadata"]["imu_translation_heading_deg"])
+        for sample in motion_samples
+        if sample["metadata"].get("imu_translation_heading_deg") is not None
+    ]
+    selected_turn_counts = {"left": 0, "right": 0}
+    selected_heading_bins = set()
+    selected_axis_vectors = []
+    for candidate in selected_registered_candidates:
+        turn_sign = _motion_turn_sign(float(candidate["imu_signed_yaw_deg"]))
+        if turn_sign in selected_turn_counts:
+            selected_turn_counts[turn_sign] += 1
+        heading_bin = _heading_bin(candidate.get("imu_translation_heading_deg"))
+        if heading_bin is not None:
+            selected_heading_bins.add(int(heading_bin))
+        selected_axis_vectors.append(_candidate_axis_abs_vector(candidate))
+    selected_axis_mean = (
+        np.mean(np.asarray(selected_axis_vectors, dtype=float), axis=0)
+        if selected_axis_vectors
+        else None
+    )
 
     payload = {
         "parent_frame": parent_frame,
@@ -878,6 +1605,7 @@ def convert_record_to_standardized_samples(
             "planar_motion_policy": calibration_planar_motion_policy,
         },
         "metadata": {
+            "run_profile": run_profile or "custom",
             "record_path": record_path,
             "record_files": record_files,
             "lidar_topic": lidar_topic,
@@ -887,8 +1615,20 @@ def convert_record_to_standardized_samples(
             "ground_pose_sync_threshold_ms": float(ground_pose_sync_threshold_ms),
             "motion_pose_sync_threshold_ms": float(motion_pose_sync_threshold_ms),
             "motion_frame_stride": int(motion_frame_stride),
+            "motion_selection_strategy": "global_diversity",
+            "motion_registration_mode": motion_registration_mode,
+            "submap_half_window": int(submap_half_window),
+            "submap_support_stride": int(submap_support_stride),
+            "submap_min_support_frames": int(submap_min_support_frames),
+            "submap_voxel_size": float(submap_voxel_size),
+            "map_half_window": int(map_half_window),
+            "map_support_stride": int(map_support_stride),
+            "map_min_support_frames": int(map_min_support_frames),
+            "map_voxel_size": float(map_voxel_size),
             "min_registration_fitness": float(min_registration_fitness),
             "initial_transform_source": initial_transform_source,
+            "extraction_transform_source": extraction_transform_source,
+            "reference_transform_source": reference_transform_source,
             "ground_selected": len(ground_samples),
             "motion_selected": len(motion_samples),
             "motion_candidate_count": len(motion_candidates),
@@ -896,12 +1636,63 @@ def convert_record_to_standardized_samples(
             "motion_valid_window_count": int(
                 sum(1 for window in motion_windows if window["valid"])
             ),
+            "motion_registered_candidate_count": len(motion_registered_candidates),
         },
         "ground_samples": ground_samples,
         "motion_samples": motion_samples,
     }
+    payload["extraction_transform"] = {
+        "header": {
+            "stamp": {"secs": 0, "nsecs": 0},
+            "seq": 0,
+            "frame_id": parent_frame,
+        },
+        "transform": {
+            "translation": {
+                "x": float(extraction_transform[0, 3]),
+                "y": float(extraction_transform[1, 3]),
+                "z": float(extraction_transform[2, 3]),
+            },
+            "rotation": {
+                **{
+                    key: float(value)
+                    for key, value in zip(
+                        ("x", "y", "z", "w"),
+                        R.from_matrix(extraction_transform[:3, :3]).as_quat(),
+                    )
+                }
+            },
+        },
+        "child_frame_id": lidar_frame,
+    }
+    if record_reference_transform is not None:
+        payload["reference_transform"] = {
+            "header": {
+                "stamp": {"secs": 0, "nsecs": 0},
+                "seq": 0,
+                "frame_id": parent_frame,
+            },
+            "transform": {
+                "translation": {
+                    "x": float(record_reference_transform[0, 3]),
+                    "y": float(record_reference_transform[1, 3]),
+                    "z": float(record_reference_transform[2, 3]),
+                },
+                "rotation": {
+                    **{
+                        key: float(value)
+                        for key, value in zip(
+                            ("x", "y", "z", "w"),
+                            R.from_matrix(record_reference_transform[:3, :3]).as_quat(),
+                        )
+                    }
+                },
+            },
+            "child_frame_id": lidar_frame,
+        }
     diagnostics = {
         "summary": {
+            "run_profile": run_profile or "custom",
             "record_files": record_files,
             "lidar_topic": lidar_topic,
             "lidar_frame": lidar_frame,
@@ -911,15 +1702,47 @@ def convert_record_to_standardized_samples(
             "ground_attempted": len(ground_indices),
             "motion_attempted": len(motion_candidates),
             "motion_rejected_low_fitness": motion_rejected_low_fitness,
+            "motion_registered_candidate_count": len(motion_registered_candidates),
             "motion_window_count": len(motion_windows),
             "motion_valid_window_count": int(
                 sum(1 for window in motion_windows if window["valid"])
             ),
             "min_registration_fitness": float(min_registration_fitness),
+            "motion_selection_strategy": "global_diversity",
+            "motion_registration_mode": motion_registration_mode,
+            "map_half_window": int(map_half_window),
+            "map_support_stride": int(map_support_stride),
+            "map_min_support_frames": int(map_min_support_frames),
+            "map_voxel_size": float(map_voxel_size),
         },
         "ground": ground_diagnostics,
         "motion_windows": motion_window_diagnostics,
         "motion": motion_diagnostics,
+        "motion_selection": {
+            "strategy": "global_diversity",
+            "registration_mode": motion_registration_mode,
+            "selected_frame_strides": sorted(
+                {int(sample["metadata"]["frame_stride"]) for sample in motion_samples}
+            ),
+            "selected_turn_counts": {
+                "left": int(selected_turn_counts["left"]),
+                "right": int(selected_turn_counts["right"]),
+            },
+            "selected_heading_bin_count": int(len(selected_heading_bins)),
+            "selected_translation_heading_span_deg": circular_span_deg(
+                selected_motion_headings
+            ),
+            "selected_rotation_axis_abs_mean_xyz": (
+                {
+                    "x": float(selected_axis_mean[0]),
+                    "y": float(selected_axis_mean[1]),
+                    "z": float(selected_axis_mean[2]),
+                }
+                if selected_axis_mean is not None
+                else None
+            ),
+            "registered_candidate_count": len(motion_registered_candidates),
+        },
     }
     with open(sample_path, "w", encoding="utf-8") as file:
         yaml.safe_dump(payload, file, sort_keys=False)
@@ -928,9 +1751,258 @@ def convert_record_to_standardized_samples(
     return sample_path, diagnostics
 
 
+def _recommendation_rank(recommendation: str | None) -> int:
+    ranking = {
+        "full_6dof_candidate": 5,
+        "reference_conflict_review": 4,
+        "holdout_review": 3,
+        "z_roll_pitch_priority": 2,
+        "basin_sensitivity_review": 1,
+        "reextract_review": 0,
+        "insufficient_data": 0,
+    }
+    return ranking.get(recommendation or "", -1)
+
+
+def _status_rank(status: str | None) -> int:
+    ranking = {"pass": 2, "warning": 1}
+    return ranking.get(status or "", 0)
+
+
+def _delta_rotation_deg(delta: dict | None) -> float:
+    if not isinstance(delta, dict):
+        return float("inf")
+    return float(delta.get("rotation_deg", float("inf")))
+
+
+def _delta_translation_m(delta: dict | None) -> float:
+    if not isinstance(delta, dict):
+        return float("inf")
+    return float(delta.get("translation_norm_m", float("inf")))
+
+
+def _build_reextract_pass_summary(
+    pass_name: str,
+    pass_dir: Path,
+    sample_path: Path,
+    diagnostics: dict,
+    result: dict,
+    manifest: dict,
+) -> dict:
+    metrics = result["metrics"]
+    coarse_metrics = metrics.get("coarse_metrics", {})
+    assessment = metrics.get("vehicle_motion_assessment", {})
+    summary = metrics.get("summary", {})
+    return {
+        "pass_name": pass_name,
+        "pass_dir": str(pass_dir),
+        "sample_path": str(sample_path),
+        "calibration_dir": str(pass_dir / "calibration"),
+        "calibrated_extrinsics": manifest["artifacts"]["calibrated_extrinsics"],
+        "recommendation": assessment.get("recommendation"),
+        "solver_policy": summary.get("solver_policy"),
+        "trusted_reference_consistency": assessment.get(
+            "trusted_reference_consistency"
+        ),
+        "extraction_consistency": assessment.get("extraction_consistency"),
+        "planar_basin_stability": assessment.get("planar_basin_stability"),
+        "full_prior_robustness": assessment.get("full_prior_robustness"),
+        "delta_to_reference": summary.get("delta_to_reference"),
+        "delta_to_extraction": summary.get("delta_to_extraction"),
+        "motion_rotation_residual_p95_deg": coarse_metrics.get(
+            "motion_rotation_residual_p95_deg"
+        ),
+        "motion_translation_residual_p95_m": coarse_metrics.get(
+            "motion_translation_residual_p95_m"
+        ),
+        "motion_registration_fitness_p05": coarse_metrics.get(
+            "motion_registration_fitness_p05"
+        ),
+        "ground_selected": diagnostics["summary"]["ground_selected"],
+        "motion_selected": diagnostics["summary"]["motion_selected"],
+    }
+
+
+def _rewrite_pass_summary_paths(pass_summary: dict, pass_dir: Path) -> None:
+    pass_summary["pass_dir"] = str(pass_dir)
+    pass_summary["sample_path"] = str(pass_dir / "standardized_samples.yaml")
+    pass_summary["calibration_dir"] = str(pass_dir / "calibration")
+    calibrated_extrinsics = Path(pass_summary["calibrated_extrinsics"])
+    pass_summary["calibrated_extrinsics"] = str(
+        pass_dir / "calibration" / "calibrated" / calibrated_extrinsics.name
+    )
+
+
+def _reextract_trigger_reasons(pass_summary: dict) -> list[str]:
+    reasons: list[str] = []
+    if pass_summary.get("recommendation") == "reextract_review":
+        reasons.append("recommendation=reextract_review")
+    if pass_summary.get("extraction_consistency") == "warning":
+        reasons.append("extraction_consistency=warning")
+    return reasons
+
+
+def _pass_selection_score(pass_summary: dict) -> tuple[float, ...]:
+    return (
+        float(_recommendation_rank(pass_summary.get("recommendation"))),
+        float(_status_rank(pass_summary.get("trusted_reference_consistency"))),
+        float(_status_rank(pass_summary.get("extraction_consistency"))),
+        float(_status_rank(pass_summary.get("planar_basin_stability"))),
+        float(_status_rank(pass_summary.get("full_prior_robustness"))),
+        -_delta_rotation_deg(pass_summary.get("delta_to_reference")),
+        -_delta_translation_m(pass_summary.get("delta_to_reference")),
+        -_delta_rotation_deg(pass_summary.get("delta_to_extraction")),
+        -_delta_translation_m(pass_summary.get("delta_to_extraction")),
+        -float(pass_summary.get("motion_rotation_residual_p95_deg", float("inf"))),
+        -float(pass_summary.get("motion_translation_residual_p95_m", float("inf"))),
+        float(pass_summary.get("motion_registration_fitness_p05", 0.0)),
+    )
+
+
+def _select_reextract_pass(pass_summaries: list[dict]) -> dict:
+    return max(pass_summaries, key=_pass_selection_score)
+
+
+def _copy_output_artifacts(source_dir: Path, target_dir: Path) -> None:
+    for name in (
+        "standardized_samples.yaml",
+        "conversion_diagnostics.yaml",
+        "calibration",
+    ):
+        source_path = source_dir / name
+        target_path = target_dir / name
+        if not source_path.exists():
+            continue
+        if target_path.is_dir():
+            shutil.rmtree(target_path)
+        elif target_path.exists():
+            target_path.unlink()
+        if source_path.is_dir():
+            shutil.copytree(source_path, target_path)
+        else:
+            shutil.copy2(source_path, target_path)
+
+
+def _refresh_calibration_manifest_paths(calibration_dir: Path) -> None:
+    manifest_path = calibration_dir / "diagnostics" / "manifest.yaml"
+    if not manifest_path.exists():
+        return
+    with open(manifest_path, "r", encoding="utf-8") as file:
+        manifest = yaml.safe_load(file) or {}
+    artifacts = manifest.setdefault("artifacts", {})
+    artifacts["calibrated_tf"] = str(calibration_dir / "calibrated_tf.yaml")
+    artifacts["metrics"] = str(calibration_dir / "metrics.yaml")
+    parent_frame = manifest.get("parent_frame")
+    child_frame = manifest.get("child_frame")
+    if parent_frame and child_frame:
+        filename = f"{parent_frame}_{child_frame}_extrinsics.yaml"
+        artifacts["initial_guess"] = str(calibration_dir / "initial_guess" / filename)
+        artifacts["calibrated_extrinsics"] = str(
+            calibration_dir / "calibrated" / filename
+        )
+    diagnostics = artifacts.setdefault("diagnostics", {})
+    diagnostics["algorithm"] = str(calibration_dir / "diagnostics" / "algorithm.yaml")
+    diagnostics["evaluation"] = str(calibration_dir / "diagnostics" / "evaluation.yaml")
+    diagnostics["observability"] = str(
+        calibration_dir / "diagnostics" / "observability.yaml"
+    )
+    with open(manifest_path, "w", encoding="utf-8") as file:
+        yaml.safe_dump(manifest, file, sort_keys=False)
+
+
+def _run_conversion_and_calibration(
+    args: argparse.Namespace,
+    output_dir: Path,
+    initial_transform_path: str | None,
+    identity_initial_transform: bool,
+) -> dict:
+    sample_path, diagnostics = convert_record_to_standardized_samples(
+        record_path=args.record_path,
+        output_dir=str(output_dir),
+        lidar_topic=args.lidar_topic,
+        pose_topic=args.pose_topic,
+        imu_topic=args.imu_topic,
+        parent_frame=args.parent_frame,
+        child_frame=args.child_frame,
+        initial_transform_path=initial_transform_path,
+        identity_initial_transform=identity_initial_transform,
+        gravity_source=args.gravity_source,
+        ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
+        motion_pose_sync_threshold_ms=args.motion_pose_sync_threshold_ms,
+        imu_gravity_window_ms=args.imu_gravity_window_ms,
+        max_ground_samples=args.max_ground_samples,
+        max_motion_samples=args.max_motion_samples,
+        motion_frame_stride=args.motion_frame_stride,
+        plane_dist_thresh=args.plane_dist_thresh,
+        plane_normal_thresh_deg=args.plane_normal_thresh_deg,
+        registration_voxel_size=args.registration_voxel_size,
+        min_registration_fitness=args.min_registration_fitness,
+        calibration_loss=args.loss,
+        calibration_motion_rotation_deg=args.min_motion_rotation_deg,
+        calibration_planar_motion_policy=args.planar_motion_policy,
+        motion_registration_mode=args.motion_registration_mode,
+        submap_half_window=args.submap_half_window,
+        submap_support_stride=args.submap_support_stride,
+        submap_min_support_frames=args.submap_min_support_frames,
+        submap_voxel_size=args.submap_voxel_size,
+        map_half_window=args.map_half_window,
+        map_support_stride=args.map_support_stride,
+        map_min_support_frames=args.map_min_support_frames,
+        map_voxel_size=args.map_voxel_size,
+        run_profile=args.profile,
+    )
+    logging.info("Wrote standardized samples to %s", sample_path)
+    logging.info(
+        "Converted %d ground samples and %d motion samples.",
+        diagnostics["summary"]["ground_selected"],
+        diagnostics["summary"]["motion_selected"],
+    )
+    calibration_output_dir = output_dir / "calibration"
+    dataset, config, raw_payload = load_dataset(str(sample_path))
+    config_updates = {
+        "loss": args.loss,
+        "min_motion_rotation_deg": args.min_motion_rotation_deg,
+        "planar_motion_policy": args.planar_motion_policy,
+    }
+    config = CalibrationConfig(**{**config.__dict__, **config_updates})
+    result = run_calibration(
+        dataset, config=config, output_dir=str(calibration_output_dir)
+    )
+    manifest = write_outputs(
+        output_dir=calibration_output_dir,
+        dataset=dataset,
+        initial_transform=result["initial_transform"],
+        final_transform=result["final_transform"],
+        metrics_output=result["metrics"],
+        algorithm_report={
+            "input_file": str(sample_path.resolve()),
+            "config": config.__dict__,
+            "dataset_metadata": dataset.metadata,
+            "raw_metadata": raw_payload.get("metadata", {}),
+            "conversion_summary": diagnostics["summary"],
+            "stages": result["stages"],
+        },
+        evaluation_report=result["evaluation"],
+    )
+    logging.info("Saved lidar2imu calibration outputs to %s", calibration_output_dir)
+    logging.info("Manifest: %s", manifest)
+    return {
+        "sample_path": sample_path,
+        "diagnostics": diagnostics,
+        "result": result,
+        "manifest": manifest,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert Apollo record data into standardized lidar2imu samples and optionally run calibration."
+    )
+    parser.add_argument(
+        "--profile",
+        choices=sorted(RUN_PROFILE_PRESETS.keys()),
+        default=None,
+        help="Apply a fixed lidar2imu preset. baseline=stable scan-to-scan reference; production=current submap-to-map production candidate. Explicit CLI flags still override preset values.",
     )
     parser.add_argument(
         "--record-path",
@@ -1036,6 +2108,60 @@ def main() -> None:
         help="Voxel size used for LiDAR-to-LiDAR registration.",
     )
     parser.add_argument(
+        "--motion-registration-mode",
+        default="scan_to_scan",
+        choices=["scan_to_scan", "submap_to_submap", "submap_to_map"],
+        help="Use direct pair registration, symmetric local submaps, or local-submap to larger local-map registration for motion factors.",
+    )
+    parser.add_argument(
+        "--submap-half-window",
+        type=int,
+        default=2,
+        help="Number of support frames on each side of the anchor when motion-registration-mode=submap_to_submap.",
+    )
+    parser.add_argument(
+        "--submap-support-stride",
+        type=int,
+        default=None,
+        help="Stride between support frames inside each local submap. Defaults to motion-frame-stride.",
+    )
+    parser.add_argument(
+        "--submap-min-support-frames",
+        type=int,
+        default=3,
+        help="Minimum aligned LiDAR frames required to keep a local submap candidate.",
+    )
+    parser.add_argument(
+        "--submap-voxel-size",
+        type=float,
+        default=None,
+        help="Optional voxel size for the merged local submap. Defaults to registration-voxel-size.",
+    )
+    parser.add_argument(
+        "--map-half-window",
+        type=int,
+        default=None,
+        help="Number of support frames on each side of the target anchor when motion-registration-mode=submap_to_map. Defaults to a larger window than submap-half-window.",
+    )
+    parser.add_argument(
+        "--map-support-stride",
+        type=int,
+        default=None,
+        help="Stride between support frames inside the target local map when motion-registration-mode=submap_to_map. Defaults to submap-support-stride.",
+    )
+    parser.add_argument(
+        "--map-min-support-frames",
+        type=int,
+        default=None,
+        help="Minimum aligned LiDAR frames required to keep a target local map candidate. Defaults above submap-min-support-frames.",
+    )
+    parser.add_argument(
+        "--map-voxel-size",
+        type=float,
+        default=None,
+        help="Optional voxel size for the target local map in submap_to_map mode. Defaults to submap-voxel-size.",
+    )
+    parser.add_argument(
         "--min-registration-fitness",
         type=float,
         default=0.55,
@@ -1059,77 +2185,136 @@ def main() -> None:
         help="Run lidar2imu calibration immediately after conversion.",
     )
     parser.add_argument(
+        "--auto-reextract-if-needed",
+        action="store_true",
+        help="When calibration reports stale extraction geometry, rerun one second extraction/calibration pass using the pass-1 calibrated transform as the extraction seed.",
+    )
+    parser.add_argument(
         "--planar-motion-policy",
         default="auto",
         choices=["auto", "free", "freeze_xyyaw"],
         help="How to handle weak planar observability during calibration.",
     )
     args = parser.parse_args()
+    _apply_run_profile(args, _explicit_cli_options(sys.argv[1:]))
+    if args.profile is not None:
+        logging.info("Using lidar2imu %s profile.", args.profile)
 
-    sample_path, diagnostics = convert_record_to_standardized_samples(
-        record_path=args.record_path,
-        output_dir=args.output_dir,
-        lidar_topic=args.lidar_topic,
-        pose_topic=args.pose_topic,
-        imu_topic=args.imu_topic,
-        parent_frame=args.parent_frame,
-        child_frame=args.child_frame,
-        initial_transform_path=args.initial_transform,
-        identity_initial_transform=args.identity_initial_transform,
-        gravity_source=args.gravity_source,
-        ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
-        motion_pose_sync_threshold_ms=args.motion_pose_sync_threshold_ms,
-        imu_gravity_window_ms=args.imu_gravity_window_ms,
-        max_ground_samples=args.max_ground_samples,
-        max_motion_samples=args.max_motion_samples,
-        motion_frame_stride=args.motion_frame_stride,
-        plane_dist_thresh=args.plane_dist_thresh,
-        plane_normal_thresh_deg=args.plane_normal_thresh_deg,
-        registration_voxel_size=args.registration_voxel_size,
-        min_registration_fitness=args.min_registration_fitness,
-        calibration_loss=args.loss,
-        calibration_motion_rotation_deg=args.min_motion_rotation_deg,
-        calibration_planar_motion_policy=args.planar_motion_policy,
-    )
-    logging.info("Wrote standardized samples to %s", sample_path)
-    logging.info(
-        "Converted %d ground samples and %d motion samples.",
-        diagnostics["summary"]["ground_selected"],
-        diagnostics["summary"]["motion_selected"],
-    )
+    if args.auto_reextract_if_needed and not args.calibrate:
+        parser.error("--auto-reextract-if-needed requires --calibrate")
 
+    output_dir = Path(args.output_dir)
     if not args.calibrate:
+        sample_path, diagnostics = convert_record_to_standardized_samples(
+            record_path=args.record_path,
+            output_dir=str(output_dir),
+            lidar_topic=args.lidar_topic,
+            pose_topic=args.pose_topic,
+            imu_topic=args.imu_topic,
+            parent_frame=args.parent_frame,
+            child_frame=args.child_frame,
+            initial_transform_path=args.initial_transform,
+            identity_initial_transform=args.identity_initial_transform,
+            gravity_source=args.gravity_source,
+            ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
+            motion_pose_sync_threshold_ms=args.motion_pose_sync_threshold_ms,
+            imu_gravity_window_ms=args.imu_gravity_window_ms,
+            max_ground_samples=args.max_ground_samples,
+            max_motion_samples=args.max_motion_samples,
+            motion_frame_stride=args.motion_frame_stride,
+            plane_dist_thresh=args.plane_dist_thresh,
+            plane_normal_thresh_deg=args.plane_normal_thresh_deg,
+            registration_voxel_size=args.registration_voxel_size,
+            min_registration_fitness=args.min_registration_fitness,
+            calibration_loss=args.loss,
+            calibration_motion_rotation_deg=args.min_motion_rotation_deg,
+            calibration_planar_motion_policy=args.planar_motion_policy,
+            motion_registration_mode=args.motion_registration_mode,
+            submap_half_window=args.submap_half_window,
+            submap_support_stride=args.submap_support_stride,
+            submap_min_support_frames=args.submap_min_support_frames,
+            submap_voxel_size=args.submap_voxel_size,
+            map_half_window=args.map_half_window,
+            map_support_stride=args.map_support_stride,
+            map_min_support_frames=args.map_min_support_frames,
+            map_voxel_size=args.map_voxel_size,
+            run_profile=args.profile,
+        )
+        logging.info("Wrote standardized samples to %s", sample_path)
+        logging.info(
+            "Converted %d ground samples and %d motion samples.",
+            diagnostics["summary"]["ground_selected"],
+            diagnostics["summary"]["motion_selected"],
+        )
         return
 
-    calibration_output_dir = Path(args.output_dir) / "calibration"
-    dataset, config, raw_payload = load_dataset(str(sample_path))
-    config_updates = {
-        "loss": args.loss,
-        "min_motion_rotation_deg": args.min_motion_rotation_deg,
-        "planar_motion_policy": args.planar_motion_policy,
+    first_pass = _run_conversion_and_calibration(
+        args=args,
+        output_dir=output_dir,
+        initial_transform_path=args.initial_transform,
+        identity_initial_transform=args.identity_initial_transform,
+    )
+
+    pass_summaries = [
+        _build_reextract_pass_summary(
+            pass_name="pass1",
+            pass_dir=output_dir,
+            sample_path=Path(first_pass["sample_path"]),
+            diagnostics=first_pass["diagnostics"],
+            result=first_pass["result"],
+            manifest=first_pass["manifest"],
+        )
+    ]
+    trigger_reasons = _reextract_trigger_reasons(pass_summaries[0])
+    reextract_summary = {
+        "enabled": bool(args.auto_reextract_if_needed),
+        "triggered": False,
+        "trigger_reasons": trigger_reasons,
+        "chosen_pass": "pass1",
+        "passes": pass_summaries,
     }
-    config = CalibrationConfig(**{**config.__dict__, **config_updates})
-    result = run_calibration(
-        dataset, config=config, output_dir=str(calibration_output_dir)
-    )
-    manifest = write_outputs(
-        output_dir=calibration_output_dir,
-        dataset=dataset,
-        initial_transform=result["initial_transform"],
-        final_transform=result["final_transform"],
-        metrics_output=result["metrics"],
-        algorithm_report={
-            "input_file": str(sample_path.resolve()),
-            "config": config.__dict__,
-            "dataset_metadata": dataset.metadata,
-            "raw_metadata": raw_payload.get("metadata", {}),
-            "conversion_summary": diagnostics["summary"],
-            "stages": result["stages"],
-        },
-        evaluation_report=result["evaluation"],
-    )
-    logging.info("Saved lidar2imu calibration outputs to %s", calibration_output_dir)
-    logging.info("Manifest: %s", manifest)
+    if not args.auto_reextract_if_needed:
+        return
+
+    if trigger_reasons:
+        reextract_summary["triggered"] = True
+        pass1_dir = output_dir / "reextract_pass1"
+        pass2_dir = output_dir / "reextract_pass2"
+        if pass1_dir.exists():
+            shutil.rmtree(pass1_dir)
+        if pass2_dir.exists():
+            shutil.rmtree(pass2_dir)
+        pass1_dir.mkdir(parents=True, exist_ok=True)
+        _copy_output_artifacts(output_dir, pass1_dir)
+        _rewrite_pass_summary_paths(pass_summaries[0], pass1_dir)
+        first_pass_extrinsics = first_pass["manifest"]["artifacts"][
+            "calibrated_extrinsics"
+        ]
+        second_pass = _run_conversion_and_calibration(
+            args=args,
+            output_dir=pass2_dir,
+            initial_transform_path=first_pass_extrinsics,
+            identity_initial_transform=False,
+        )
+        pass_summaries.append(
+            _build_reextract_pass_summary(
+                pass_name="pass2",
+                pass_dir=pass2_dir,
+                sample_path=Path(second_pass["sample_path"]),
+                diagnostics=second_pass["diagnostics"],
+                result=second_pass["result"],
+                manifest=second_pass["manifest"],
+            )
+        )
+        chosen_pass = _select_reextract_pass(pass_summaries)
+        reextract_summary["chosen_pass"] = chosen_pass["pass_name"]
+        if chosen_pass["pass_name"] == "pass2":
+            _copy_output_artifacts(pass2_dir, output_dir)
+            _refresh_calibration_manifest_paths(output_dir / "calibration")
+    reextract_summary_path = output_dir / "reextract_summary.yaml"
+    with open(reextract_summary_path, "w", encoding="utf-8") as file:
+        yaml.safe_dump(reextract_summary, file, sort_keys=False)
+    logging.info("Wrote re-extraction summary to %s", reextract_summary_path)
 
 
 if __name__ == "__main__":

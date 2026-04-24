@@ -93,11 +93,23 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logging.info(
-        "Running lidar2imu calibration with %d ground samples and %d motion samples.",
+        "Running lidar2imu calibration with %d ground samples and %d candidate motion samples.",
         len(dataset.ground_samples),
         len(dataset.motion_samples),
     )
     result = run_calibration(dataset, config=config, output_dir=str(output_dir))
+    dataset_partition = (
+        result.get("metrics", {})
+        .get("summary", {})
+        .get("dataset_partition", {})
+    )
+    if dataset_partition:
+        logging.info(
+            "Motion split: calibration=%d holdout=%d total=%d.",
+            int(dataset_partition.get("calibration_motion_samples", 0)),
+            int(dataset_partition.get("holdout_motion_samples", 0)),
+            int(dataset_partition.get("total_motion_samples", 0)),
+        )
     manifest = write_outputs(
         output_dir=output_dir,
         dataset=dataset,
