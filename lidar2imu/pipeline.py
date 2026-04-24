@@ -22,13 +22,16 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from lidar2imu.algorithms import (refine_joint_solution,
-                                  solve_ground_translation,
-                                  solve_roll_pitch_from_ground,
-                                  solve_translation_from_motion,
-                                  solve_yaw_from_motion,
-                                  transform_from_components,
-                                  yaw_roll_pitch_from_matrix)
+from lidar2imu.algorithms import (
+    refine_joint_solution,
+    transform_delta_metrics,
+    solve_ground_translation,
+    solve_roll_pitch_from_ground,
+    solve_translation_from_motion,
+    solve_yaw_from_motion,
+    transform_from_components,
+    yaw_roll_pitch_from_matrix,
+)
 from lidar2imu.metrics import build_metrics_output
 from lidar2imu.models import CalibrationConfig, CalibrationDataset
 
@@ -59,13 +62,15 @@ def _resolve_planar_motion_policy(
     motion_rotation_stage: dict,
 ) -> dict:
     left_turn_count, right_turn_count = _count_turns(dataset)
+    yaw_observability = motion_rotation_stage.get("observability", {})
+    yaw_observability_reasons = list(yaw_observability.get("reasons", []))
     weak_planar_reasons = []
     if (
         min(left_turn_count, right_turn_count)
         < config.metrics_min_turn_count_per_direction
     ):
         weak_planar_reasons.append("turn_imbalance")
-    if motion_rotation_stage.get("observability", {}).get("degenerate", False):
+    if yaw_observability.get("degenerate", False):
         weak_planar_reasons.append("yaw_rotation_degenerate")
 
     requested_policy = config.planar_motion_policy
@@ -79,19 +84,134 @@ def _resolve_planar_motion_policy(
         "left_turn_count": left_turn_count,
         "right_turn_count": right_turn_count,
         "weak_planar_reasons": weak_planar_reasons,
+        "yaw_observability_reasons": yaw_observability_reasons,
         "locked_components": (
             ["yaw", "x", "y"] if applied_policy == "freeze_xyyaw" else []
         ),
     }
 
 
-def run_calibration(
+def _clone_dataset_with_motion_samples(
     dataset: CalibrationDataset,
-    config: CalibrationConfig | None = None,
-    output_dir: str | None = None,
+    motion_samples: list,
+    *,
+    metadata_updates: dict | None = None,
+) -> CalibrationDataset:
+    metadata = dict(dataset.metadata)
+    if metadata_updates:
+        metadata.update(metadata_updates)
+    return CalibrationDataset(
+        parent_frame=dataset.parent_frame,
+        child_frame=dataset.child_frame,
+        ground_samples=list(dataset.ground_samples),
+        motion_samples=list(motion_samples),
+        initial_transform=np.asarray(dataset.initial_transform, dtype=float),
+        extraction_transform=(
+            None
+            if dataset.extraction_transform is None
+            else np.asarray(dataset.extraction_transform, dtype=float)
+        ),
+        reference_transform=(
+            None
+            if dataset.reference_transform is None
+            else np.asarray(dataset.reference_transform, dtype=float)
+        ),
+        metadata=metadata,
+    )
+
+
+def _split_holdout_dataset(
+    dataset: CalibrationDataset, config: CalibrationConfig
+) -> tuple[CalibrationDataset, CalibrationDataset | None, dict]:
+    ordered_motion_samples = sorted(
+        dataset.motion_samples,
+        key=lambda sample: (sample.start_timestamp_ns, sample.end_timestamp_ns),
+    )
+    total_motion_samples = len(ordered_motion_samples)
+    holdout_every_n = max(int(config.metrics_holdout_every_n), 0)
+    holdout_plan = {
+        "enabled": False,
+        "strategy": "every_nth_motion_sample",
+        "every_n": holdout_every_n,
+        "total_motion_samples": total_motion_samples,
+        "calibration_motion_samples": total_motion_samples,
+        "holdout_motion_samples": 0,
+        "reason": "holdout_disabled",
+    }
+    if holdout_every_n < 2:
+        holdout_plan["reason"] = "invalid_holdout_every_n"
+        return dataset, None, holdout_plan
+
+    if total_motion_samples < (
+        config.min_motion_samples + config.metrics_holdout_min_motion_samples
+    ):
+        holdout_plan["reason"] = "insufficient_motion_samples"
+        return dataset, None, holdout_plan
+
+    holdout_indices = [
+        index
+        for index in range(total_motion_samples)
+        if (index + 1) % holdout_every_n == 0
+    ]
+    while (
+        total_motion_samples - len(holdout_indices) < config.min_motion_samples
+        and holdout_indices
+    ):
+        holdout_indices.pop()
+    if len(holdout_indices) < config.metrics_holdout_min_motion_samples:
+        holdout_plan["reason"] = "insufficient_holdout_samples"
+        return dataset, None, holdout_plan
+
+    holdout_index_set = set(holdout_indices)
+    calibration_motion_samples = [
+        sample
+        for index, sample in enumerate(ordered_motion_samples)
+        if index not in holdout_index_set
+    ]
+    holdout_motion_samples = [
+        sample
+        for index, sample in enumerate(ordered_motion_samples)
+        if index in holdout_index_set
+    ]
+    holdout_plan = {
+        "enabled": True,
+        "strategy": "every_nth_motion_sample",
+        "every_n": holdout_every_n,
+        "total_motion_samples": total_motion_samples,
+        "calibration_motion_samples": len(calibration_motion_samples),
+        "holdout_motion_samples": len(holdout_motion_samples),
+        "holdout_indices": [int(index) for index in holdout_indices],
+        "reason": None,
+    }
+    calibration_dataset = _clone_dataset_with_motion_samples(
+        dataset,
+        calibration_motion_samples,
+        metadata_updates={
+            "motion_holdout_split": "calibration",
+            "motion_holdout_every_n": holdout_every_n,
+            "motion_holdout_total_samples": total_motion_samples,
+            "motion_holdout_count": len(holdout_motion_samples),
+        },
+    )
+    holdout_dataset = _clone_dataset_with_motion_samples(
+        dataset,
+        holdout_motion_samples,
+        metadata_updates={
+            "motion_holdout_split": "holdout",
+            "motion_holdout_every_n": holdout_every_n,
+            "motion_holdout_total_samples": total_motion_samples,
+            "motion_holdout_count": len(holdout_motion_samples),
+        },
+    )
+    return calibration_dataset, holdout_dataset, holdout_plan
+
+
+def _run_calibration_once(
+    dataset: CalibrationDataset,
+    config: CalibrationConfig,
+    initial_transform: np.ndarray,
 ) -> dict:
-    config = config or CalibrationConfig()
-    initial_transform = np.asarray(dataset.initial_transform, dtype=float)
+    initial_transform = np.asarray(initial_transform, dtype=float)
     initial_yaw, initial_roll, initial_pitch = yaw_roll_pitch_from_matrix(
         initial_transform
     )
@@ -175,19 +295,468 @@ def run_calibration(
         "solver_policy": solver_policy,
         "joint": joint_stage,
     }
-    metrics_output, evaluation_diagnostics = build_metrics_output(
-        dataset=dataset,
-        final_transform=final_transform,
-        initial_transform=initial_transform,
-        stages=stages,
-        config=config,
-        output_dir=output_dir or "",
-    )
-
     return {
         "initial_transform": initial_transform,
         "final_transform": final_transform,
         "stages": stages,
+    }
+
+
+def _build_multistart_seed(
+    transform: np.ndarray,
+    *,
+    yaw_delta_deg: float = 0.0,
+    roll_delta_deg: float = 0.0,
+    pitch_delta_deg: float = 0.0,
+    x_delta_m: float = 0.0,
+    y_delta_m: float = 0.0,
+    z_delta_m: float = 0.0,
+) -> np.ndarray:
+    yaw, roll, pitch = yaw_roll_pitch_from_matrix(transform)
+    translation = np.asarray(transform[:3, 3], dtype=float).copy()
+    translation[0] += float(x_delta_m)
+    translation[1] += float(y_delta_m)
+    translation[2] += float(z_delta_m)
+    return transform_from_components(
+        yaw=yaw + np.radians(float(yaw_delta_deg)),
+        roll=roll + np.radians(float(roll_delta_deg)),
+        pitch=pitch + np.radians(float(pitch_delta_deg)),
+        translation=translation,
+    )
+
+
+def _append_unique_seed(
+    seeds: list[dict], name: str, candidate: np.ndarray, *, group: str
+) -> None:
+    for existing in seeds:
+        delta = transform_delta_metrics(existing["transform"], candidate)
+        if delta["translation_norm_m"] <= 1e-9 and delta["rotation_deg"] <= 1e-9:
+            return
+    seeds.append(
+        {
+            "name": name,
+            "group": group,
+            "transform": np.asarray(candidate, dtype=float),
+        }
+    )
+
+
+def _cluster_final_transforms(
+    transforms: list[np.ndarray],
+    *,
+    translation_threshold_m: float,
+    rotation_threshold_deg: float,
+) -> int:
+    representatives: list[np.ndarray] = []
+    for transform in transforms:
+        matched = False
+        for representative in representatives:
+            delta = transform_delta_metrics(representative, transform)
+            if (
+                delta["translation_norm_m"] <= translation_threshold_m
+                and delta["rotation_deg"] <= rotation_threshold_deg
+            ):
+                matched = True
+                break
+        if not matched:
+            representatives.append(transform)
+    return len(representatives)
+
+
+def _evaluate_planar_basin_stability(
+    dataset: CalibrationDataset,
+    config: CalibrationConfig,
+    primary_result: dict,
+) -> dict | None:
+    reference_transform = dataset.reference_transform
+    if reference_transform is None:
+        return None
+
+    perturb_translation = config.metrics_multistart_translation_perturbation_m
+    perturb_yaw = config.metrics_multistart_yaw_perturbation_deg
+    seeds: list[dict] = []
+    _append_unique_seed(
+        seeds,
+        "input_initial",
+        np.asarray(dataset.initial_transform, dtype=float),
+        group="input",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference",
+        np.asarray(reference_transform, dtype=float),
+        group="reference",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_perturbed_plus",
+        _build_multistart_seed(
+            reference_transform,
+            yaw_delta_deg=perturb_yaw,
+            x_delta_m=perturb_translation,
+            y_delta_m=-perturb_translation,
+        ),
+        group="planar",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_perturbed_minus",
+        _build_multistart_seed(
+            reference_transform,
+            yaw_delta_deg=-perturb_yaw,
+            x_delta_m=-perturb_translation,
+            y_delta_m=perturb_translation,
+        ),
+        group="planar",
+    )
+
+    trials = []
+    for seed in seeds:
+        name = str(seed["name"])
+        seed_transform = np.asarray(seed["transform"], dtype=float)
+        trial_result = _run_calibration_once(dataset, config, seed_transform)
+        final_transform = trial_result["final_transform"]
+        motion_observability = (
+            trial_result["stages"].get("motion_rotation", {}).get("observability", {})
+        )
+        trials.append(
+            {
+                "name": name,
+                "group": seed["group"],
+                "initial_delta_to_reference": transform_delta_metrics(
+                    reference_transform, seed_transform
+                ),
+                "final_delta_to_reference": transform_delta_metrics(
+                    reference_transform, final_transform
+                ),
+                "final_delta_to_primary": transform_delta_metrics(
+                    primary_result["final_transform"], final_transform
+                ),
+                "solver_policy": trial_result["stages"]
+                .get("solver_policy", {})
+                .get("applied"),
+                "max_cost_ratio": (motion_observability.get("cost_scan") or {}).get(
+                    "max_cost_ratio"
+                ),
+                "within_5pct_span_deg": (
+                    motion_observability.get("cost_scan") or {}
+                ).get("within_5pct_span_deg"),
+                "final_transform": final_transform,
+            }
+        )
+
+    translation_threshold = config.metrics_reference_warning_translation_m
+    rotation_threshold = config.metrics_reference_warning_rotation_deg
+    final_transforms = [trial["final_transform"] for trial in trials]
+    distinct_solution_count = _cluster_final_transforms(
+        final_transforms,
+        translation_threshold_m=translation_threshold,
+        rotation_threshold_deg=rotation_threshold,
+    )
+    max_pairwise_translation = 0.0
+    max_pairwise_rotation = 0.0
+    for left_index, left_transform in enumerate(final_transforms):
+        for right_transform in final_transforms[left_index + 1 :]:
+            delta = transform_delta_metrics(left_transform, right_transform)
+            max_pairwise_translation = max(
+                max_pairwise_translation, delta["translation_norm_m"]
+            )
+            max_pairwise_rotation = max(max_pairwise_rotation, delta["rotation_deg"])
+
+    reference_consistent_trial_count = int(
+        sum(
+            1
+            for trial in trials
+            if trial["final_delta_to_reference"]["translation_norm_m"]
+            <= translation_threshold
+            and trial["final_delta_to_reference"]["rotation_deg"] <= rotation_threshold
+        )
+    )
+    status = "pass" if distinct_solution_count <= 1 else "warning"
+    if status == "pass":
+        primary_cause = "single_planar_basin"
+        recommendations: list[str] = []
+    elif 0 < reference_consistent_trial_count < len(trials):
+        primary_cause = "multiple_planar_basins"
+        recommendations = [
+            "Nearby planar initial priors converge to different final basins; do not accept a single free-planar result as stable yet.",
+            "Prefer the trusted-reference-consistent basin and require cross-bag or holdout evidence before overriding it.",
+            "If this persists, strengthen map-side constraints or add reference-aware basin selection instead of relying on one local optimum.",
+        ]
+    else:
+        primary_cause = "reference_inconsistent_basin_family"
+        recommendations = [
+            "All checked nearby starts stay away from the trusted reference basin; treat the current map objective as systematically biased on this bag.",
+            "Do not accept free planar release from this configuration without an external measurement or stronger map-side validation.",
+        ]
+
+    for trial in trials:
+        trial.pop("final_transform", None)
+    return {
+        "status": status,
+        "primary_cause": primary_cause,
+        "trial_count": len(trials),
+        "distinct_solution_count": distinct_solution_count,
+        "reference_consistent_trial_count": reference_consistent_trial_count,
+        "translation_threshold_m": float(translation_threshold),
+        "rotation_threshold_deg": float(rotation_threshold),
+        "max_pairwise_delta": {
+            "translation_norm_m": float(max_pairwise_translation),
+            "rotation_deg": float(max_pairwise_rotation),
+        },
+        "recommendations": recommendations,
+        "trials": trials,
+    }
+
+
+def _evaluate_full_prior_robustness(
+    dataset: CalibrationDataset,
+    config: CalibrationConfig,
+    primary_result: dict,
+) -> dict | None:
+    reference_transform = dataset.reference_transform
+    if reference_transform is None:
+        return None
+
+    perturb_translation = config.metrics_multistart_translation_perturbation_m
+    perturb_yaw = config.metrics_multistart_yaw_perturbation_deg
+    perturb_vertical = config.metrics_multistart_vertical_perturbation_m
+    perturb_rp = config.metrics_multistart_roll_pitch_perturbation_deg
+
+    seeds: list[dict] = []
+    _append_unique_seed(
+        seeds,
+        "input_initial",
+        np.asarray(dataset.initial_transform, dtype=float),
+        group="input",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference",
+        np.asarray(reference_transform, dtype=float),
+        group="reference",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_planar_plus",
+        _build_multistart_seed(
+            reference_transform,
+            yaw_delta_deg=perturb_yaw,
+            x_delta_m=perturb_translation,
+            y_delta_m=-perturb_translation,
+        ),
+        group="planar",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_planar_minus",
+        _build_multistart_seed(
+            reference_transform,
+            yaw_delta_deg=-perturb_yaw,
+            x_delta_m=-perturb_translation,
+            y_delta_m=perturb_translation,
+        ),
+        group="planar",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_vertical_plus",
+        _build_multistart_seed(reference_transform, z_delta_m=perturb_vertical),
+        group="vertical",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_vertical_minus",
+        _build_multistart_seed(reference_transform, z_delta_m=-perturb_vertical),
+        group="vertical",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_roll_plus",
+        _build_multistart_seed(reference_transform, roll_delta_deg=perturb_rp),
+        group="attitude",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_roll_minus",
+        _build_multistart_seed(reference_transform, roll_delta_deg=-perturb_rp),
+        group="attitude",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_pitch_plus",
+        _build_multistart_seed(reference_transform, pitch_delta_deg=perturb_rp),
+        group="attitude",
+    )
+    _append_unique_seed(
+        seeds,
+        "trusted_reference_pitch_minus",
+        _build_multistart_seed(reference_transform, pitch_delta_deg=-perturb_rp),
+        group="attitude",
+    )
+
+    trials = []
+    for seed in seeds:
+        name = str(seed["name"])
+        seed_transform = np.asarray(seed["transform"], dtype=float)
+        trial_result = _run_calibration_once(dataset, config, seed_transform)
+        final_transform = trial_result["final_transform"]
+        trials.append(
+            {
+                "name": name,
+                "group": seed["group"],
+                "initial_delta_to_reference": transform_delta_metrics(
+                    reference_transform, seed_transform
+                ),
+                "final_delta_to_reference": transform_delta_metrics(
+                    reference_transform, final_transform
+                ),
+                "final_delta_to_primary": transform_delta_metrics(
+                    primary_result["final_transform"], final_transform
+                ),
+                "solver_policy": trial_result["stages"]
+                .get("solver_policy", {})
+                .get("applied"),
+                "final_transform": final_transform,
+            }
+        )
+
+    translation_threshold = config.metrics_reference_warning_translation_m
+    rotation_threshold = config.metrics_reference_warning_rotation_deg
+    final_transforms = [trial["final_transform"] for trial in trials]
+    distinct_solution_count = _cluster_final_transforms(
+        final_transforms,
+        translation_threshold_m=translation_threshold,
+        rotation_threshold_deg=rotation_threshold,
+    )
+    max_pairwise_translation = 0.0
+    max_pairwise_rotation = 0.0
+    for left_index, left_transform in enumerate(final_transforms):
+        for right_transform in final_transforms[left_index + 1 :]:
+            delta = transform_delta_metrics(left_transform, right_transform)
+            max_pairwise_translation = max(
+                max_pairwise_translation, delta["translation_norm_m"]
+            )
+            max_pairwise_rotation = max(max_pairwise_rotation, delta["rotation_deg"])
+
+    primary_consistent_trial_count = int(
+        sum(
+            1
+            for trial in trials
+            if trial["final_delta_to_primary"]["translation_norm_m"]
+            <= translation_threshold
+            and trial["final_delta_to_primary"]["rotation_deg"] <= rotation_threshold
+        )
+    )
+    unstable_groups = sorted(
+        {
+            str(trial["group"])
+            for trial in trials
+            if trial["final_delta_to_primary"]["translation_norm_m"]
+            > translation_threshold
+            or trial["final_delta_to_primary"]["rotation_deg"] > rotation_threshold
+        }
+    )
+    group_summary = {}
+    for group in sorted({str(seed["group"]) for seed in seeds}):
+        group_trials = [trial for trial in trials if trial["group"] == group]
+        group_summary[group] = {
+            "trial_count": len(group_trials),
+            "primary_consistent_trial_count": int(
+                sum(
+                    1
+                    for trial in group_trials
+                    if trial["final_delta_to_primary"]["translation_norm_m"]
+                    <= translation_threshold
+                    and trial["final_delta_to_primary"]["rotation_deg"]
+                    <= rotation_threshold
+                )
+            ),
+        }
+
+    status = "pass" if distinct_solution_count <= 1 else "warning"
+    if status == "pass":
+        primary_cause = "single_full_prior_basin"
+        recommendations: list[str] = []
+    elif any(group in {"vertical", "attitude"} for group in unstable_groups):
+        primary_cause = "vertical_or_attitude_prior_sensitivity"
+        recommendations = [
+            "Perturbing z/roll/pitch changes the final solution family; do not treat this configuration as fully industrialized 6DoF prior-robust yet.",
+            "Before trusting the released extrinsics, compare candidate extraction geometries and verify sensor height / installation attitude against external measurements.",
+            "Strengthen full-6DoF acceptance with repeated replays before promoting this bag as a production reference.",
+        ]
+    elif "planar" in unstable_groups:
+        primary_cause = "planar_prior_sensitivity"
+        recommendations = [
+            "Planar perturbations still lead to multiple final solution families; do not treat one free-planar result as a release-quality answer yet.",
+            "Prefer the trusted-reference-consistent basin and require repeatability across bags or map settings before overriding it.",
+        ]
+    else:
+        primary_cause = "mixed_prior_sensitivity"
+        recommendations = [
+            "Multiple prior perturbations converge to different final families; treat this run as sensitivity-limited rather than production-robust.",
+            "Compare candidate priors and extraction settings before trusting a single calibration output.",
+        ]
+
+    for trial in trials:
+        trial.pop("final_transform", None)
+    return {
+        "status": status,
+        "primary_cause": primary_cause,
+        "trial_count": len(trials),
+        "distinct_solution_count": distinct_solution_count,
+        "primary_consistent_trial_count": primary_consistent_trial_count,
+        "unstable_groups": unstable_groups,
+        "group_summary": group_summary,
+        "translation_threshold_m": float(translation_threshold),
+        "rotation_threshold_deg": float(rotation_threshold),
+        "max_pairwise_delta": {
+            "translation_norm_m": float(max_pairwise_translation),
+            "rotation_deg": float(max_pairwise_rotation),
+        },
+        "recommendations": recommendations,
+        "trials": trials,
+    }
+
+
+def run_calibration(
+    dataset: CalibrationDataset,
+    config: CalibrationConfig | None = None,
+    output_dir: str | None = None,
+) -> dict:
+    config = config or CalibrationConfig()
+    calibration_dataset, holdout_dataset, holdout_plan = _split_holdout_dataset(
+        dataset, config
+    )
+    primary_result = _run_calibration_once(
+        calibration_dataset,
+        config,
+        np.asarray(calibration_dataset.initial_transform, dtype=float),
+    )
+    basin_stability = _evaluate_planar_basin_stability(
+        calibration_dataset, config, primary_result
+    )
+    full_prior_robustness = _evaluate_full_prior_robustness(
+        calibration_dataset, config, primary_result
+    )
+    metrics_output, evaluation_diagnostics = build_metrics_output(
+        dataset=calibration_dataset,
+        final_transform=primary_result["final_transform"],
+        initial_transform=primary_result["initial_transform"],
+        stages=primary_result["stages"],
+        config=config,
+        output_dir=output_dir or "",
+        basin_stability=basin_stability,
+        full_prior_robustness=full_prior_robustness,
+        full_dataset=dataset,
+        holdout_dataset=holdout_dataset,
+        holdout_plan=holdout_plan,
+    )
+
+    return {
+        "initial_transform": primary_result["initial_transform"],
+        "final_transform": primary_result["final_transform"],
+        "stages": primary_result["stages"],
         "metrics": metrics_output,
         "evaluation": evaluation_diagnostics,
     }

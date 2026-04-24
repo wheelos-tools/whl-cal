@@ -7,7 +7,7 @@ Calibration tools for Apollo `.record` data and related image / point-cloud work
 | Module | Current status | Practical recommendation |
 | --- | --- | --- |
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
-| `lidar2imu` | real-bag validated | use `--planar-motion-policy auto` on weak-planar bags; trust `z/roll/pitch` before weak `x/y/yaw` |
+| `lidar2imu` | real-bag validated | keep `--profile baseline` as regression reference; use `--profile production` as the current map-side production candidate |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
 | `camera2lidar` | scripts exist but not yet under repo-wide metrics framework | next target for repo-level cleanup |
 
@@ -161,10 +161,9 @@ To bootstrap those standardized samples from an Apollo record bag, use:
 
 ```bash
 lidar2imu-convert-record \
+  --profile production \
   --record-path /path/to/record_dir \
   --output-dir outputs/lidar2imu/raw_validation \
-  --min-registration-fitness 0.55 \
-  --planar-motion-policy auto \
   --calibrate
 ```
 
@@ -179,6 +178,16 @@ This produces:
 - `calibration/`: final extrinsics, metrics, and diagnostics from the staged solver,
   including motion registration quality, turn-balance warnings, and a
   `vehicle_motion_assessment` recommendation
+
+Current lidar2imu operating rule:
+
+- **baseline**: `lidar2imu-convert-record --profile baseline`
+- **production**: `lidar2imu-convert-record --profile production`
+- accept production only after checking:
+  - trusted-reference consistency
+  - extraction consistency
+  - planar basin stability
+  - holdout generalization
 
 For weak-planar bags, `--planar-motion-policy auto` keeps `x/y/yaw` near the
 initial prior when turn balance or yaw observability is weak, while still letting
@@ -202,12 +211,15 @@ the solver refine `z/roll/pitch`.
 
 - The repo-level conclusion is:
   - pose-derived gravity stays the default
+  - keep `baseline = scan_to_scan`
+  - keep `production = submap_to_map + auto reextract + holdout acceptance`
   - weak-planar bags should prefer `--planar-motion-policy auto`
   - acceptance must be driven by tested data, not only by solver convergence
 - The current data-layer policy now uses:
   - **window + gate** motion selection
   - registration-fitness gating
   - weak-planar solver freeze when needed
+  - trusted-reference / extraction / basin / holdout acceptance gates
 
 ## Next module
 

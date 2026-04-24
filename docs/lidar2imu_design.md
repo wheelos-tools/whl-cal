@@ -142,8 +142,44 @@ Used for debugging and model iteration:
 
 - per-stage residual distributions
 - per-stage observability / singular values
+- yaw cost sharpness (`max_cost_ratio`, `within_5pct_span_deg`)
+- selected-motion axis / heading diversity
 - per-sample ground diagnostics
 - per-sample motion diagnostics
+
+### Observability semantics
+
+Observability is now evaluated against the **expected rank of each stage**, not
+against a blanket "at least two singular values" rule.
+
+- 2-parameter ground orientation expects rank `2`
+- 3-parameter ground translation expects rank `3`
+- 1-parameter yaw solve expects rank `1`
+- locked-axis translation and joint refinement expect the number of currently
+  free parameters
+
+This matters because an `N x 1` Jacobian is valid for single-parameter problems.
+The old logic structurally marked those stages as degenerate even when scalar
+sensitivity was nonzero.
+
+### Yaw-stage gate
+
+The yaw stage now uses two layers:
+
+1. expected-rank observability on the local Jacobian
+2. a periodic cost scan over `yaw ∈ [-180 deg, 180 deg]`
+
+The cost scan writes:
+
+- `best_yaw_deg`
+- `best_cost`
+- `max_cost`
+- `max_cost_ratio`
+- `within_5pct_span_deg`
+
+Yaw is treated as weak when the scalar stage exists but the global cost surface
+is too flat or too wide around the optimum. This avoids the earlier false
+positive on all `N x 1` stages while still catching real weak-yaw bags.
 
 ## 6. Record conversion design
 
@@ -164,11 +200,14 @@ Current default topic mapping:
 6. Build motion candidates from localization-pose relative motion.
 7. Assign motion candidates into timeline windows.
 8. Gate weak windows before registration.
-9. Inside each valid window, prefer candidates with enough angular excitation and
-   score them by stride-normalized information so very long spans do not dominate.
-10. Run LiDAR-to-LiDAR GICP on window-selected motion pairs and reject pairs whose
-    registration fitness is too low.
-11. Export normalized samples.
+9. Inside each valid window, keep a **multi-scale preselection** instead of only
+   one local best candidate.
+10. Run LiDAR-to-LiDAR GICP on those candidates and keep only the registration-
+    passing motion factors.
+11. Run a **global diversity selection** across the registered pool so final
+    factors preserve stride diversity, turn diversity, and horizontal heading
+    diversity.
+12. Export normalized samples.
 
 If a bag has no LiDAR-to-parent TF at all, the converter can also run with
 `--identity-initial-transform`, but that mode is exploratory only and should not
@@ -179,17 +218,253 @@ be treated as a production prior.
 The first version used uniform sampling and failed on the real bag because only
 one motion pair had enough angular excitation.
 
-The current version:
+The current industrialized version:
 
 - tries multiple frame strides
 - groups motion candidates into windows
 - gates weak windows
-- prefers local candidates with enough angular excitation
-- uses stride-normalized scoring so large spans do not dominate
-- keeps only candidates that also pass registration gating
+- keeps multi-scale candidates inside each valid window
+- runs registration first, then selects final samples from the **registered pool**
+- preserves stride and heading diversity in the final set instead of collapsing to
+  a single short local mode
 
 This follows the same practical idea used in `lidar2lidar`: evaluate candidate
-pairs first, then spend optimization effort on the useful ones.
+pairs first, then spend optimization effort on the useful ones. The current goal
+is to recover more of the bag's long-horizon structure without breaking the
+stable output / evaluation surfaces.
+
+### Current map-based prototype and remaining limitation
+
+Global-diversity selection improves the data layer, but pairwise scan-to-scan
+registration still leaves some `8`-shape bags too flat in yaw. To bridge that
+gap, the converter now supports:
+
+- `--motion-registration-mode scan_to_scan`
+- `--motion-registration-mode submap_to_submap`
+- `--motion-registration-mode submap_to_map`
+
+The map-side modes keep the same selection / metrics framework:
+
+- `submap_to_submap`: symmetric pose-anchored local submap pair
+- `submap_to_map`: source local submap against a larger target local map
+
+The latest selector also uses a **coverage-aware global score** instead of only
+following the strongest local factor in every window. In practice this means:
+
+- reward new stride coverage
+- reward new heading-bin coverage
+- reward underrepresented turn direction
+- penalize repeated same-stride / same-heading / near-pure-z-axis local factors
+
+This matches the common industrial pattern of keyframe / factor selection by
+coverage, not just by per-factor strength.
+
+### Fixed baseline and current production candidate
+
+To keep iteration disciplined, `lidar2imu` now distinguishes:
+
+- **baseline**
+  - fixed comparison reference
+  - `scan_to_scan`
+  - `--planar-motion-policy auto`
+  - no automatic re-extraction loop
+- **production**
+  - current release candidate
+  - `submap_to_map`
+  - target local map widened enough to preserve long-horizon structure
+  - `--planar-motion-policy auto`
+  - automatic one-step re-extraction when extraction consistency warns
+  - acceptance still gated by:
+    - trusted-reference consistency
+    - planar basin stability
+    - extraction consistency
+    - holdout generalization
+
+This is the current repo-level operating rule:
+
+- compare new ideas against `baseline`
+- ship only through `production`
+- keep both on the same stable metric surfaces
+
+Real-bag validation shows the expected intermediate behavior:
+
+- On the current `8`-shape bag, submap factors improve yaw curvature and motion
+  factor quality:
+  - yaw cost ratio `≈ 1.15 -> 1.57`
+  - yaw `5%` plateau `≈ 143 deg -> 68.5 deg`
+  - motion translation residual `p95 ≈ 0.45 m -> 0.13 m`
+- With the coverage-aware selector on top of submaps, the same bag improves again:
+  - selected strides `40 -> {20, 40}`
+  - yaw cost ratio `≈ 1.57 -> 1.75`
+  - yaw `5%` plateau `≈ 68.5 deg -> 59 deg`
+- With `submap_to_map`, the same weak bag improves again:
+  - default target local map: `≈ 1.75 -> 2.26`, plateau `≈ 59 deg -> 45.5 deg`
+  - wider target local map: `≈ 2.26 -> 4.52`, plateau `≈ 45.5 deg -> 26.5 deg`
+  - solver policy changes from `freeze_xyyaw` to `free`
+- On `record0402`, submap factors improve registration quality and residuals
+  without changing the main diagnosis:
+  - registered candidate pool `24 -> 33`
+  - motion translation residual `p95 ≈ 0.54 m -> 0.30 m`
+  - yaw remains strong, but planar DOFs still stay locked because turn balance is
+    one-sided
+- On `record0402`, `submap_to_map` also improves sharply:
+  - yaw cost ratio `≈ 7.83 -> 28.97`
+  - yaw `5%` plateau `≈ 19 deg -> 9 deg`
+  - diagnosis still correctly remains `turn_imbalance_only`
+
+So the current evidence is:
+
+- `submap_to_submap` is a useful intermediate step
+- `submap_to_map` is the first prototype that can push the weak `8`-shape bag
+  into `full_6dof_candidate` territory when the target local map is large enough
+- but industrial acceptance still needs repeatability, holdout validation, and
+  sensitivity checks, not only one successful run
+- repeatability must now include **trusted-reference consistency**, not only
+  residuals and yaw curvature: a map-based run can achieve `free` with strong
+  internal metrics while still converging to the wrong planar basin
+- when a bag already provides trusted TF, record-side extraction should use that
+  trusted transform even if calibration is intentionally started from a perturbed
+  initial guess; otherwise the standardized samples themselves inherit the wrong
+  basin before optimization even starts
+- evaluation now also tracks **extraction consistency**:
+  - `delta_to_extraction`
+  - `coarse_metrics.statuses.extraction_geometry`
+  - `vehicle_motion_assessment.extraction_consistency`
+  - `vehicle_motion_assessment.extraction_consistency_recommendations`
+  - `translation_xyz_m.z` and vertical-threshold failure reasons, so a pure
+    lidar-height mismatch no longer hides inside the total translation norm
+- evaluation now also tracks **trusted-reference vertical consistency**:
+  - `delta_to_reference.translation_xyz_m.z`
+  - `delta_to_reference.vertical_error_ratio`
+  - `vehicle_motion_assessment.reference_consistency_details.failure_reasons`
+  - `fine_metrics.reference_consistency`
+- evaluation now also tracks **user-prior recoverability**:
+  - `coarse_metrics.statuses.initial_prior_nominal_range`
+  - `vehicle_motion_assessment.initial_prior_assessment`
+  - `vehicle_motion_assessment.initial_prior_assessment_details`
+  - `fine_metrics.initial_prior_assessment`
+  - status meaning:
+    - `pass`: input TF already sits inside the nominal production range
+    - `recoverable`: input TF is outside nominal range, but the bag still converges
+      to the accepted basin
+    - `warning`: input TF is outside nominal range and the run also conflicts with
+      other acceptance surfaces
+- evaluation now also tracks **full 6DoF prior robustness**:
+  - keep the existing `planar_basin_stability` as the narrow `x/y/yaw` multistart
+    surface
+  - add `full_prior_robustness` as the wider multistart surface over:
+    - planar perturbations
+    - vertical `z` perturbation
+    - roll / pitch perturbation
+    - the current input/reference seed family
+  - write:
+    - `coarse_metrics.statuses.full_prior_robustness`
+    - `vehicle_motion_assessment.full_prior_robustness`
+    - `vehicle_motion_assessment.full_prior_robustness_details`
+    - `fine_metrics.full_prior_robustness`
+  - interpretation:
+    - `pass`: nearby prior families collapse to one stable basin
+    - `warning`: at least one nearby prior family reaches another basin, so one
+      accepted solve is not yet industrially stable
+- evaluation now also tracks **holdout generalization**:
+  - split selected motion factors into:
+    - calibration subset
+    - holdout subset
+  - current default rule: keep every 3rd selected motion sample as holdout when
+    enough motion samples remain
+  - write:
+    - `summary.dataset_partition`
+    - `coarse_metrics.statuses.holdout_generalization`
+    - `vehicle_motion_assessment.holdout_generalization`
+    - `vehicle_motion_assessment.holdout_validation_details`
+    - `fine_metrics.holdout_validation`
+- this separates two different failure modes:
+  - wrong final basin relative to a reference transform
+  - stale exported samples that need a second extraction pass
+  - map objectives that look strong in-sample but degrade on held-out motion
+    factors
+- controlled replay on the current wide-map bag now fixes the practical rule:
+  - `initial z +10%` still converges back to the trusted solution on this bag, so
+    initial-guess tolerance is materially wider than the trusted-reference gate
+  - `reference z +5%` can keep strong internal residuals while conflicting in
+    vertical height, so trusted reference checks must use absolute + relative
+    vertical thresholds, not translation norm alone
+  - rough 6DoF initial error (`~0.77 m / ~16 deg`) is still recoverable on this
+    bag, so the algorithm itself is not currently failing from initial-value
+    sensitivity on validated samples
+  - the more structural remaining risk is conversion-side trust in raw-bag TF for
+    extraction geometry, not optimizer instability after samples are already fixed
+- the converter now also supports an optional **single-step re-extraction loop**
+  (`--auto-reextract-if-needed`):
+  - trigger only when pass-1 reports `reextract_review` /
+    `extraction_consistency=warning`
+  - rebuild the standardized samples once using the pass-1 calibrated extrinsics
+    as the new extraction seed
+  - rerun calibration, preserve both passes, and publish the stronger pass back to
+    the stable top-level outputs
+  - this closes the loop from metric warning to action without forcing every bag
+    into iterative re-extraction by default
+- `full_6dof_candidate` now also requires the holdout surface to avoid a warning
+  when a holdout split is available; otherwise the run is downgraded to
+  `holdout_review`
+- controlled replay after adding `full_prior_robustness` now gives the intended
+  industrial separation:
+  - strong wide-map bag:
+    - `run_initial_equal_reference`
+    - `run_initial_rough`
+    - both remain `full_6dof_candidate`
+    - both have `full_prior_robustness = pass`
+  - pure reference-conflict bag:
+    - `run_reference_rough_pure`
+    - `full_prior_robustness = pass`
+    - `trusted_reference_consistency = warning`
+    - interpretation: the optimizer basin is stable, but it still conflicts with the
+      trusted reference surface
+  - weak baseline smoke bag:
+    - `run_baseline_smoke_recheck`
+    - `planar_basin_stability = warning`
+    - `full_prior_robustness = warning`
+    - `full_prior_robustness_details.primary_cause = planar_prior_sensitivity`
+    - interpretation: the bag is genuinely multi-basin under nearby priors and
+      should not be promoted from one lucky solve
+
+### How `yaw_rotation_degenerate` should be interpreted
+
+`yaw_rotation_degenerate` is now only the first layer of the decision. The
+metrics output also writes:
+
+- `vehicle_motion_assessment.yaw_diagnostic.evaluation_reliability`
+- `vehicle_motion_assessment.yaw_diagnostic.trusted_for_planar_decision`
+- `vehicle_motion_assessment.yaw_diagnostic.reliability_limiters`
+- `vehicle_motion_assessment.yaw_diagnostic.primary_cause`
+- `vehicle_motion_assessment.yaw_diagnostic.recommendations`
+
+This separates two different questions:
+
+1. **Can the current run really judge yaw?**
+2. **If yaw is weak, what is the most likely reason and what should be changed?**
+
+The intended interpretation is:
+
+- `evaluation_reliability = high` means the LiDAR motion factors are stable enough
+  that yaw weak/strong judgments are meaningful for planar decision making
+- `evaluation_reliability != high` means the yaw result is still provisional; keep
+  planar DOFs locked, but first improve factor quality before over-interpreting
+  the warning
+- `primary_cause` distinguishes common cases such as:
+  - `repetitive_local_motion`
+  - `turn_imbalance_only`
+  - `local_pair_objective_too_weak`
+  - `local_submap_objective_too_weak`
+  - `factor_quality_or_sample_count_limited`
+
+For bags that remain weak after submap accumulation, the next step is a **true
+map-based objective**:
+
+- scan-to-map or larger submap-to-map LiDAR factors
+- long-horizon accumulation across the full trajectory
+- joint optimization where extrinsics are constrained by accumulated structure,
+  not just independent local factors
 
 ## 7. Latest real-bag validation
 

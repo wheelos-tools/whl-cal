@@ -57,6 +57,8 @@ class CalibrationDataset:
     ground_samples: list[GroundSample]
     motion_samples: list[MotionSample]
     initial_transform: np.ndarray
+    extraction_transform: np.ndarray | None = None
+    reference_transform: np.ndarray | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -78,3 +80,27 @@ class CalibrationConfig:
     metrics_warning_registration_fitness: float = 0.55
     metrics_warning_registration_inlier_rmse_m: float = 0.25
     metrics_min_turn_count_per_direction: int = 1
+    metrics_min_yaw_cost_ratio: float = 1.5
+    metrics_max_yaw_5pct_span_deg: float = 45.0
+    metrics_extraction_warning_translation_m: float = 0.1
+    metrics_extraction_warning_rotation_deg: float = 2.0
+    metrics_extraction_warning_vertical_m: float = 0.05
+    metrics_extraction_warning_vertical_ratio: float = 0.05
+    metrics_reference_warning_translation_m: float = 0.1
+    metrics_reference_warning_rotation_deg: float = 2.0
+    metrics_reference_warning_vertical_m: float = 0.05
+    metrics_reference_warning_vertical_ratio: float = 0.05
+    metrics_initial_prior_nominal_translation_m: float = 0.5
+    metrics_initial_prior_nominal_rotation_deg: float = 10.0
+    metrics_initial_prior_max_recoverable_translation_m: float = 1.0
+    metrics_initial_prior_max_recoverable_rotation_deg: float = 20.0
+    metrics_multistart_translation_perturbation_m: float = 0.25
+    metrics_multistart_yaw_perturbation_deg: float = 10.0
+    metrics_multistart_vertical_perturbation_m: float = 0.25
+    metrics_multistart_roll_pitch_perturbation_deg: float = 3.0
+    metrics_holdout_every_n: int = 3
+    metrics_holdout_min_motion_samples: int = 3
+    metrics_holdout_max_rotation_residual_ratio: float = 1.5
+    metrics_holdout_max_translation_residual_ratio: float = 1.5
+    metrics_holdout_min_registration_fitness_ratio: float = 0.85
+    metrics_holdout_max_registration_inlier_rmse_ratio: float = 1.5
