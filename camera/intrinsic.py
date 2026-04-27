@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright 2025 WheelOS. All Rights Reserved.
 #
@@ -18,6 +18,13 @@
 # Author: daohu527
 
 
+"""Camera intrinsic calibrator.
+
+Added headless mode: process a directory of images (--images-dir) to perform
+calibration without any GUI. This enables CI and smoke tests.
+"""
+
+import glob
 import cv2
 import numpy as np
 import yaml
@@ -35,7 +42,7 @@ class CameraCalibrator:
         self.pattern_size = tuple(self.cfg["pattern_size"])
         self.square_size = self.cfg["square_size"]
         self.ac_cfg = self.cfg["auto_capture_settings"]
-        self.window_name = self.cfg["window_name"]
+        self.window_name = self.cfg.get("window_name", "Camera Calibrator")
 
         # Camera calibration data container
         self.objpoints, self.imgpoints = [], []
@@ -72,6 +79,7 @@ class CameraCalibrator:
         print("\n[INFO] Session reset and ready.")
 
     def run(self):
+        """Interactive GUI capture mode (existing behaviour)."""
         print("[INFO] Industrial Calibration Tool (Grid Overlay Stable Edition)")
         cap = cv2.VideoCapture(self.cfg["camera_index"], cv2.CAP_V4L2)
         if not cap.isOpened():
@@ -87,7 +95,7 @@ class CameraCalibrator:
         # Force window size
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(
-            self.window_name, self.cfg["window_width"], self.cfg["window_height"]
+            self.window_name, self.cfg.get("window_width", 1280), self.cfg.get("window_height", 720)
         )
 
         h, w, grid_overlay = None, None, None
@@ -187,6 +195,69 @@ class CameraCalibrator:
 
         cap.release()
         cv2.destroyAllWindows()
+
+    def run_headless(self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")) -> int:
+        """Process a directory of images to run calibration without GUI.
+
+        Returns 0 on success, 1 if no images found, 2 on calibration failure.
+        """
+        if not images_dir or not os.path.isdir(images_dir):
+            print("[ERROR] images_dir must point to an existing directory.")
+            return 1
+
+        # collect images
+        img_paths = []
+        for p in patterns:
+            img_paths.extend(sorted(glob.glob(os.path.join(images_dir, p))))
+        if not img_paths:
+            print(f"[ERROR] No images found in {images_dir} with patterns {patterns}")
+            return 1
+
+        print(f"[INFO] Found {len(img_paths)} images; processing...")
+        processed = 0
+        h = w = None
+        for ip in img_paths:
+            img = cv2.imread(ip)
+            if img is None:
+                print(f"[WARN] Could not read image {ip}, skipping")
+                continue
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            # direct detection (no resizing) for headless runs
+            found, corners = cv2.findChessboardCorners(
+                gray, self.pattern_size, cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+            )
+            if not found:
+                continue
+            refined = cv2.cornerSubPix(
+                gray,
+                corners,
+                (11, 11),
+                (-1, -1),
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
+            )
+            # append copies to avoid mutation issues
+            self.objpoints.append(self.objp.copy())
+            self.imgpoints.append(refined)
+            processed += 1
+            if h is None:
+                h, w = img.shape[:2]
+            print(f"[OK] Captured sample #{processed} from {os.path.basename(ip)}")
+            if len(self.objpoints) >= self.min_total_samples:
+                break
+
+        if len(self.objpoints) < self.min_total_samples:
+            print(f"[ERROR] Not enough valid samples ({len(self.objpoints)}/{self.min_total_samples})")
+            return 2
+
+        # run calibration
+        self._calibrate(w, h)
+        # success if self.mtx set
+        if self.mtx is not None:
+            print("[PASS] Headless calibration completed.")
+            return 0
+        else:
+            print("[FAIL] Headless calibration failed.")
+            return 2
 
     def _draw_dynamic_ui(self, display, w, h):
         """Draw dynamically updating UI elements: completed green grid and status text."""
@@ -350,6 +421,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="WheelOS Industrial Camera Calibrator")
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--images-dir", default=None, help="Directory of images for headless calibration")
+    parser.add_argument("--pattern-size", default=None, help="Override pattern size as W,H (optional)")
     args = parser.parse_args()
 
     if not os.path.exists(args.config):
@@ -374,4 +447,19 @@ if __name__ == "__main__":
         print("[INFO] Default config.yaml created.")
 
     calibrator = CameraCalibrator(args.config)
-    calibrator.run()
+
+    if args.pattern_size:
+        try:
+            w, h = map(int, args.pattern_size.split(","))
+            calibrator.pattern_size = (w, h)
+            calibrator.objp = np.zeros((w * h, 3), np.float32)
+            calibrator.objp[:, :2] = np.mgrid[0:w, 0:h].T.reshape(-1, 2)
+            calibrator.objp *= calibrator.square_size
+        except Exception:
+            print("[WARN] invalid --pattern-size, ignoring")
+
+    if args.images_dir:
+        rc = calibrator.run_headless(args.images_dir)
+        raise SystemExit(rc)
+    else:
+        calibrator.run()
