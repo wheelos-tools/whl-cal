@@ -1,4 +1,7 @@
 ---
+audience: user
+stability: stable
+last_tested: 2026-04-27
 summary: Consolidated summaries from removed subdirectory README files.
 ---
 
