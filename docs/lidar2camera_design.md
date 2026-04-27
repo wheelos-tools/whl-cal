@@ -1,8 +1,9 @@
 ---
 audience: dev
 stability: stable
-last_tested: 2026-04-27
+P26-04-27
 ---
+
 
 # LiDAR↔Camera 设计文档与参数说明
 

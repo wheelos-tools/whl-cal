@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # Docs ↔ Context 快速链接（自动/人工维护）
 
 本文件列出用户文档（docs/）和知识库（context/）之间的关键链接。变更时请同步更新：

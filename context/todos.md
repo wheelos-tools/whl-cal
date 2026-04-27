@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # Project todos (context)
 
 ## improve-right-edge-scan2map (pending)
@@ -147,14 +153,14 @@ right -> main 在 `record_data_0402` 上的新增结论：
 
 下一阶段目标：
 
-- 把 `camera` / `camera2lidar` 纳入和 `lidar2lidar`、`lidar2imu` 一样的
+- 把 `camera` / `lidar2camera` 纳入和 `lidar2lidar`、`lidar2imu` 一样的
   **data -> algorithm -> evaluation** 结构
 
 当前已知现状：
 
 - `camera/intrinsic.py` 已经是一个可用的相机内参标定脚本
-- `camera2lidar/reference_based.py` 是基于棋盘板的 LiDAR-camera 外参路径
-- `camera2lidar/learning_based.py` 是 targetless 的实验路径
+- `lidar2camera/reference_based.py` 是基于棋盘板的 LiDAR-camera 外参路径
+- `lidar2camera/learning_based.py` 是 targetless 的实验路径
 - 但当前仍缺少：
   - 统一的数据集 artifact
   - 窗口 + 门控的数据筛选
@@ -163,7 +169,7 @@ right -> main 在 `record_data_0402` 上的新增结论：
 
 下一步建议：
 
-1. 先梳理 `camera` 和 `camera2lidar` 的输入 / 输出 / 当前命令入口
+1. 先梳理 `camera` 和 `lidar2camera` 的输入 / 输出 / 当前命令入口
 2. 先定义 repo 级的评测面，再动算法
 3. 把 reference-based 作为初始 acceptance baseline
 4. 把 targetless 路径先作为 comparison / diagnostic branch
