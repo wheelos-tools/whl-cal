@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # Calibration knowledge base index
 
 This `context/` directory is the durable knowledge base for this repository.
@@ -58,7 +64,7 @@ The organizing rule is:
 - `scan2map_metrics_framework.md`
   - scan2map coarse/fine metric framework
 - `lidar2camera_context.md`
-  - initial camera / camera2lidar module note
+  - initial camera / lidar2camera module note
   - current state and next repo-level target
 
 ### Working backlog
