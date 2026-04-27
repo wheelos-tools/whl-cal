@@ -1,8 +1,9 @@
 ---
 audience: user
 stability: stable
-last_tested: 2026-04-27
+P26-04-27
 ---
+
 
 # Docs vs Context — 使用者文档 与 知识库的职责划分
 
