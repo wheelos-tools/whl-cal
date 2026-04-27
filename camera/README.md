@@ -45,3 +45,10 @@ image_width: 1280
 image_height: 720
 reprojection_error: 0.1823
 ```
+
+See the lidar2camera reference baseline for LiDAR↔Camera extrinsic calibration and evaluation:
+
+- CLI: `lidar2camera-calibrate --config config.yaml` (writes default config if missing)
+- Outputs: `calibrated_tf.yaml`, `metrics.yaml`, `diagnostics/reference_dataset.yaml`, `diagnostics/reference_overlay.png`
+
+Note: `camera/intrinsic.py` performs intrinsic calibration only. Use `lidar2camera` (reference baseline) for extrinsics and full evaluation.
