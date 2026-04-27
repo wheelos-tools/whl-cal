@@ -19,7 +19,7 @@ This means:
 | `lidar2lidar` | metrics-first, real-bag validated | `scan2scan` is the production baseline; `scan2map` is conditional refinement | active and usable |
 | `lidar2imu` | metrics-first, real-bag validated | weak-planar bags should use `--planar-motion-policy auto`; trust `z/roll/pitch` before `x/y/yaw` on one-sided-turn bags | active and usable |
 | `camera` | intrinsic calibration script exists | current script is usable as a standalone intrinsic tool | present but not yet folded into repo-wide iteration framework |
-| `camera2lidar` | reference-based and learning-based scripts exist | no repo-wide validated acceptance framework yet | next iteration target |
+| `camera2lidar` | industrial reference baseline scaffold started | target-based reference calibration is the baseline; targetless remains experimental until repeatability is validated | active refactor target |
 
 ## lidar2lidar summary
 
@@ -75,8 +75,9 @@ This means:
 
 ## Next module: lidar2camera / camera2lidar
 
-The next repository-level target is to bring camera-related calibration into the
-same structure already used by `lidar2lidar` and `lidar2imu`.
+The active repository-level target is to finish bringing camera-related
+calibration into the same structure already used by `lidar2lidar` and
+`lidar2imu`.
 
 ### Current codebase state
 
@@ -88,7 +89,7 @@ same structure already used by `lidar2lidar` and `lidar2imu`.
 - `camera2lidar/learning_based.py`
   - targetless LiDAR-camera calibration experiment
 
-### Next engineering goal
+### Current engineering goal
 
 Bring `lidar2camera` into the same repo-wide pattern:
 
@@ -101,9 +102,17 @@ Bring `lidar2camera` into the same repo-wide pattern:
    - targetless path
    - optional learned priors
 3. **evaluation layer**
-   - stable reprojection / alignment metrics
-   - holdout validation
-   - recommendation field
+    - stable reprojection / alignment metrics
+    - leave-one-pose-out repeatability
+    - uncertainty summary
+    - recommendation field
+
+Current baseline decision:
+
+1. **reference-based / target-based**
+   - release baseline
+2. **targetless / learning-based**
+   - experimental comparison / diagnostic branch
 
 ## Read next
 

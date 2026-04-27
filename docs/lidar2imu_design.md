@@ -378,11 +378,26 @@ So the current evidence is:
     - `vehicle_motion_assessment.holdout_generalization`
     - `vehicle_motion_assessment.holdout_validation_details`
     - `fine_metrics.holdout_validation`
-- this separates two different failure modes:
-  - wrong final basin relative to a reference transform
-  - stale exported samples that need a second extraction pass
-  - map objectives that look strong in-sample but degrade on held-out motion
-    factors
+  - this separates two different failure modes:
+    - wrong final basin relative to a reference transform
+    - stale exported samples that need a second extraction pass
+    - map objectives that look strong in-sample but degrade on held-out motion
+      factors
+- evaluation now also tracks **repeated holdout stability**:
+  - keep the existing deterministic holdout split as the first generalization check
+  - replay additional holdout offsets over the same `every_n` scheme
+  - write:
+    - `coarse_metrics.statuses.holdout_repeatability`
+    - `vehicle_motion_assessment.holdout_repeatability`
+    - `vehicle_motion_assessment.holdout_repeatability_details`
+    - `fine_metrics.holdout_repeatability`
+    - `fine_metrics.uncertainty_summary`
+  - interpretation:
+    - `pass`: multiple holdout offsets keep one stable solution family and stable
+      holdout ratios
+    - `warning`: either different offsets degrade materially or they land in
+      different solution families
+    - `unknown`: the bag is too small for repeated split replay
 - controlled replay on the current wide-map bag now fixes the practical rule:
   - `initial z +10%` still converges back to the trusted solution on this bag, so
     initial-guess tolerance is materially wider than the trusted-reference gate
@@ -407,6 +422,18 @@ So the current evidence is:
 - `full_6dof_candidate` now also requires the holdout surface to avoid a warning
   when a holdout split is available; otherwise the run is downgraded to
   `holdout_review`
+- repeated holdout now provides the first bag-local uncertainty surface:
+  - strong wide-map bag:
+    - repeated holdout remains `pass`
+    - repeated final-transform spread stays very small
+  - weak baseline smoke bag:
+    - repeated holdout is `unknown` because the bag is too small
+    - this is itself useful industrial evidence: tiny bags should not be mistaken
+      for uncertainty-qualified releases
+- the immediate crossover from `lidar2lidar` is now explicit:
+  - keep stable concise metrics and rich diagnostics separate
+  - add repeated-run stability summaries instead of trusting one best run
+  - use quality gates to decide promotion, not only optimizer success
 - controlled replay after adding `full_prior_robustness` now gives the intended
   industrial separation:
   - strong wide-map bag:

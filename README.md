@@ -9,7 +9,7 @@ Calibration tools for Apollo `.record` data and related image / point-cloud work
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
 | `lidar2imu` | real-bag validated | keep `--profile baseline` as regression reference; use `--profile production` as the current map-side production candidate |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
-| `camera2lidar` | scripts exist but not yet under repo-wide metrics framework | next target for repo-level cleanup |
+| `camera2lidar` | industrial reference baseline scaffold added | keep the new target-based reference CLI as baseline; treat targetless as experimental until real-data validation is complete |
 
 ## Knowledge base
 
@@ -223,7 +223,7 @@ the solver refine `z/roll/pitch`.
 
 ## Next module
 
-The next repo-level cleanup target is **lidar2camera / camera2lidar**.
+The active repo-level cleanup target is **lidar2camera / camera2lidar**.
 
 The goal is to bring camera-related calibration into the same pattern already used
 by `lidar2lidar` and `lidar2imu`:
@@ -238,3 +238,17 @@ That includes:
 - window + gate for invalid samples
 - stable metrics / diagnostics
 - separating validated conclusions from open verification points
+
+The first industrial baseline now starts with:
+
+```bash
+lidar2camera-calibrate --config config.yaml
+```
+
+This writes the same stable repo-wide artifact pattern used elsewhere:
+
+- `calibrated_tf.yaml`
+- `metrics.yaml`
+- `initial_guess/*.yaml`
+- `calibrated/*.yaml`
+- `diagnostics/`

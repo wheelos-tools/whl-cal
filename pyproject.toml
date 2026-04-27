@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
   "click",
   "numpy",
+  "opencv-python",
   "open3d",
   "protobuf>=5.29,<6",
   "pycyber",
@@ -47,6 +48,7 @@ lidar2imu-calibrate = "lidar2imu.cli:main"
 lidar2imu-convert-record = "lidar2imu.record_converter:main"
 lidar2imu-tune-record = "tools.lidar2imu.tune_record:main"
 lidar2imu-review-runs = "tools.lidar2imu.review_runs:main"
+lidar2camera-calibrate = "lidar2camera.cli:main"
 lidar2lidar-extract = "tools.lidar2lidar.extract_pcd:main"
 lidar2lidar-topics = "tools.lidar2lidar.list_topics:main"
 lidar2lidar-merge = "tools.lidar2lidar.merge_pcd:main"

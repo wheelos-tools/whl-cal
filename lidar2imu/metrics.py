@@ -471,6 +471,24 @@ def _build_holdout_validation(
     }
 
 
+def _combined_holdout_generalization_status(
+    holdout_validation: dict | None,
+    holdout_repeatability: dict | None,
+) -> str:
+    statuses = [
+        str(payload.get("status", "unknown"))
+        for payload in (holdout_validation, holdout_repeatability)
+        if payload is not None
+    ]
+    if not statuses:
+        return "unknown"
+    if any(status == "warning" for status in statuses):
+        return "warning"
+    if any(status == "pass" for status in statuses):
+        return "pass"
+    return "unknown"
+
+
 def _ground_diagnostics(
     dataset: CalibrationDataset, transform: np.ndarray
 ) -> tuple[list[dict], dict]:
@@ -919,6 +937,7 @@ def _build_motion_assessment(
     basin_stability: dict | None,
     full_prior_robustness: dict | None,
     holdout_validation: dict | None,
+    holdout_repeatability: dict | None,
 ) -> dict:
     ground_support = "warning"
     if (
@@ -966,9 +985,14 @@ def _build_motion_assessment(
     )
     basin_stability_status = _basin_stability_status(basin_stability)
     full_prior_robustness_status = _basin_stability_status(full_prior_robustness)
-    holdout_generalization = "unknown"
-    if holdout_validation is not None:
-        holdout_generalization = str(holdout_validation.get("status", "unknown"))
+    holdout_repeatability_status = "unknown"
+    if holdout_repeatability is not None:
+        holdout_repeatability_status = str(
+            holdout_repeatability.get("status", "unknown")
+        )
+    holdout_generalization = _combined_holdout_generalization_status(
+        holdout_validation, holdout_repeatability
+    )
 
     if (
         ground_support == "pass"
@@ -1021,6 +1045,7 @@ def _build_motion_assessment(
         "trusted_reference_consistency": trusted_reference_consistency,
         "planar_basin_stability": basin_stability_status,
         "full_prior_robustness": full_prior_robustness_status,
+        "holdout_repeatability": holdout_repeatability_status,
         "holdout_generalization": holdout_generalization,
         "initial_prior_assessment": initial_prior_assessment.get("status"),
         "recommendation": recommendation,
@@ -1081,6 +1106,8 @@ def _build_motion_assessment(
         assessment["full_prior_robustness_details"] = full_prior_robustness
     if holdout_validation is not None:
         assessment["holdout_validation_details"] = holdout_validation
+    if holdout_repeatability is not None:
+        assessment["holdout_repeatability_details"] = holdout_repeatability
     solver_policy = stages.get("solver_policy", {})
     if solver_policy:
         assessment["requested_solver_planar_motion_policy"] = solver_policy.get(
@@ -1106,6 +1133,7 @@ def build_metrics_output(
     output_dir: str,
     basin_stability: dict | None = None,
     full_prior_robustness: dict | None = None,
+    holdout_repeatability: dict | None = None,
     full_dataset: CalibrationDataset | None = None,
     holdout_dataset: CalibrationDataset | None = None,
     holdout_plan: dict | None = None,
@@ -1123,6 +1151,9 @@ def build_metrics_output(
         holdout_motion_summary,
         holdout_plan,
         config,
+    )
+    holdout_generalization = _combined_holdout_generalization_status(
+        holdout_validation, holdout_repeatability
     )
     yaw_deg, roll_deg, pitch_deg = yaw_roll_pitch_from_matrix(final_transform)
     delta_to_initial = transform_delta_metrics(initial_transform, final_transform)
@@ -1196,7 +1227,12 @@ def build_metrics_output(
             ),
             "planar_basin_stability": _basin_stability_status(basin_stability),
             "full_prior_robustness": _basin_stability_status(full_prior_robustness),
-            "holdout_generalization": str(holdout_validation.get("status", "unknown")),
+            "holdout_repeatability": (
+                "unknown"
+                if holdout_repeatability is None
+                else str(holdout_repeatability.get("status", "unknown"))
+            ),
+            "holdout_generalization": holdout_generalization,
         },
     }
 
@@ -1212,6 +1248,7 @@ def build_metrics_output(
         basin_stability=basin_stability,
         full_prior_robustness=full_prior_robustness,
         holdout_validation=holdout_validation,
+        holdout_repeatability=holdout_repeatability,
     )
 
     metrics_output = {
@@ -1247,6 +1284,9 @@ def build_metrics_output(
                     None if holdout_plan is None else holdout_plan.get("every_n")
                 ),
                 "holdout_enabled": bool(holdout_plan and holdout_plan.get("enabled")),
+                "holdout_offset": (
+                    None if holdout_plan is None else holdout_plan.get("offset")
+                ),
             },
         },
         "coarse_metrics": coarse_metrics,
@@ -1320,6 +1360,12 @@ def build_metrics_output(
             "planar_basin_stability": basin_stability,
             "full_prior_robustness": full_prior_robustness,
             "holdout_validation": holdout_validation,
+            "holdout_repeatability": holdout_repeatability,
+            "uncertainty_summary": (
+                None
+                if holdout_repeatability is None
+                else holdout_repeatability.get("uncertainty_summary")
+            ),
             "artifacts": {
                 "output_dir": output_dir,
                 "diagnostics_dir": f"{output_dir}/diagnostics",
