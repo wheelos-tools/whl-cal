@@ -1,59 +1,34 @@
-# Camera ↔ LiDAR Quick Start
+# Camera ↔ LiDAR Quick Start (UNIFIED)
 
-This quickstart covers the two available paths in this repo:
+The project standard name is now `lidar2camera`. The old `camera2lidar` package remains as small compatibility wrappers that delegate to `lidar2camera`.
 
-- Reference-based (target / checkerboard) — industrial baseline and recommended release path
-- Learning-based (targetless) — experimental, diagnostic and visualization path
+Canonical commands:
 
-Reference-based (recommended baseline)
-
-1. Prepare dataset: synchronized image + point-cloud pairs with diverse board poses. Ensure camera intrinsics are pre-calibrated.
-2. Create a config (compatibility helper will create a default):
+- Reference-based (recommended baseline):
 
 ```bash
-python camera2lidar/reference_based.py
-# If no config.yaml exists, the script writes a default template and exits.
-# Edit config.yaml: set data_directory to synchronized pairs, set output.directory.
-python camera2lidar/reference_based.py
+# writes default config if missing and exits
+lidar2camera-calibrate --write-default-config --config config.yaml
+# then run
+lidar2camera-calibrate --config config.yaml
 ```
 
-3. Expected outputs (config-controlled output directory):
-
-- calibrated_tf.yaml
-- metrics.yaml
-- diagnostics/reference_dataset.yaml
-- diagnostics/extraction.yaml
-- diagnostics/optimization.yaml
-- calibrated/*.yaml (per-pose or final)
-
-Checks and interpretation
-
-- Start with `metrics.yaml` — check final RMS / per-pose reprojection RMS.
-- Check `diagnostics/reference_dataset.yaml` for accepted poses and skip reasons.
-- Run leave-one-pose-out (L1PO) repeatability if available: evaluate transform spread and per-pose reprojection spread.
-- Recommendation field (accepted_reference_candidate / repeatability_review / recollect_data) indicates whether the run is production-ready.
-
-Learning-based (experimental)
-
-Run the packaged learning-based demo (creates a sample dataset if none exists):
+- Experimental learning-based demo (still experimental; kept for diagnostics):
 
 ```bash
+# compatibility wrapper — delegates to lidar2camera.learning_based
 python camera2lidar/learning_based.py
+# or directly run the module implementation
+python -m lidar2camera.learning_based
 ```
 
-Outputs:
+What changed
 
-- learning_output_expert/final_calibration.yaml (scale + transform + metrics)
-- learning_output_expert/final_alignment_overlay.png (visual overlay)
+- `lidar2camera/` is the canonical package. New implementations and metrics live there (see lidar2camera/cli.py and lidar2camera/reference_pipeline.py).
+- `camera2lidar/` files are compatibility shims to preserve older invocation patterns.
 
-Checks and interpretation
+Where to look for outputs
 
-- Inspect `final_calibration.yaml` for `metrics.fitness` and `metrics.rmse`.
-- Open `final_alignment_overlay.png` for a visual overlay of LiDAR points onto the image.
-- Treat this method as experimental: compare with reference-based runs and use repeatability/holdout checks before trusting for production.
+- calibrated_tf.yaml, metrics.yaml, diagnostics/, calibrated/*.yaml under the configured output directory.
 
-Where to go next
-
-- For design rationale and recommended industrial metrics, read: context/lidar2camera_context.md
-- For implementing a repo-level baseline, follow the recommended pattern: data extraction → algorithm → evaluation (see context file above).
-
+See also: docs/lidar2camera_quickstart.md and context/lidar2camera_context.md for design rationale and acceptance guidance.
