@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # lidar2camera current context
 
 ## 1. Current codebase state
@@ -8,12 +14,12 @@ the same repo-wide calibration framework used by `lidar2lidar` and `lidar2imu`.
 Current files:
 
 - `camera/intrinsic.py`
-  - interactive chessboard-based camera intrinsic calibration
-- `camera/README.md`
-  - quick start for the intrinsic tool
-- `camera2lidar/reference_based.py`
+  - interactive chessboard-based camera intrinsic calibration (supports headless --images-dir)
+- `docs/camera_quickstart.md`
+  - quick start for the intrinsic tool and headless usage
+- `lidar2camera/reference_based.py`
   - checkerboard / reference-based LiDAR-camera extrinsic calibration
-- `camera2lidar/learning_based.py`
+- `lidar2camera/learning_based.py`
   - targetless LiDAR-camera calibration experiment
 
 ## 2. Gap versus the current repo standard
@@ -153,7 +159,7 @@ The minimum evaluation surfaces should be:
 
 ### 6.4 Known current limitation from the old script
 
-The legacy `camera2lidar/reference_based.py` had a useful multi-pose structure, but
+The legacy `lidar2camera/reference_based.py` had a useful multi-pose structure, but
 it was still missing repo-wide industrial scaffolding:
 
 - no stable CLI entrypoint
@@ -181,7 +187,7 @@ This round starts the actual repo-level refactor:
   - `lidar2camera/metrics.py`
   - `lidar2camera/io.py`
   - `lidar2camera/cli.py`
-- old `camera2lidar/reference_based.py` becomes a compatibility entrypoint to the
+- old `lidar2camera/reference_based.py` becomes a compatibility entrypoint to the
   new baseline
 
 The new baseline now writes stable artifacts:
