@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # lidar2camera — smoke test and simplified YAML usage
 
 This page shows a minimal YAML config and a lightweight smoke-test to verify the

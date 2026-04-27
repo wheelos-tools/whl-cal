@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR-to-LiDAR calibration overview
 
 `lidar2lidar` now has three layers of documentation:

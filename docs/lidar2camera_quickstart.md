@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR↔Camera 快速上手（用户文档）
 
 目标：提供一份面向客户的简洁上手指南，包含快速运行、关键指标说明与验收建议。

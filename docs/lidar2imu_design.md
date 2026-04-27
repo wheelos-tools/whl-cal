@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR-to-IMU current design
 
 This document records the current implementation for future iteration work.

@@ -1,3 +1,9 @@
+---
+audience: dev
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR↔Camera 设计文档与参数说明
 
 目标：为开发者和工程师描述实现细节、参数含义、预期行为与调参建议。

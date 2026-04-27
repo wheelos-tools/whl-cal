@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR-to-IMU calibration overview
 
 `lidar2imu` now has three layers of documentation:
