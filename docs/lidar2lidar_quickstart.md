@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR-to-LiDAR Quick Start
 
 This document is only for running the current pipeline quickly.

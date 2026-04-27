@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # LiDAR2IMU 用户说明与操作文档
 
 本文档面向直接使用 `whl-cal` 进行 `lidar2imu` 标定的用户，目标是用**一个文档**说明完整操作流程：准备数据、检查 bag、执行标定、查看结果、处理常见失败。

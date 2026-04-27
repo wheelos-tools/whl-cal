@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # Quickstart index — whl-cal
 
 This page provides quick entry points to the repository's calibration tools and shows where to find the immediate results.

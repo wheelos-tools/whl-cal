@@ -1,3 +1,9 @@
+---
+audience: user
+stability: stable
+last_tested: 2026-04-27
+---
+
 # Camera ↔ LiDAR Quick Start (UNIFIED)
 
 The project standard name is now `lidar2camera`. The old `camera2lidar` package remains as small compatibility wrappers that delegate to `lidar2camera`.
