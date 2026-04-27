@@ -11,8 +11,14 @@ If SciPy is missing, the script exits cleanly with a message.
 from __future__ import annotations
 
 import sys
+import os
 import argparse
 import numpy as np
+
+# Ensure repo root is importable when this script is executed from tools/
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
 try:
     from scipy.spatial.transform import Rotation as R
