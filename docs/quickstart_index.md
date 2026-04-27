@@ -15,7 +15,7 @@ Quickstarts
 - LiDAR-to-LiDAR (scan2scan / scan2map): docs/lidar2lidar_quickstart.md
 - LiDAR-to-IMU (sample conversion + solver): docs/lidar2imu_quickstart.md
 - Camera intrinsic: camera/README.md
-- Camera↔LiDAR (target-based baseline + experimental targetless): docs/camera2lidar_quickstart.md
+- LiDAR↔Camera (target-based baseline + experimental targetless): docs/lidar2camera_quickstart.md
 
 Common output artifacts (where to look first)
 
