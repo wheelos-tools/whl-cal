@@ -72,6 +72,18 @@ def main() -> None:
         choices=["auto", "free", "freeze_xyyaw"],
         help="How to handle weak planar observability during calibration.",
     )
+    parser.add_argument(
+        "--metrics-holdout-every-n",
+        type=int,
+        default=None,
+        help="Keep every Nth motion sample as holdout for generalization checks.",
+    )
+    parser.add_argument(
+        "--metrics-holdout-repeat-count",
+        type=int,
+        default=None,
+        help="Number of holdout offsets to replay when building repeated-holdout stability and uncertainty summaries.",
+    )
     args = parser.parse_args()
 
     dataset, config, raw_payload = load_dataset(
@@ -86,6 +98,12 @@ def main() -> None:
         config_updates["min_motion_rotation_deg"] = args.min_motion_rotation_deg
     if args.planar_motion_policy is not None:
         config_updates["planar_motion_policy"] = args.planar_motion_policy
+    if args.metrics_holdout_every_n is not None:
+        config_updates["metrics_holdout_every_n"] = args.metrics_holdout_every_n
+    if args.metrics_holdout_repeat_count is not None:
+        config_updates["metrics_holdout_repeat_count"] = (
+            args.metrics_holdout_repeat_count
+        )
     if config_updates:
         config = CalibrationConfig(**{**config.__dict__, **config_updates})
 
@@ -99,9 +117,7 @@ def main() -> None:
     )
     result = run_calibration(dataset, config=config, output_dir=str(output_dir))
     dataset_partition = (
-        result.get("metrics", {})
-        .get("summary", {})
-        .get("dataset_partition", {})
+        result.get("metrics", {}).get("summary", {}).get("dataset_partition", {})
     )
     if dataset_partition:
         logging.info(

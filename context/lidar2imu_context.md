@@ -1772,3 +1772,105 @@ This is the current industrial acceptance stack for a promoted free-planar run:
 4. full prior robustness
 5. holdout generalization
 6. initial-prior assessment as a user-input interpretation layer
+
+### 2026-04-24 repeated holdout stability, uncertainty, and lidar2lidar crossover
+
+After fixing extraction/reference/basin/full-prior surfaces, the next highest-value
+gap was no longer "one more solve on the same best bag" but:
+
+- repeated stability across holdout splits
+- a first uncertainty surface for the released extrinsics
+- a clearer release workflow borrowed from `lidar2lidar`
+
+#### Why this is the right next step
+
+The current strong wide-map bag already passes the industrial acceptance stack for
+one run, but that still leaves three system-level gaps:
+
+1. holdout was only one deterministic split
+2. there was no bag-local uncertainty summary for the final 6DoF result
+3. there was still no release habit equivalent to `lidar2lidar`'s stable
+   `metrics.yaml + diagnostics/` separation plus repeated-run thinking
+
+#### What was borrowed from `lidar2lidar`
+
+Reviewing `lidar2lidar` suggests three reusable industrial patterns:
+
+1. **Keep stable concise metrics and rich diagnostics separate**
+   - short decision surface in `metrics.yaml`
+   - richer investigation surface under `diagnostics/`
+2. **Treat quality gates as promotion logic, not only optimizer success**
+   - just because one optimization converged does not mean the run is releasable
+3. **Add repeated-run stability summaries**
+   - `lidar2lidar` already points toward repeated-run / multi-sample stability as
+     the next iteration gap
+   - `lidar2imu` should do the same for holdout offsets and later for cross-bag
+     release packs
+
+#### Implemented in this round
+
+The metrics layer now also publishes:
+
+- `coarse_metrics.statuses.holdout_repeatability`
+- `vehicle_motion_assessment.holdout_repeatability`
+- `vehicle_motion_assessment.holdout_repeatability_details`
+- `fine_metrics.holdout_repeatability`
+- `fine_metrics.uncertainty_summary`
+
+Current behavior:
+
+- keep the existing deterministic holdout split
+- replay additional holdout offsets over the same `every_n` scheme
+- summarize:
+  - repeated holdout pass / warning / unknown
+  - whether different offsets converge to one basin or multiple basins
+  - a first bag-local uncertainty summary from repeated final-transform spread
+
+#### Validation
+
+1. strong wide-map run
+   - `outputs/lidar2imu/20260424_repeatability_eval/run_initial_equal_reference`
+   - observed:
+     - `holdout_repeatability = pass`
+     - `holdout_generalization = pass`
+     - `trial_count = 3`
+     - `distinct_solution_count = 1`
+     - max pairwise final delta `≈ 0.0010 m / 0.052 deg`
+     - uncertainty:
+       - yaw std `≈ 0.0118 deg`
+       - z std `≈ 0.00046 m`
+   - interpretation:
+     - this is the first useful bag-local uncertainty signal for a promoted run
+
+2. weak baseline smoke run
+   - `outputs/lidar2imu/20260424_repeatability_eval/run_baseline_smoke`
+   - observed:
+     - `holdout_repeatability = unknown`
+     - `holdout_generalization = unknown`
+   - interpretation:
+     - the bag is too small for repeated holdout
+     - that should be treated as missing evidence, not as a silent pass
+
+#### Updated next industrial roadmap
+
+With this round, the immediate priority order is now:
+
+1. **batch repeatability matrix**
+   - repeat across bag families and nearby map settings
+2. **uncertainty summary**
+   - extend the new bag-local repeated-holdout summary into cross-bag release
+     confidence
+3. **freeze production release**
+   - define explicit release criteria on top of:
+     - extraction consistency
+     - trusted-reference consistency
+     - planar basin stability
+     - full prior robustness
+     - holdout generalization
+     - holdout repeatability / uncertainty
+4. **raw-level candidate extraction comparison**
+   - because the larger remaining structural risk is still extraction-side trust in
+     bag TF
+5. **true scan-to-map continuation**
+   - improve the algorithm ceiling, but not at the cost of destabilizing the now
+     fixed evaluation surfaces

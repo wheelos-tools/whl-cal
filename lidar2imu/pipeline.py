@@ -123,16 +123,33 @@ def _clone_dataset_with_motion_samples(
 def _split_holdout_dataset(
     dataset: CalibrationDataset, config: CalibrationConfig
 ) -> tuple[CalibrationDataset, CalibrationDataset | None, dict]:
+    holdout_every_n = max(int(config.metrics_holdout_every_n), 0)
+    default_offset = max(holdout_every_n - 1, 0)
+    return _split_holdout_dataset_with_offset(
+        dataset, config, holdout_offset=default_offset
+    )
+
+
+def _split_holdout_dataset_with_offset(
+    dataset: CalibrationDataset,
+    config: CalibrationConfig,
+    *,
+    holdout_offset: int,
+) -> tuple[CalibrationDataset, CalibrationDataset | None, dict]:
     ordered_motion_samples = sorted(
         dataset.motion_samples,
         key=lambda sample: (sample.start_timestamp_ns, sample.end_timestamp_ns),
     )
     total_motion_samples = len(ordered_motion_samples)
     holdout_every_n = max(int(config.metrics_holdout_every_n), 0)
+    normalized_offset = 0
+    if holdout_every_n >= 1:
+        normalized_offset = int(holdout_offset) % holdout_every_n
     holdout_plan = {
         "enabled": False,
         "strategy": "every_nth_motion_sample",
         "every_n": holdout_every_n,
+        "offset": normalized_offset,
         "total_motion_samples": total_motion_samples,
         "calibration_motion_samples": total_motion_samples,
         "holdout_motion_samples": 0,
@@ -151,7 +168,7 @@ def _split_holdout_dataset(
     holdout_indices = [
         index
         for index in range(total_motion_samples)
-        if (index + 1) % holdout_every_n == 0
+        if index % holdout_every_n == normalized_offset
     ]
     while (
         total_motion_samples - len(holdout_indices) < config.min_motion_samples
@@ -177,6 +194,7 @@ def _split_holdout_dataset(
         "enabled": True,
         "strategy": "every_nth_motion_sample",
         "every_n": holdout_every_n,
+        "offset": normalized_offset,
         "total_motion_samples": total_motion_samples,
         "calibration_motion_samples": len(calibration_motion_samples),
         "holdout_motion_samples": len(holdout_motion_samples),
@@ -189,6 +207,7 @@ def _split_holdout_dataset(
         metadata_updates={
             "motion_holdout_split": "calibration",
             "motion_holdout_every_n": holdout_every_n,
+            "motion_holdout_offset": normalized_offset,
             "motion_holdout_total_samples": total_motion_samples,
             "motion_holdout_count": len(holdout_motion_samples),
         },
@@ -199,11 +218,216 @@ def _split_holdout_dataset(
         metadata_updates={
             "motion_holdout_split": "holdout",
             "motion_holdout_every_n": holdout_every_n,
+            "motion_holdout_offset": normalized_offset,
             "motion_holdout_total_samples": total_motion_samples,
             "motion_holdout_count": len(holdout_motion_samples),
         },
     )
     return calibration_dataset, holdout_dataset, holdout_plan
+
+
+def _summarize_numeric(values: list[float]) -> dict[str, float] | None:
+    if not values:
+        return None
+    series = np.asarray(values, dtype=float)
+    return {
+        "mean": float(np.mean(series)),
+        "std": float(np.std(series)),
+        "min": float(np.min(series)),
+        "max": float(np.max(series)),
+        "span": float(np.max(series) - np.min(series)),
+        "p95": float(np.percentile(series, 95)),
+    }
+
+
+def _evaluate_holdout_repeatability(
+    dataset: CalibrationDataset,
+    config: CalibrationConfig,
+    primary_result: dict,
+) -> dict | None:
+    holdout_every_n = max(int(config.metrics_holdout_every_n), 0)
+    repeat_count = max(int(config.metrics_holdout_repeat_count), 0)
+    min_repeat_evaluations = max(int(config.metrics_holdout_min_repeat_evaluations), 1)
+    if holdout_every_n < 2 or repeat_count < min_repeat_evaluations:
+        return None
+
+    evaluated_offsets = min(holdout_every_n, repeat_count)
+    trials = []
+    trial_final_transforms: list[np.ndarray] = []
+    for holdout_offset in range(evaluated_offsets):
+        calibration_dataset, holdout_dataset, holdout_plan = (
+            _split_holdout_dataset_with_offset(
+                dataset,
+                config,
+                holdout_offset=holdout_offset,
+            )
+        )
+        if not holdout_plan.get("enabled") or holdout_dataset is None:
+            continue
+
+        trial_result = _run_calibration_once(
+            calibration_dataset,
+            config,
+            np.asarray(calibration_dataset.initial_transform, dtype=float),
+        )
+        trial_metrics, _ = build_metrics_output(
+            dataset=calibration_dataset,
+            final_transform=trial_result["final_transform"],
+            initial_transform=trial_result["initial_transform"],
+            stages=trial_result["stages"],
+            config=config,
+            output_dir="",
+            full_dataset=dataset,
+            holdout_dataset=holdout_dataset,
+            holdout_plan=holdout_plan,
+        )
+        holdout_validation = (
+            trial_metrics.get("fine_metrics", {}).get("holdout_validation", {}) or {}
+        )
+        final_transform = np.asarray(trial_result["final_transform"], dtype=float)
+        yaw_rad, roll_rad, pitch_rad = yaw_roll_pitch_from_matrix(final_transform)
+        trial_final_transforms.append(final_transform)
+        trials.append(
+            {
+                "offset": int(holdout_plan.get("offset", holdout_offset)),
+                "status": holdout_validation.get("status", "unknown"),
+                "primary_cause": holdout_validation.get("primary_cause"),
+                "holdout_motion_samples": holdout_validation.get(
+                    "holdout_motion_samples"
+                ),
+                "calibration_motion_samples": holdout_validation.get(
+                    "calibration_motion_samples"
+                ),
+                "ratios": holdout_validation.get("ratios"),
+                "checks": holdout_validation.get("checks"),
+                "final_delta_to_primary": transform_delta_metrics(
+                    primary_result["final_transform"], final_transform
+                ),
+                "final_translation_m": {
+                    "x": float(final_transform[0, 3]),
+                    "y": float(final_transform[1, 3]),
+                    "z": float(final_transform[2, 3]),
+                },
+                "final_euler_deg": {
+                    "yaw": float(np.degrees(yaw_rad)),
+                    "roll": float(np.degrees(roll_rad)),
+                    "pitch": float(np.degrees(pitch_rad)),
+                },
+            }
+        )
+
+    if len(trials) < min_repeat_evaluations:
+        return None
+
+    translation_threshold = float(config.metrics_repeatability_warning_translation_m)
+    rotation_threshold = float(config.metrics_repeatability_warning_rotation_deg)
+    distinct_solution_count = _cluster_final_transforms(
+        trial_final_transforms,
+        translation_threshold_m=translation_threshold,
+        rotation_threshold_deg=rotation_threshold,
+    )
+    max_pairwise_translation = 0.0
+    max_pairwise_rotation = 0.0
+    for left_index, left_transform in enumerate(trial_final_transforms):
+        for right_transform in trial_final_transforms[left_index + 1 :]:
+            delta = transform_delta_metrics(left_transform, right_transform)
+            max_pairwise_translation = max(
+                max_pairwise_translation, float(delta["translation_norm_m"])
+            )
+            max_pairwise_rotation = max(
+                max_pairwise_rotation, float(delta["rotation_deg"])
+            )
+
+    pass_count = int(sum(1 for trial in trials if trial["status"] == "pass"))
+    warning_count = int(sum(1 for trial in trials if trial["status"] == "warning"))
+    unknown_count = int(sum(1 for trial in trials if trial["status"] == "unknown"))
+    unstable_offsets = [
+        int(trial["offset"])
+        for trial in trials
+        if float(trial["final_delta_to_primary"]["translation_norm_m"])
+        > translation_threshold
+        or float(trial["final_delta_to_primary"]["rotation_deg"]) > rotation_threshold
+    ]
+
+    if warning_count == 0 and distinct_solution_count <= 1:
+        status = "pass"
+        primary_cause = "stable_repeated_holdout"
+        recommendations: list[str] = []
+    elif distinct_solution_count > 1:
+        status = "warning"
+        primary_cause = "repeat_split_solution_instability"
+        recommendations = [
+            "Different holdout offsets converge to materially different final solutions; do not treat one split as release-quality evidence.",
+            "Require repeatability across bag families or tighten map-side constraints before promoting this configuration.",
+        ]
+    else:
+        status = "warning"
+        primary_cause = "repeat_split_generalization_gap"
+        recommendations = [
+            "At least one holdout offset degrades materially relative to the calibration subset; require repeated-split stability before trusting free x/y/yaw.",
+            "Prefer map settings that keep holdout ratios stable across offsets instead of optimizing one deterministic split only.",
+        ]
+
+    yaw_values_rad = np.unwrap(
+        np.asarray(
+            [np.radians(float(trial["final_euler_deg"]["yaw"])) for trial in trials],
+            dtype=float,
+        )
+    )
+    roll_values_deg = [float(trial["final_euler_deg"]["roll"]) for trial in trials]
+    pitch_values_deg = [float(trial["final_euler_deg"]["pitch"]) for trial in trials]
+    x_values_m = [float(trial["final_translation_m"]["x"]) for trial in trials]
+    y_values_m = [float(trial["final_translation_m"]["y"]) for trial in trials]
+    z_values_m = [float(trial["final_translation_m"]["z"]) for trial in trials]
+    translation_delta_norms = [
+        float(trial["final_delta_to_primary"]["translation_norm_m"]) for trial in trials
+    ]
+    rotation_delta_norms = [
+        float(trial["final_delta_to_primary"]["rotation_deg"]) for trial in trials
+    ]
+
+    return {
+        "status": status,
+        "primary_cause": primary_cause,
+        "trial_count": len(trials),
+        "evaluated_offsets": [int(trial["offset"]) for trial in trials],
+        "pass_count": pass_count,
+        "warning_count": warning_count,
+        "unknown_count": unknown_count,
+        "pass_fraction": float(pass_count / len(trials)),
+        "distinct_solution_count": distinct_solution_count,
+        "unstable_offsets": unstable_offsets,
+        "translation_threshold_m": translation_threshold,
+        "rotation_threshold_deg": rotation_threshold,
+        "max_pairwise_delta": {
+            "translation_norm_m": float(max_pairwise_translation),
+            "rotation_deg": float(max_pairwise_rotation),
+        },
+        "delta_to_primary_summary": {
+            "translation_norm_m": _summarize_numeric(translation_delta_norms),
+            "rotation_deg": _summarize_numeric(rotation_delta_norms),
+        },
+        "uncertainty_summary": {
+            "source": "repeated_holdout_offsets",
+            "trial_count": len(trials),
+            "final_translation_m": {
+                "x": _summarize_numeric(x_values_m),
+                "y": _summarize_numeric(y_values_m),
+                "z": _summarize_numeric(z_values_m),
+            },
+            "final_euler_deg": {
+                "yaw": _summarize_numeric(list(np.degrees(yaw_values_rad))),
+                "roll": _summarize_numeric(roll_values_deg),
+                "pitch": _summarize_numeric(pitch_values_deg),
+            },
+            "delta_to_primary": {
+                "translation_norm_m": _summarize_numeric(translation_delta_norms),
+                "rotation_deg": _summarize_numeric(rotation_delta_norms),
+            },
+        },
+        "recommendations": recommendations,
+        "trials": trials,
+    }
 
 
 def _run_calibration_once(
@@ -739,6 +963,9 @@ def run_calibration(
     full_prior_robustness = _evaluate_full_prior_robustness(
         calibration_dataset, config, primary_result
     )
+    holdout_repeatability = _evaluate_holdout_repeatability(
+        dataset, config, primary_result
+    )
     metrics_output, evaluation_diagnostics = build_metrics_output(
         dataset=calibration_dataset,
         final_transform=primary_result["final_transform"],
@@ -748,6 +975,7 @@ def run_calibration(
         output_dir=output_dir or "",
         basin_stability=basin_stability,
         full_prior_robustness=full_prior_robustness,
+        holdout_repeatability=holdout_repeatability,
         full_dataset=dataset,
         holdout_dataset=holdout_dataset,
         holdout_plan=holdout_plan,

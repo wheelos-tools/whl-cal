@@ -99,8 +99,12 @@ class CalibrationConfig:
     metrics_multistart_vertical_perturbation_m: float = 0.25
     metrics_multistart_roll_pitch_perturbation_deg: float = 3.0
     metrics_holdout_every_n: int = 3
+    metrics_holdout_repeat_count: int = 3
+    metrics_holdout_min_repeat_evaluations: int = 2
     metrics_holdout_min_motion_samples: int = 3
     metrics_holdout_max_rotation_residual_ratio: float = 1.5
     metrics_holdout_max_translation_residual_ratio: float = 1.5
     metrics_holdout_min_registration_fitness_ratio: float = 0.85
     metrics_holdout_max_registration_inlier_rmse_ratio: float = 1.5
+    metrics_repeatability_warning_translation_m: float = 0.05
+    metrics_repeatability_warning_rotation_deg: float = 0.3

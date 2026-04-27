@@ -144,6 +144,7 @@ def _row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
         row.get("extraction_consistency") != "pass",
         row.get("planar_basin_stability") != "pass",
         row.get("full_prior_robustness") != "pass",
+        row.get("holdout_repeatability") != "pass",
         row.get("holdout_generalization") != "pass",
         _float_or_none(row.get("delta_to_reference_rotation_deg")) or 1e9,
         _float_or_none(row.get("motion_translation_residual_p95_m")) or 1e9,
@@ -187,10 +188,14 @@ def _load_run_row(metrics_path: Path) -> dict[str, Any]:
         ),
         "planar_basin_stability": assessment.get("planar_basin_stability"),
         "full_prior_robustness": assessment.get("full_prior_robustness"),
+        "holdout_repeatability": assessment.get("holdout_repeatability"),
         "holdout_generalization": assessment.get("holdout_generalization"),
         "planar_basin_primary_cause": basin.get("primary_cause"),
         "full_prior_primary_cause": _dig(
             assessment, "full_prior_robustness_details", "primary_cause"
+        ),
+        "holdout_repeatability_primary_cause": _dig(
+            assessment, "holdout_repeatability_details", "primary_cause"
         ),
         "holdout_primary_cause": _dig(
             assessment, "holdout_validation_details", "primary_cause"
@@ -265,7 +270,40 @@ def _load_run_row(metrics_path: Path) -> dict[str, Any]:
         "status_trusted_reference": statuses.get("trusted_reference"),
         "status_planar_basin_stability": statuses.get("planar_basin_stability"),
         "status_full_prior_robustness": statuses.get("full_prior_robustness"),
+        "status_holdout_repeatability": statuses.get("holdout_repeatability"),
         "status_holdout_generalization": statuses.get("holdout_generalization"),
+        "uncertainty_translation_std_x_m": _dig(
+            payload,
+            "fine_metrics",
+            "uncertainty_summary",
+            "final_translation_m",
+            "x",
+            "std",
+        ),
+        "uncertainty_translation_std_y_m": _dig(
+            payload,
+            "fine_metrics",
+            "uncertainty_summary",
+            "final_translation_m",
+            "y",
+            "std",
+        ),
+        "uncertainty_translation_std_z_m": _dig(
+            payload,
+            "fine_metrics",
+            "uncertainty_summary",
+            "final_translation_m",
+            "z",
+            "std",
+        ),
+        "uncertainty_yaw_std_deg": _dig(
+            payload,
+            "fine_metrics",
+            "uncertainty_summary",
+            "final_euler_deg",
+            "yaw",
+            "std",
+        ),
         "delta_to_initial_translation_m": delta_to_initial.get("translation_norm_m"),
         "delta_to_initial_z_m": _dig(delta_to_initial, "translation_xyz_m", "z"),
         "delta_to_initial_rotation_deg": delta_to_initial.get("rotation_deg"),
@@ -438,7 +476,7 @@ def _render_summary_table(rows: list[dict[str, Any]]) -> str:
     header = (
         "<tr>"
         "<th>run</th><th>recommendation</th><th>policy</th><th>extract</th>"
-        "<th>reference</th><th>basin</th><th>6dof prior</th><th>holdout</th><th>prior</th><th>yaw ratio</th><th>plateau</th>"
+        "<th>reference</th><th>basin</th><th>6dof prior</th><th>holdout rep</th><th>holdout</th><th>prior</th><th>yaw ratio</th><th>plateau</th>"
         "<th>trans p95</th><th>fit p05</th><th>delta ref</th><th>delta ext</th>"
         "</tr>"
     )
@@ -463,6 +501,7 @@ def _render_summary_table(rows: list[dict[str, Any]]) -> str:
             f"<td>{_status_badge(row.get('trusted_reference_consistency'))}</td>"
             f"<td>{_status_badge(row.get('planar_basin_stability'))}</td>"
             f"<td>{_status_badge(row.get('full_prior_robustness'))}</td>"
+            f"<td>{_status_badge(row.get('holdout_repeatability'))}</td>"
             f"<td>{_status_badge(row.get('holdout_generalization'))}</td>"
             f"<td>{_status_badge(row.get('initial_prior_assessment'))}</td>"
             f"<td>{html.escape(_format_float(row.get('yaw_max_cost_ratio'), 2))}</td>"
@@ -496,6 +535,13 @@ def _render_detail_cards(rows: list[dict[str, Any]]) -> str:
             f"<p><strong>6DoF prior robustness:</strong> "
             f"{html.escape(str(row.get('full_prior_robustness') or '-'))}, "
             f"cause={html.escape(str(row.get('full_prior_primary_cause') or '-'))}</p>"
+            f"<p><strong>holdout repeatability:</strong> "
+            f"{html.escape(str(row.get('holdout_repeatability') or '-'))}, "
+            f"cause={html.escape(str(row.get('holdout_repeatability_primary_cause') or '-'))}, "
+            f"std xyz=({html.escape(_format_float(row.get('uncertainty_translation_std_x_m'), 4))}, "
+            f"{html.escape(_format_float(row.get('uncertainty_translation_std_y_m'), 4))}, "
+            f"{html.escape(_format_float(row.get('uncertainty_translation_std_z_m'), 4))}) m, "
+            f"yaw std={html.escape(_format_float(row.get('uncertainty_yaw_std_deg'), 3))} deg</p>"
             f"<p><strong>holdout:</strong> {html.escape(str(row.get('holdout_generalization') or '-'))}, "
             f"rot ratio={html.escape(_format_float(row.get('holdout_rotation_ratio'), 2))}, "
             f"trans ratio={html.escape(_format_float(row.get('holdout_translation_ratio'), 2))}</p>"

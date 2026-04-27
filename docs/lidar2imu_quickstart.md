@@ -116,6 +116,7 @@ Start with these fields:
 - `vehicle_motion_assessment.recommendation`
 - `vehicle_motion_assessment.extraction_consistency`
 - `vehicle_motion_assessment.full_prior_robustness`
+- `vehicle_motion_assessment.holdout_repeatability`
 - `vehicle_motion_assessment.holdout_generalization`
 - `vehicle_motion_assessment.initial_prior_assessment`
 - `vehicle_motion_assessment.applied_solver_planar_motion_policy`
@@ -131,6 +132,8 @@ Start with these fields:
 - `fine_metrics.extraction_consistency`
 - `fine_metrics.full_prior_robustness`
 - `fine_metrics.initial_prior_assessment`
+- `fine_metrics.holdout_repeatability`
+- `fine_metrics.uncertainty_summary`
 - `fine_metrics.algorithm_stages.motion_rotation.observability.cost_scan.max_cost_ratio`
 - `fine_metrics.algorithm_stages.motion_rotation.observability.cost_scan.within_5pct_span_deg`
 - `fine_metrics.motion.translation_heading_span_deg`
@@ -161,6 +164,7 @@ The HTML report fixes the same industrial acceptance surfaces in one place:
 - trusted-reference consistency
 - planar basin stability
 - full 6DoF prior robustness
+- repeated holdout stability
 - holdout generalization
 - yaw cost ratio / plateau
 - residual and registration quality
@@ -244,9 +248,23 @@ The HTML report fixes the same industrial acceptance surfaces in one place:
     to one stable accepted basin
   - `warning`: at least one nearby prior family reaches a different basin, so do not
     treat one accepted solve as an industrially stable result yet
+- Read `vehicle_motion_assessment.holdout_repeatability` together with
+  `fine_metrics.holdout_repeatability`:
+  - `pass`: multiple holdout offsets keep one stable solution family and stable
+    held-out ratios
+  - `warning`: different holdout offsets either degrade materially or converge to
+    different solution families
+  - `unknown`: the current bag has too few motion samples for repeated holdout
+- Read `fine_metrics.uncertainty_summary` as the first released uncertainty surface:
+  - it summarizes translation / rotation spread from repeated holdout replays
+  - use it as a bag-local stability estimate, not as a final cross-bag production
+    confidence interval
 - If `planar_basin_stability=pass` but `full_prior_robustness=warning`, the run is
   no longer failing on small `x/y/yaw` perturbations only; it is still sensitive to
   a wider 6DoF prior neighborhood.
+- If `holdout_generalization=pass` but `holdout_repeatability=warning`, do not trust
+  one deterministic holdout split; that pattern means the map-side result is still
+  split-sensitive.
 - If `full_prior_robustness_details.primary_cause=planar_prior_sensitivity`, prefer
   stronger map-side constraints or trusted-reference-aware basin selection before
   widening free 6DoF release.
