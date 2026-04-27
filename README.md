@@ -30,7 +30,7 @@ Documentation:
 - LiDAR-to-IMU overview: [docs/lidar2imu.md](docs/lidar2imu.md)
 - LiDAR-to-IMU Quick Start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
 - LiDAR-to-IMU current design: [docs/lidar2imu_design.md](docs/lidar2imu_design.md)
-- Camera intrinsic quick start: [camera/README.md](camera/README.md)
+- Camera intrinsic quick start: [docs/camera_quickstart.md](docs/camera_quickstart.md)
 
 ## Install
 

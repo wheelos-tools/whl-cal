@@ -8,9 +8,9 @@ the same repo-wide calibration framework used by `lidar2lidar` and `lidar2imu`.
 Current files:
 
 - `camera/intrinsic.py`
-  - interactive chessboard-based camera intrinsic calibration
-- `camera/README.md`
-  - quick start for the intrinsic tool
+  - interactive chessboard-based camera intrinsic calibration (supports headless --images-dir)
+- `docs/camera_quickstart.md`
+  - quick start for the intrinsic tool and headless usage
 - `camera2lidar/reference_based.py`
   - checkerboard / reference-based LiDAR-camera extrinsic calibration
 - `camera2lidar/learning_based.py`
