@@ -42,6 +42,14 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+If the default PyPI route is slow or unstable in this environment, switch pip to
+the Tsinghua mirror inside the active virtual environment first:
+
+```bash
+python -m pip config --site set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -e .
+```
+
 ## Usage
 
 Set your Apollo record directory:

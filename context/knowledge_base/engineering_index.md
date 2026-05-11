@@ -33,6 +33,14 @@ This file is the compact index for the current engineering surfaces in the repo.
 - `python camera2lidar/reference_based.py`
 - `python camera2lidar/learning_based.py`
 
+## Environment note
+
+- When local `pip install -e .` stalls on the default PyPI route, prefer a fresh
+  virtual environment and set the active environment to the Tsinghua mirror:
+  `python -m pip config --site set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple`
+- This keeps the mirror scoped to the current virtual environment instead of
+  changing the whole machine.
+
 ## Stable artifact surfaces
 
 ### lidar2lidar
