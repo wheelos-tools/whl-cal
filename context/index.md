@@ -24,6 +24,7 @@ The organizing rule is:
    - `lidar2imu_context.md`
    - `prepared_rig_dataset_context.md`
    - `lidar2lidar_advanced_strategy.md`
+   - `timing_sync_context.md`
    - `scan2map_context.md`
    - `scan2map_metrics_framework.md`
    - `lidar2camera_context.md`
@@ -67,6 +68,9 @@ The organizing rule is:
 - `lidar2lidar_advanced_strategy.md`
   - next-stage production strategy for four-corner rig calibration
   - priors, topology-aware solving, scene sufficiency, and advanced metrics
+- `timing_sync_context.md`
+  - clock-source and timestamp-chain analysis for Vanjee / Huace / MSF
+  - bag-level timing measurements and synchronization recommendations
 - `scan2map_context.md`
   - detailed lidar2lidar scan2map direction note
 - `scan2map_metrics_framework.md`
