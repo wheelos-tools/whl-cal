@@ -26,7 +26,6 @@ import copy
 import logging
 import shutil
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -44,7 +43,13 @@ from lidar2imu.models import CalibrationConfig
 from lidar2imu.pipeline import run_calibration
 from lidar2lidar.extrinsic_io import load_extrinsics_file
 from lidar2lidar.lidar2lidar import calibrate_lidar_extrinsic
-from lidar2lidar.record_adapter import Record, ensure_record_available
+from lidar2lidar.prepared_dataset import (
+    ImuSample,
+    PoseSample,
+    collect_imu_samples,
+    collect_pose_samples,
+    load_prepared_rig_dataset,
+)
 from lidar2lidar.record_utils import (
     build_transform_graph,
     collect_pointcloud_metadata,
@@ -102,21 +107,6 @@ RUN_PROFILE_OPTION_NAMES = {
 }
 
 
-@dataclass(frozen=True)
-class PoseSample:
-    timestamp_ns: int
-    transform_world_localization: np.ndarray
-    transform_world_imu: np.ndarray
-    gravity_imu: np.ndarray
-
-
-@dataclass(frozen=True)
-class ImuSample:
-    timestamp_ns: int
-    linear_acceleration: np.ndarray
-    angular_velocity: np.ndarray
-
-
 def _explicit_cli_options(argv: list[str]) -> set[str]:
     options = set()
     for token in argv:
@@ -135,24 +125,6 @@ def _apply_run_profile(args: argparse.Namespace, explicit_options: set[str]) -> 
         if any(option_name in explicit_options for option_name in option_names):
             continue
         setattr(args, field_name, value)
-
-
-def _pose_to_matrix(position, orientation) -> np.ndarray:
-    transform = np.eye(4, dtype=float)
-    transform[:3, :3] = R.from_quat(
-        [
-            float(orientation.qx),
-            float(orientation.qy),
-            float(orientation.qz),
-            float(orientation.qw),
-        ]
-    ).as_matrix()
-    transform[:3, 3] = [
-        float(position.x),
-        float(position.y),
-        float(position.z),
-    ]
-    return transform
 
 
 def _uniform_indices(length: int, max_items: int) -> list[int]:
@@ -191,76 +163,6 @@ def _nearest_sample(
     if delta_ns > max_delta_ns:
         return None, delta_ns
     return sample, delta_ns
-
-
-def _collect_pose_samples(
-    record_files: list[str], pose_topic: str, transform_localization_to_imu: np.ndarray
-) -> list[PoseSample]:
-    ensure_record_available()
-    samples: list[PoseSample] = []
-    gravity_world = np.array([0.0, 0.0, -9.81], dtype=float)
-    for record_file in record_files:
-        with Record(record_file) as record:
-            for _, msg, timestamp_ns in record.read_messages(topics=[pose_topic]):
-                pose = msg.pose
-                transform_world_localization = _pose_to_matrix(
-                    pose.position, pose.orientation
-                )
-                transform_world_imu = (
-                    transform_world_localization @ transform_localization_to_imu
-                )
-                gravity_imu = transform_world_imu[:3, :3].T @ gravity_world
-                samples.append(
-                    PoseSample(
-                        timestamp_ns=int(timestamp_ns),
-                        transform_world_localization=transform_world_localization,
-                        transform_world_imu=transform_world_imu,
-                        gravity_imu=gravity_imu,
-                    )
-                )
-    samples.sort(key=lambda item: item.timestamp_ns)
-    return samples
-
-
-def _collect_imu_samples(record_files: list[str], imu_topic: str) -> list[ImuSample]:
-    ensure_record_available()
-    samples: list[ImuSample] = []
-    for record_file in record_files:
-        with Record(record_file) as record:
-            for _, msg, timestamp_ns in record.read_messages(topics=[imu_topic]):
-                linear_acceleration = getattr(msg, "linear_acceleration", None)
-                angular_velocity = getattr(msg, "angular_velocity", None)
-                if linear_acceleration is None or angular_velocity is None:
-                    imu_pose = getattr(msg, "imu", None)
-                    linear_acceleration = getattr(imu_pose, "linear_acceleration", None)
-                    angular_velocity = getattr(imu_pose, "angular_velocity", None)
-                if linear_acceleration is None or angular_velocity is None:
-                    raise RuntimeError(
-                        f"Unsupported IMU message layout on topic {imu_topic}."
-                    )
-                samples.append(
-                    ImuSample(
-                        timestamp_ns=int(timestamp_ns),
-                        linear_acceleration=np.array(
-                            [
-                                float(linear_acceleration.x),
-                                float(linear_acceleration.y),
-                                float(linear_acceleration.z),
-                            ],
-                            dtype=float,
-                        ),
-                        angular_velocity=np.array(
-                            [
-                                float(angular_velocity.x),
-                                float(angular_velocity.y),
-                                float(angular_velocity.z),
-                            ],
-                            dtype=float,
-                        ),
-                    )
-                )
-    samples.sort(key=lambda item: item.timestamp_ns)
-    return samples
 
 
 def _windowed_imu_gravity(
@@ -944,7 +846,7 @@ def _build_motion_windows(
 
 
 def convert_record_to_standardized_samples(
-    record_path: str,
+    record_path: str | None,
     output_dir: str,
     lidar_topic: str,
     pose_topic: str,
@@ -977,14 +879,59 @@ def convert_record_to_standardized_samples(
     map_min_support_frames: int | None = None,
     map_voxel_size: float | None = None,
     run_profile: str | None = None,
+    prepared_dataset_yaml: str | None = None,
 ) -> tuple[Path, dict]:
-    record_files = discover_record_files(record_path)
-    topic_frame_ids = get_topic_frame_ids(record_files, [lidar_topic])
-    lidar_frame = child_frame or topic_frame_ids.get(lidar_topic, "")
+    prepared_dataset = (
+        load_prepared_rig_dataset(prepared_dataset_yaml)
+        if prepared_dataset_yaml is not None
+        else None
+    )
+    if prepared_dataset is not None:
+        if lidar_topic not in prepared_dataset.metadata_by_topic:
+            raise RuntimeError(
+                f"LiDAR topic {lidar_topic} is not present in prepared dataset {prepared_dataset_yaml}."
+            )
+        if prepared_dataset.pose_topic and pose_topic != prepared_dataset.pose_topic:
+            raise RuntimeError(
+                f"Requested pose topic {pose_topic} does not match prepared dataset topic "
+                f"{prepared_dataset.pose_topic}."
+            )
+        if (
+            gravity_source == "imu"
+            and prepared_dataset.imu_topic
+            and imu_topic != prepared_dataset.imu_topic
+        ):
+            raise RuntimeError(
+                f"Requested IMU topic {imu_topic} does not match prepared dataset topic "
+                f"{prepared_dataset.imu_topic}."
+            )
+        record_files = prepared_dataset.record_files
+        lidar_frame = child_frame or prepared_dataset.topic_infos.get(
+            lidar_topic, {}
+        ).get("frame_id", "")
+        if not lidar_frame and prepared_dataset.metadata_by_topic[lidar_topic]:
+            lidar_frame = prepared_dataset.metadata_by_topic[lidar_topic][0].frame_id
+        tf_edges = prepared_dataset.tf_edges
+        metadata_by_topic = {
+            lidar_topic: prepared_dataset.metadata_by_topic[lidar_topic]
+        }
+    else:
+        if record_path is None:
+            raise RuntimeError(
+                "Either record_path or prepared_dataset_yaml must be provided."
+            )
+        record_files = discover_record_files(record_path)
+        topic_frame_ids = get_topic_frame_ids(record_files, [lidar_topic])
+        lidar_frame = child_frame or topic_frame_ids.get(lidar_topic, "")
+        if not lidar_frame:
+            raise RuntimeError(
+                f"Failed to infer frame_id for lidar topic {lidar_topic}."
+            )
+        tf_edges = extract_tf_edges(record_files)
+        metadata_by_topic = collect_pointcloud_metadata(record_files, [lidar_topic])
+
     if not lidar_frame:
         raise RuntimeError(f"Failed to infer frame_id for lidar topic {lidar_topic}.")
-
-    tf_edges = extract_tf_edges(record_files)
     tf_graph = build_transform_graph(tf_edges)
     record_reference_transform = lookup_transform(tf_graph, lidar_frame, parent_frame)
     reference_transform_source = "/tf_static or merged tf graph"
@@ -1037,18 +984,27 @@ def convert_record_to_standardized_samples(
             "This conversion currently expects the localization frame to be present."
         )
 
-    metadata_by_topic = collect_pointcloud_metadata(record_files, [lidar_topic])
     lidar_metas = metadata_by_topic[lidar_topic]
     if not lidar_metas:
         raise RuntimeError(f"No point clouds found for topic {lidar_topic}.")
 
-    pose_samples = _collect_pose_samples(record_files, pose_topic, localization_to_imu)
+    pose_samples = (
+        prepared_dataset.pose_samples
+        if prepared_dataset is not None
+        else collect_pose_samples(record_files, pose_topic, localization_to_imu)
+    )
     if not pose_samples:
         raise RuntimeError(f"No pose messages found on {pose_topic}.")
     pose_timestamps = [sample.timestamp_ns for sample in pose_samples]
 
     imu_samples = (
-        _collect_imu_samples(record_files, imu_topic) if gravity_source == "imu" else []
+        (
+            prepared_dataset.imu_samples
+            if prepared_dataset is not None
+            else collect_imu_samples(record_files, imu_topic)
+        )
+        if gravity_source == "imu"
+        else []
     )
     imu_timestamps = [sample.timestamp_ns for sample in imu_samples]
 
@@ -1950,6 +1906,7 @@ def _run_conversion_and_calibration(
         map_min_support_frames=args.map_min_support_frames,
         map_voxel_size=args.map_voxel_size,
         run_profile=args.profile,
+        prepared_dataset_yaml=args.prepared_dataset_yaml,
     )
     logging.info("Wrote standardized samples to %s", sample_path)
     logging.info(
@@ -2004,10 +1961,15 @@ def main() -> None:
         default=None,
         help="Apply a fixed lidar2imu preset. baseline=stable scan-to-scan reference; production=current submap-to-map production candidate. Explicit CLI flags still override preset values.",
     )
-    parser.add_argument(
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "--record-path",
-        required=True,
         help="Path to a record file or split-record directory.",
+    )
+    input_group.add_argument(
+        "--prepared-dataset-yaml",
+        default=None,
+        help="Path to diagnostics/prepared_rig_dataset.yaml generated by lidar2lidar-rig-dataset.",
     )
     parser.add_argument(
         "--output-dir",
@@ -2239,6 +2201,7 @@ def main() -> None:
             map_min_support_frames=args.map_min_support_frames,
             map_voxel_size=args.map_voxel_size,
             run_profile=args.profile,
+            prepared_dataset_yaml=args.prepared_dataset_yaml,
         )
         logging.info("Wrote standardized samples to %s", sample_path)
         logging.info(

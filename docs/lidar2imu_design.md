@@ -44,6 +44,15 @@ Main file:
 
 - `lidar2imu/record_converter.py`
 
+The converter now supports two extraction inputs:
+
+- `--record-path`
+- `--prepared-dataset-yaml`
+
+The prepared-dataset path is intended for multi-LiDAR vehicle bags where the
+same raw data must feed both `lidar2imu` and `lidar2lidar` without rescanning
+the record every time.
+
 ## 3. Standardized input schema
 
 The solver consumes:
@@ -71,6 +80,12 @@ The solver consumes:
 - `sync_dt_ms`
 
 The converter writes this schema to `standardized_samples.yaml`.
+
+In prepared-dataset mode, the converter reuses:
+
+- cached raw-LiDAR `pcd` frames
+- cached pose / IMU state
+- cached TF edges
 
 ## 4. Algorithm stages
 

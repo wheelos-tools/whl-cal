@@ -32,6 +32,32 @@ Main file:
 
 - `lidar2lidar/auto_calib.py`
 
+Current orchestration supports:
+
+- direct CLI-driven target-star runs
+- `--workflow-yaml` runs with:
+  - `mode: target_star`
+  - `mode: tf_tree`
+  - `mode: explicit`
+  - `mode: complete`
+
+### `lidar2lidar-rig-dataset`
+
+Shared raw-rig extraction surface.
+
+Main files:
+
+- `lidar2lidar/prepared_dataset.py`
+- `tools/lidar2lidar/prepare_rig_dataset.py`
+
+Current optional extension:
+
+- `--loop-closure`
+  - calibrate additional pairwise graph edges among the selected raw LiDARs
+  - keep the original pairwise star baseline
+  - solve a graph-level global-consistency refinement
+  - write `loop_closed_tf.yaml` and loop-closure diagnostics for side-by-side comparison
+
 ### `lidar2lidar-calibrate`
 
 Manual single-pair refinement from PCD files.
@@ -85,6 +111,10 @@ This means `lidar2lidar` already has a built-in equivalent of a conversion
 layer, even though it does not currently serialize a standalone
 `standardized_samples.yaml` like `lidar2imu`.
 
+For multi-LiDAR vehicle rigs, the extraction layer can now also be frozen into
+`diagnostics/prepared_rig_dataset.yaml` and reused later via
+`--prepared-dataset-yaml`.
+
 ## 4. Algorithm layer
 
 ### Stage A: topic discovery and target selection
@@ -113,13 +143,20 @@ This produces `candidate_pairs` and skip reasons before calibration.
 
 ### Stage C: edge selection
 
-For each source topic:
+The pipeline now supports two edge-planning modes:
 
-- map it to the target frame using TF
-- choose a proxy registration target
-- reject edges below `--min-overlap`
+1. **legacy target-star**
+   - calibrate each selected source directly to one target topic
+2. **workflow-planned relations**
+   - load `--workflow-yaml`
+   - resolve explicit or TF-derived relations
+   - mark each relation as:
+     - `primary`
+     - `supporting`
+     - `check`
+   - reject relations below `--min-overlap`
 
-This is the main “pre-check before optimization” layer.
+This is now the main “pre-check before optimization” layer.
 
 ### Stage D: registration and method comparison
 
@@ -130,6 +167,7 @@ For each selected edge:
 - compute information-matrix diagnostics
 - summarize runs per method
 - choose the best method / run
+- summarize multi-window repeatability relative to the chosen reference run
 
 Current supported methods:
 
@@ -141,11 +179,28 @@ Current supported methods:
 
 After per-edge optimization:
 
+- compose relation results back into the chosen target frame
 - write normalized YAML extrinsics
 - build `calibrated_tf.yaml`
 - optionally export a merged cloud
 - write `metrics.yaml`
 - write diagnostics files
+
+### Stage F: optional rig loop closure
+
+When graph refinement is enabled (either by `--loop-closure` on the legacy path
+or by `planner.enable_global_optimization: true` in a workflow YAML):
+
+1. build additional pairwise measurement edges among the selected raw LiDARs
+2. choose a spanning tree plus extra loop edges
+3. keep the pairwise baseline as the initial rig pose set
+4. solve a graph-consistency refinement with the chosen target LiDAR fixed
+5. write:
+   - baseline `calibrated_tf.yaml`
+   - loop-closed `loop_closed_tf.yaml`
+   - `loop_closed/*.yaml`
+   - `diagnostics/loop_closure.yaml`
+   - optional visual artifacts under `diagnostics/`
 
 ## 5. Evaluation layer
 
@@ -159,6 +214,10 @@ After per-edge optimization:
 - average inlier RMSE
 - minimum overlap ratio
 - maximum condition number
+- scene sufficiency status
+- relation connectivity status
+- edge repeatability p95
+- visual geometry status
 
 Per-edge metrics include:
 
@@ -168,6 +227,7 @@ Per-edge metrics include:
 - overlap ratio
 - sync time delta
 - transform delta to initial guess
+- repeatability across multiple synchronized windows
 - information-matrix eigenvalues / condition number / degeneracy
 
 ### Detailed diagnostics
@@ -177,17 +237,26 @@ The pipeline writes:
 - `diagnostics/manifest.yaml`
 - `diagnostics/extraction.yaml`
 - `diagnostics/tf_tree.yaml`
+- `diagnostics/workflow.yaml`
 - `diagnostics/topology.yaml`
 - `diagnostics/calibration.yaml`
+- `diagnostics/scene_sufficiency.yaml`
 - optional `diagnostics/merged_cloud.pcd`
+- optional `diagnostics/loop_closure.yaml`
+- optional `diagnostics/visual_evaluation.yaml`
+- optional colored merged clouds for baseline / loop-closure comparison
 
 These files already form a good iteration surface:
 
 - `extraction.yaml`: raw-data extraction and candidate-pair summary
 - `tf_tree.yaml`: extraction / frame graph problems
+- `workflow.yaml`: resolved workflow topics, relations, and thresholds
 - `topology.yaml`: candidate and skip reasoning
 - `calibration.yaml`: per-edge optimization details
+- `scene_sufficiency.yaml`: windowed overlap / skew / wall support / suggestions
 - `metrics.yaml`: quick run summary
+- `loop_closure.yaml`: graph-level before/after consistency
+- `visual_evaluation.yaml`: wall / corner / slice summaries for human review
 
 ## 6. What already matches the lidar2imu pattern
 
@@ -211,12 +280,12 @@ The current update also makes that pattern more explicit in artifacts:
 
 1. The extraction layer is still implicit inside `lidar2lidar-auto`; there is no
    standalone serialized “standardized sample” artifact for offline iteration.
-2. Candidate-pair selection currently uses one overlap probe per pair; richer
-   pair scoring could improve robustness.
-3. Method comparison is per-edge but not yet treated as a reusable experiment
-   layer with fixed evaluation slices.
-4. Coarse and fine metrics are now explicit, but repeated-run stability
-   summaries can still be improved.
+2. Scene sufficiency is now present, but still uses lightweight geometric
+   proxies rather than full dynamic-object masking or map support modeling.
+3. Method comparison is per-edge and includes repeatability, but holdout-window
+   validation can still be strengthened.
+4. Visual metrics are now concrete, but wall / corner / slice thresholds still
+   need more bag-level validation.
 
 ## 8. Recommended next iteration
 

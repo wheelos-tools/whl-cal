@@ -82,6 +82,64 @@ Results:
 - Refreshed fallback extrinsics: `lidar2lidar/conf/*.yaml`
 - Detailed diagnostics: `$OUTPUT_DIR/diagnostics/`
 
+For a four-LiDAR raw rig, first prepare a reusable raw-only dataset. This
+caches Open3D-readable PCD snapshots plus pose / IMU / TF state once, so both
+`lidar2lidar` and `lidar2imu` can reuse the same extraction output:
+
+```bash
+lidar2lidar-rig-dataset \
+  --record-path "$RECORD_DIR" \
+  --output-dir outputs/prepared/run-eight-raw4 \
+  --lidar-topics \
+    /apollo/sensor/vanjeelidar/left_front/PointCloud2 \
+    /apollo/sensor/vanjeelidar/right_front/PointCloud2 \
+    /apollo/sensor/vanjeelidar/right_back/PointCloud2 \
+    /apollo/sensor/vanjeelidar/left_back/PointCloud2 \
+  --reference-topic /apollo/sensor/vanjeelidar/left_front/PointCloud2 \
+  --sync-threshold-ms 40 \
+  --frame-stride 2 \
+  --export-voxel-size 0.10
+```
+
+Prepared dataset artifacts:
+
+- `diagnostics/prepared_rig_dataset.yaml`: reusable manifest
+- `cache/pointclouds/**/*.pcd`: cached Open3D-readable raw LiDAR snapshots
+- `cache/state.npz`: cached pose / IMU state
+
+For production-style `lidar2lidar`, prefer driving the run from a workflow YAML
+instead of piling more CLI flags onto one command.
+
+```bash
+lidar2lidar-auto \
+  --prepared-dataset-yaml outputs/prepared/run-eight-raw4/diagnostics/prepared_rig_dataset.yaml \
+  --workflow-yaml lidar2lidar/conf/workflow_raw4_loop_example.yaml \
+  --conf-dir lidar2lidar/conf \
+  --output-dir outputs/lidar2lidar/rig_loop_review \
+  --sync-threshold-ms 40 \
+  --min-overlap 0.15 \
+  --methods 2 \
+  --max-samples 2
+```
+
+Workflow-driven artifacts:
+
+- `diagnostics/workflow.yaml`: resolved topics, relations, thresholds, and visualization settings
+- `diagnostics/scene_sufficiency.yaml`: windowed overlap, timestamp skew, wall support, dynamic unmatched ratio, and suggestions
+- `metrics.yaml`: coarse statuses now include `scene_sufficiency`, `repeatability`, `relation_connectivity`, and `visual_geometry`
+- `loop_closed_tf.yaml`: globally consistent rig result when the workflow enables graph refinement
+- `loop_closed/*.yaml`: per-sensor loop-closed extrinsics
+- `diagnostics/loop_closure.yaml`: graph edges, tree/loop split, and residuals before/after
+- `diagnostics/visual_evaluation.yaml`: wall, corner, and slice sharpness summaries
+- `diagnostics/merged_cloud_baseline_colored.ply`: pairwise baseline overlay, color by sensor
+- `diagnostics/merged_cloud_loop_closure_colored.ply`: loop-closed overlay, color by sensor
+
+Recommended manual inspection:
+
+- open the colored PLYs in CloudCompare or Open3D
+- compare wall color fringing, double edges, corner spreading, and slice sharpness
+- use `visual_evaluation.yaml` and `scene_sufficiency.yaml` as the numeric counterpart to what you see
+
 Build the scan2map dataset artifact on the same bag:
 
 ```bash
@@ -126,6 +184,7 @@ lidar2lidar-scan2map   --record-path "$RECORD_DIR"   --dataset-yaml outputs/lida
 Optional helpers:
 
 ```bash
+lidar2lidar-inspect-pointcloud --record-path "$RECORD_DIR" --topic /apollo/sensor/vanjeelidar/left_front/PointCloud2 --max-messages 1
 lidar2lidar-extract --input-dir "$RECORD_DIR" --output-dir outputs/lidar2lidar/pcd_export -c /apollo/sensor/lslidar_main/PointCloud2
 lidar2lidar-calibrate --source-pcd source.pcd --target-pcd target.pcd --initial-transform lidar2lidar/conf/lslidar_main_lslidar_left_extrinsics.yaml --output-transform result.yaml
 lidar2lidar-merge --source-pcd source.pcd --target-pcd target.pcd --transform result.yaml --output-pcd merged_output.pcd
@@ -178,6 +237,17 @@ This produces:
 - `calibration/`: final extrinsics, metrics, and diagnostics from the staged solver,
   including motion registration quality, turn-balance warnings, and a
   `vehicle_motion_assessment` recommendation
+
+The same four-raw-LiDAR prepared dataset can also be reused directly:
+
+```bash
+lidar2imu-convert-record \
+  --prepared-dataset-yaml outputs/prepared/run-eight-raw4/diagnostics/prepared_rig_dataset.yaml \
+  --lidar-topic /apollo/sensor/vanjeelidar/left_front/PointCloud2 \
+  --output-dir outputs/lidar2imu/run-eight-left-front-prepared \
+  --profile baseline \
+  --calibrate
+```
 
 Current lidar2imu operating rule:
 

@@ -27,6 +27,23 @@ This file lists what still needs evidence before conclusions can be promoted.
 
 ## lidar2lidar
 
+### Highest priority for the four-corner raw rig
+
+1. validate the new workflow-yaml planner on more than one rig topology:
+   - `tf_tree`
+   - explicit loop
+   - explicit chain without loop
+2. validate the new `scene_sufficiency.yaml` thresholds on more bags:
+   - wall-dominant
+   - corner-rich
+   - open-space weak
+   - dynamic traffic contamination
+3. validate the new multi-window repeatability thresholds against accepted vs rejected runs
+4. validate wall-thickness / ghosting / corner-spread / slice-sharpness metrics against manual review
+5. run prepared-dataset rate ablations at `10 Hz`, `5 Hz`, and `2 Hz`
+
+### Additional scan2map follow-up
+
 1. continue right-edge scan2map diagnostics on more bags
 2. validate whether constrained scan2map remains stable across perturbations
 3. add stronger repeatability / perturbation testing for accepted scan2map candidates
