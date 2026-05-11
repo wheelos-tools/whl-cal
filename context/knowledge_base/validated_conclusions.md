@@ -9,6 +9,16 @@ This file lists the current conclusions that are supported by tested data.
 - `scan2scan` remains the production default.
 - It is the main acceptance baseline for vehicle-rig calibration.
 
+### Four-corner raw-rig loop closure
+
+- On `/mnt/synology/中集/2026-05-07-xiaomogang/bag/20260508032341.record.00000`,
+  the four raw corner LiDARs support a single-component rectangle loop under
+  static conditions.
+- The perimeter edges (`LF-RF`, `RF-RB`, `RB-LB`, `LB-LF`) can all be retained
+  under the current conservative graph gates.
+- The weakest diagonal (`LB-RF`) is better treated as a consistency check than a
+  primary production constraint.
+
 ### scan2map
 
 - `scan2map` is a secondary validation / refinement path, not a blanket replacement for `scan2scan`.

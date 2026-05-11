@@ -22,6 +22,8 @@ The organizing rule is:
 4. `knowledge_base/engineering_index.md`
 5. module detail notes:
    - `lidar2imu_context.md`
+   - `prepared_rig_dataset_context.md`
+   - `lidar2lidar_advanced_strategy.md`
    - `scan2map_context.md`
    - `scan2map_metrics_framework.md`
    - `lidar2camera_context.md`
@@ -59,6 +61,12 @@ The organizing rule is:
   - detailed lidar2imu iteration history
   - bag-by-bag findings
   - current weak-planar strategy
+- `prepared_rig_dataset_context.md`
+  - raw-LiDAR-only reusable extraction surface
+  - run-eight bag findings for shared lidar2imu/lidar2lidar preprocessing
+- `lidar2lidar_advanced_strategy.md`
+  - next-stage production strategy for four-corner rig calibration
+  - priors, topology-aware solving, scene sufficiency, and advanced metrics
 - `scan2map_context.md`
   - detailed lidar2lidar scan2map direction note
 - `scan2map_metrics_framework.md`

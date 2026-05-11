@@ -19,6 +19,8 @@ P26-04-27
   `ground_samples` and `motion_samples`
 - `lidar2imu-convert-record`: convert Apollo record data into those standardized
   samples, then optionally run calibration immediately
+- `lidar2lidar-rig-dataset`: prepare a reusable raw-LiDAR-only dataset so
+  `lidar2imu` and `lidar2lidar` can share one extraction pass
 
 ## Why the docs are split
 
@@ -109,6 +111,21 @@ Current recommendation on `record_data_0402`:
 - trust `z/roll/pitch` first
 - do not accept `x/y/yaw` from this bag as a production-quality result without a
   second bag that contains both left and right turns
+
+For the `run-eight` four-corner rig, use only the raw LiDAR topics:
+
+- `/apollo/sensor/vanjeelidar/left_front/PointCloud2`
+- `/apollo/sensor/vanjeelidar/right_front/PointCloud2`
+- `/apollo/sensor/vanjeelidar/right_back/PointCloud2`
+- `/apollo/sensor/vanjeelidar/left_back/PointCloud2`
+
+The reusable extraction surface for that bag is now
+`diagnostics/prepared_rig_dataset.yaml` plus cached `pcd` files. A validated
+subset run at about **5 Hz** kept the same qualitative `lidar2imu` conclusion:
+
+- `x/y/yaw` remain weak and protected by weak-planar policy
+- `z/roll/pitch` remain the trustworthy part
+- recommendation stays `reextract_review`
 
 Use the Quick Start to rerun the pipeline, then use the design doc when tuning
 the converter or solver.

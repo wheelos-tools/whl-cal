@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "click",
+  "flatbuffers",
   "numpy",
   "opencv-python",
   "open3d",
@@ -44,11 +45,13 @@ lidar2lidar-auto = "lidar2lidar.auto_calib:main"
 lidar2lidar-scan2map = "lidar2lidar.scan2map_calib:main"
 lidar2lidar-scan2map-dataset = "lidar2lidar.scan2map_dataset:main"
 lidar2lidar-temporal = "lidar2lidar.temporal_calib:main"
+lidar2lidar-rig-dataset = "tools.lidar2lidar.prepare_rig_dataset:main"
 lidar2imu-calibrate = "lidar2imu.cli:main"
 lidar2imu-convert-record = "lidar2imu.record_converter:main"
 lidar2imu-tune-record = "tools.lidar2imu.tune_record:main"
 lidar2imu-review-runs = "tools.lidar2imu.review_runs:main"
 lidar2camera-calibrate = "lidar2camera.cli:main"
 lidar2lidar-extract = "tools.lidar2lidar.extract_pcd:main"
+lidar2lidar-inspect-pointcloud = "tools.lidar2lidar.inspect_pointcloud:main"
 lidar2lidar-topics = "tools.lidar2lidar.list_topics:main"
 lidar2lidar-merge = "tools.lidar2lidar.merge_pcd:main"
