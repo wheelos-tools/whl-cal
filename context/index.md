@@ -20,15 +20,19 @@ The organizing rule is:
 2. `knowledge_base/calibration_overview.md`
 3. `knowledge_base/validated_conclusions.md`
 4. `knowledge_base/engineering_index.md`
-5. module detail notes:
+5. `calibration_paradigm.md`
+6. module detail notes:
    - `lidar2imu_context.md`
    - `prepared_rig_dataset_context.md`
    - `lidar2lidar_advanced_strategy.md`
+   - `calibration_dataset_2026_05_06.md`
+   - `calibration_algorithm_review_2026_05_17.md`
    - `timing_sync_context.md`
+   - `timing_topic_table.md`
    - `scan2map_context.md`
    - `scan2map_metrics_framework.md`
    - `lidar2camera_context.md`
-6. `knowledge_base/verification_points.md`
+7. `knowledge_base/verification_points.md`
 
 ## Directory structure
 
@@ -58,6 +62,8 @@ The organizing rule is:
 
 ### Module detail notes
 
+- `calibration_paradigm.md`
+  - shared data -> algorithm -> evaluation and visualization contract
 - `lidar2imu_context.md`
   - detailed lidar2imu iteration history
   - bag-by-bag findings
@@ -68,9 +74,15 @@ The organizing rule is:
 - `lidar2lidar_advanced_strategy.md`
   - next-stage production strategy for four-corner rig calibration
   - priors, topology-aware solving, scene sufficiency, and advanced metrics
+- `calibration_dataset_2026_05_06.md`
+  - metadata, topic inventory, and calibration implications for `/mnt/synology/REDACTED/2026-5-6-标定/`
+- `calibration_algorithm_review_2026_05_17.md`
+  - lidar2lidar/lidar2imu algorithm review, shared acceptance contract, and target-bag validation
 - `timing_sync_context.md`
   - clock-source and timestamp-chain analysis for Vanjee / Huace / MSF
   - bag-level timing measurements and synchronization recommendations
+- `timing_topic_table.md`
+  - per-topic timestamp source table and field-selection guidance
 - `scan2map_context.md`
   - detailed lidar2lidar scan2map direction note
 - `scan2map_metrics_framework.md`

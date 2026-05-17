@@ -26,8 +26,18 @@ from typing import Any
 import numpy as np
 import yaml
 
+from calibration_common.evaluation import (
+    write_acceptance_artifacts,
+    write_paradigm_artifacts,
+    write_table_csv,
+)
 from lidar2imu.algorithms import normalize_plane, normalize_vector
-from lidar2imu.models import CalibrationConfig, CalibrationDataset, GroundSample, MotionSample
+from lidar2imu.models import (
+    CalibrationConfig,
+    CalibrationDataset,
+    GroundSample,
+    MotionSample,
+)
 from lidar2lidar.extrinsic_io import (
     build_extrinsics_payload,
     extrinsics_filename,
@@ -57,22 +67,30 @@ def _sample_timestamp(payload: dict, key: str, fallback: int = 0) -> int:
     return int(value if value is not None else fallback)
 
 
-def load_dataset(path: str,
-                 parent_frame_override: str | None = None,
-                 child_frame_override: str | None = None) -> tuple[CalibrationDataset, CalibrationConfig, dict]:
+def load_dataset(
+    path: str,
+    parent_frame_override: str | None = None,
+    child_frame_override: str | None = None,
+) -> tuple[CalibrationDataset, CalibrationConfig, dict]:
     payload = _load_payload(path)
     parent_frame = parent_frame_override or str(payload.get("parent_frame", "imu"))
     child_frame = child_frame_override or str(payload.get("child_frame", "lidar"))
 
     initial_transform = np.eye(4, dtype=float)
     if "initial_transform" in payload:
-        initial_transform, _, _, _ = parse_transform_payload(payload["initial_transform"])
+        initial_transform, _, _, _ = parse_transform_payload(
+            payload["initial_transform"]
+        )
     extraction_transform = None
     if "extraction_transform" in payload:
-        extraction_transform, _, _, _ = parse_transform_payload(payload["extraction_transform"])
+        extraction_transform, _, _, _ = parse_transform_payload(
+            payload["extraction_transform"]
+        )
     reference_transform = None
     if "reference_transform" in payload:
-        reference_transform, _, _, _ = parse_transform_payload(payload["reference_transform"])
+        reference_transform, _, _, _ = parse_transform_payload(
+            payload["reference_transform"]
+        )
     dataset_metadata = dict(payload.get("metadata", {}))
     extraction_transform_source = dataset_metadata.get("extraction_transform_source")
     if extraction_transform is None:
@@ -85,7 +103,8 @@ def load_dataset(path: str,
             extraction_transform = reference_transform
         elif (
             extraction_transform_source is not None
-            and extraction_transform_source == dataset_metadata.get("initial_transform_source")
+            and extraction_transform_source
+            == dataset_metadata.get("initial_transform_source")
         ):
             extraction_transform = initial_transform
         else:
@@ -93,15 +112,23 @@ def load_dataset(path: str,
 
     ground_samples = []
     for raw_sample in payload.get("ground_samples", []):
-        normal_payload = raw_sample.get("lidar_plane_normal", raw_sample.get("plane_normal"))
+        normal_payload = raw_sample.get(
+            "lidar_plane_normal", raw_sample.get("plane_normal")
+        )
         if normal_payload is None and isinstance(raw_sample.get("lidar_plane"), dict):
             normal_payload = raw_sample["lidar_plane"].get("normal")
-        offset_value = raw_sample.get("lidar_plane_offset", raw_sample.get("plane_offset"))
+        offset_value = raw_sample.get(
+            "lidar_plane_offset", raw_sample.get("plane_offset")
+        )
         if offset_value is None and isinstance(raw_sample.get("lidar_plane"), dict):
             offset_value = raw_sample["lidar_plane"].get("offset")
         if normal_payload is None or offset_value is None:
-            raise ValueError("Each ground sample must contain lidar_plane_normal and lidar_plane_offset.")
-        normal, offset = normalize_plane(_vector_from_payload(normal_payload, "normal"), float(offset_value))
+            raise ValueError(
+                "Each ground sample must contain lidar_plane_normal and lidar_plane_offset."
+            )
+        normal, offset = normalize_plane(
+            _vector_from_payload(normal_payload, "normal"), float(offset_value)
+        )
         gravity = normalize_vector(_vector_from_payload(raw_sample, "imu_gravity"))
         sample_metadata = dict(raw_sample.get("metadata", {}))
         for reserved_key in (
@@ -141,7 +168,9 @@ def load_dataset(path: str,
     motion_samples = []
     for raw_sample in payload.get("motion_samples", []):
         if "imu_delta" not in raw_sample or "lidar_delta" not in raw_sample:
-            raise ValueError("Each motion sample must contain imu_delta and lidar_delta.")
+            raise ValueError(
+                "Each motion sample must contain imu_delta and lidar_delta."
+            )
         imu_delta, _, _, _ = parse_transform_payload(raw_sample["imu_delta"])
         lidar_delta, _, _, _ = parse_transform_payload(raw_sample["lidar_delta"])
         sample_metadata = dict(raw_sample.get("metadata", {}))
@@ -174,7 +203,11 @@ def load_dataset(path: str,
 
     raw_config = payload.get("config", {})
     config = CalibrationConfig(
-        **{key: value for key, value in raw_config.items() if key in CalibrationConfig.__dataclass_fields__}
+        **{
+            key: value
+            for key, value in raw_config.items()
+            if key in CalibrationConfig.__dataclass_fields__
+        }
     )
     dataset = CalibrationDataset(
         parent_frame=parent_frame,
@@ -211,16 +244,24 @@ def prepare_output_layout(output_dir: Path) -> tuple[Path, Path, Path]:
     return initial_guess_dir, calibrated_dir, diagnostics_dir
 
 
-def write_outputs(output_dir: Path,
-                  dataset: CalibrationDataset,
-                  initial_transform: np.ndarray,
-                  final_transform: np.ndarray,
-                  metrics_output: dict,
-                  algorithm_report: dict,
-                  evaluation_report: dict) -> dict:
-    initial_guess_dir, calibrated_dir, diagnostics_dir = prepare_output_layout(output_dir)
-    calibrated_file = calibrated_dir / extrinsics_filename(dataset.parent_frame, dataset.child_frame)
-    initial_guess_file = initial_guess_dir / extrinsics_filename(dataset.parent_frame, dataset.child_frame)
+def write_outputs(
+    output_dir: Path,
+    dataset: CalibrationDataset,
+    initial_transform: np.ndarray,
+    final_transform: np.ndarray,
+    metrics_output: dict,
+    algorithm_report: dict,
+    evaluation_report: dict,
+) -> dict:
+    initial_guess_dir, calibrated_dir, diagnostics_dir = prepare_output_layout(
+        output_dir
+    )
+    calibrated_file = calibrated_dir / extrinsics_filename(
+        dataset.parent_frame, dataset.child_frame
+    )
+    initial_guess_file = initial_guess_dir / extrinsics_filename(
+        dataset.parent_frame, dataset.child_frame
+    )
 
     save_extrinsics_yaml(
         str(initial_guess_file),
@@ -252,14 +293,93 @@ def write_outputs(output_dir: Path,
     }
     with open(output_dir / "calibrated_tf.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(tf_payload, file, sort_keys=False)
-    with open(output_dir / "metrics.yaml", "w", encoding="utf-8") as file:
-        yaml.safe_dump(metrics_output, file, sort_keys=False)
     with open(diagnostics_dir / "algorithm.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(algorithm_report, file, sort_keys=False)
     with open(diagnostics_dir / "evaluation.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(evaluation_report, file, sort_keys=False)
     with open(diagnostics_dir / "observability.yaml", "w", encoding="utf-8") as file:
-        yaml.safe_dump(evaluation_report.get("observability", {}), file, sort_keys=False)
+        yaml.safe_dump(
+            evaluation_report.get("observability", {}), file, sort_keys=False
+        )
+    acceptance_artifacts = write_acceptance_artifacts(
+        diagnostics_dir, metrics_output["final_acceptance"]
+    )
+    table_artifacts = {
+        "ground_residuals_csv": write_table_csv(
+            diagnostics_dir / "ground_residuals.csv",
+            evaluation_report.get("ground_per_sample", []),
+        ),
+        "motion_residuals_csv": write_table_csv(
+            diagnostics_dir / "motion_residuals.csv",
+            evaluation_report.get("motion_per_sample", []),
+        ),
+        "holdout_motion_residuals_csv": write_table_csv(
+            diagnostics_dir / "holdout_motion_residuals.csv",
+            evaluation_report.get("holdout_motion_per_sample", []),
+        ),
+    }
+    standardized_data = {
+        "schema_version": 1,
+        "module": "lidar2imu",
+        "representation": "standardized_samples",
+        "frames": {
+            "parent_frame": dataset.parent_frame,
+            "child_frame": dataset.child_frame,
+        },
+        "sample_counts": {
+            "ground_samples": len(dataset.ground_samples),
+            "motion_samples": len(dataset.motion_samples),
+        },
+        "metadata": dataset.metadata,
+        "transforms": {
+            "has_initial_transform": dataset.initial_transform is not None,
+            "has_extraction_transform": dataset.extraction_transform is not None,
+            "has_reference_transform": dataset.reference_transform is not None,
+        },
+    }
+    data_quality = {
+        "schema_version": 1,
+        "module": "lidar2imu",
+        "status": metrics_output["final_acceptance"]["status"],
+        "release_ready": metrics_output["final_acceptance"]["release_ready"],
+        "quality_gates": metrics_output["final_acceptance"]["gates"],
+        "coarse_statuses": metrics_output["coarse_metrics"]["statuses"],
+        "recommendation": metrics_output["final_acceptance"]["recommendation"],
+    }
+    visualization_index = {
+        "schema_version": 1,
+        "module": "lidar2imu",
+        "layers": {
+            "conclusion": [
+                acceptance_artifacts["acceptance_report"],
+                acceptance_artifacts["status_summary_csv"],
+            ],
+            "detail_metrics": [
+                str(output_dir / "metrics.yaml"),
+                str(diagnostics_dir / "evaluation.yaml"),
+                str(diagnostics_dir / "observability.yaml"),
+                table_artifacts["ground_residuals_csv"],
+                table_artifacts["motion_residuals_csv"],
+                table_artifacts["holdout_motion_residuals_csv"],
+            ],
+            "visual_review": [
+                "Plot ground_residuals.csv normal_angle_deg / height_residual_m.",
+                "Plot motion_residuals.csv rotation_residual_deg / translation_residual_m.",
+                "Inspect yaw cost scan in diagnostics/observability.yaml.",
+            ],
+        },
+    }
+    paradigm_artifacts = write_paradigm_artifacts(
+        diagnostics_dir,
+        standardized_data=standardized_data,
+        data_quality=data_quality,
+        visualization_index=visualization_index,
+    )
+    metrics_output["fine_metrics"]["artifacts"].update(acceptance_artifacts)
+    metrics_output["fine_metrics"]["artifacts"].update(table_artifacts)
+    metrics_output["fine_metrics"]["artifacts"].update(paradigm_artifacts)
+    with open(output_dir / "metrics.yaml", "w", encoding="utf-8") as file:
+        yaml.safe_dump(metrics_output, file, sort_keys=False)
 
     manifest = {
         "parent_frame": dataset.parent_frame,
@@ -277,6 +397,16 @@ def write_outputs(output_dir: Path,
                 "algorithm": str(diagnostics_dir / "algorithm.yaml"),
                 "evaluation": str(diagnostics_dir / "evaluation.yaml"),
                 "observability": str(diagnostics_dir / "observability.yaml"),
+                "acceptance_report": acceptance_artifacts["acceptance_report"],
+                "status_summary_csv": acceptance_artifacts["status_summary_csv"],
+                "standardized_data": paradigm_artifacts["standardized_data"],
+                "data_quality": paradigm_artifacts["data_quality"],
+                "visualization_index": paradigm_artifacts["visualization_index"],
+                "ground_residuals_csv": table_artifacts["ground_residuals_csv"],
+                "motion_residuals_csv": table_artifacts["motion_residuals_csv"],
+                "holdout_motion_residuals_csv": table_artifacts[
+                    "holdout_motion_residuals_csv"
+                ],
             },
         },
     }

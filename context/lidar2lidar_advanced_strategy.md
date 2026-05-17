@@ -63,7 +63,7 @@ But that is still a **safety layer**, not the final production algorithm.
 
 ### Static-bag lesson
 
-On `/mnt/synology/中集/2026-05-07-xiaomogang/bag/20260508032341.record.00000`,
+On `/mnt/synology/REDACTED/2026-05-07-REDACTED_USER/bag/20260508032341.record.00000`,
 the four raw corner LiDARs support a valid single-component loop under static
 conditions.
 

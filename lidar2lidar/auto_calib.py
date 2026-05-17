@@ -35,40 +35,55 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lidar2lidar.extrinsic_io import (build_extrinsics_payload,
-                                      extrinsics_filename,
-                                      save_extrinsics_yaml)
+from calibration_common.evaluation import (
+    build_final_acceptance,
+    write_acceptance_artifacts,
+    write_paradigm_artifacts,
+    write_table_csv,
+)
+from lidar2lidar.extrinsic_io import (
+    build_extrinsics_payload,
+    extrinsics_filename,
+    save_extrinsics_yaml,
+)
 from lidar2lidar.lidar2lidar import calibrate_lidar_extrinsic
-from lidar2lidar.loop_closure import (build_aligned_snapshot,
-                                      compose_topic_transforms,
-                                      build_initial_topic_transforms,
-                                      build_prior_topic_transforms,
-                                      compute_visual_plane_metrics,
-                                      evaluate_graph_consistency,
-                                      filter_loop_measurement_edges,
-                                      optimize_loop_closure,
-                                      save_snapshot_clouds,
-                                      select_loop_candidate_edges,
-                                      select_loop_graph_edges)
+from lidar2lidar.loop_closure import (
+    build_aligned_snapshot,
+    build_initial_topic_transforms,
+    build_prior_topic_transforms,
+    compose_topic_transforms,
+    compute_visual_plane_metrics,
+    evaluate_graph_consistency,
+    filter_loop_measurement_edges,
+    optimize_loop_closure,
+    save_snapshot_clouds,
+    select_loop_candidate_edges,
+    select_loop_graph_edges,
+)
 from lidar2lidar.prepared_dataset import load_prepared_rig_dataset
-from lidar2lidar.record_utils import (analyze_pointcloud_roots,
-                                      build_transform_graph,
-                                      collect_pointcloud_metadata,
-                                      compute_information_metrics,
-                                      discover_record_files, extract_tf_edges,
-                                      find_missing_transform_frames,
-                                      find_synchronized_pairs,
-                                      get_topic_frame_ids,
-                                      infer_pointcloud_topics, list_topics,
-                                      load_pointcloud_from_meta,
-                                      load_transform_edges_from_dir,
-                                      lookup_transform, merge_transform_edges,
-                                      save_transform_edges_to_dir,
-                                       tf_tree_payload, topic_sensor_name,
-                                       transform_delta_metrics,
-                                       voxel_overlap_ratio)
-from lidar2lidar.workflow import (load_workflow_config,
-                                  resolve_workflow_plan)
+from lidar2lidar.record_utils import (
+    analyze_pointcloud_roots,
+    build_transform_graph,
+    collect_pointcloud_metadata,
+    compute_information_metrics,
+    discover_record_files,
+    extract_tf_edges,
+    find_missing_transform_frames,
+    find_synchronized_pairs,
+    get_topic_frame_ids,
+    infer_pointcloud_topics,
+    list_topics,
+    load_pointcloud_from_meta,
+    load_transform_edges_from_dir,
+    lookup_transform,
+    merge_transform_edges,
+    save_transform_edges_to_dir,
+    tf_tree_payload,
+    topic_sensor_name,
+    transform_delta_metrics,
+    voxel_overlap_ratio,
+)
+from lidar2lidar.workflow import load_workflow_config, resolve_workflow_plan
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -327,7 +342,9 @@ def build_selected_edges_for_relations(
                 "registration_target_topic": relation["target_topic"],
                 "overlap_ratio": float(pair["overlap_ratio"]),
                 "sync_dt_ms": pair.get("sync_dt_ms"),
-                "initial_transform": np.asarray(initial_transform, dtype=float).tolist(),
+                "initial_transform": np.asarray(
+                    initial_transform, dtype=float
+                ).tolist(),
                 "candidate_pair": {
                     "sync_dt_ms": pair.get("sync_dt_ms"),
                     "overlap_ratio": pair.get("overlap_ratio"),
@@ -500,7 +517,8 @@ def build_scene_sufficiency_report(
             }
             healthy_window = (
                 float(window["overlap_ratio"]) >= float(config["min_overlap_ratio"])
-                and int(window["wall_plane_count"]) >= int(config["min_wall_plane_count"])
+                and int(window["wall_plane_count"])
+                >= int(config["min_wall_plane_count"])
                 and (
                     unmatched_ratio is None
                     or float(unmatched_ratio)
@@ -548,11 +566,9 @@ def build_scene_sufficiency_report(
             suggestions.append(
                 f"{relation['source_topic']} -> {relation['target_topic']} is weak; add more static windows or stronger shared structure."
             )
-        elif (
-            relation_report["corner_pair_count"]["max"] is not None
-            and float(relation_report["corner_pair_count"]["max"])
-            < float(config["min_corner_pair_count"])
-        ):
+        elif relation_report["corner_pair_count"]["max"] is not None and float(
+            relation_report["corner_pair_count"]["max"]
+        ) < float(config["min_corner_pair_count"]):
             suggestions.append(
                 f"{relation['source_topic']} -> {relation['target_topic']} lacks strong corners; rely more on long walls than yaw-sensitive refinement."
             )
@@ -1316,6 +1332,100 @@ def build_metrics_output(
     }
 
 
+def _build_lidar2lidar_final_acceptance(metrics_output: dict) -> dict:
+    coarse_metrics = metrics_output["coarse_metrics"]
+    statuses = coarse_metrics["statuses"]
+    gates = [
+        {
+            "name": "coverage",
+            "status": statuses.get("coverage", "unknown"),
+            "severity": "required",
+            "evidence": f"calibrated_edges={coarse_metrics.get('calibrated_edges')}",
+            "action": "Resolve missing TF, sync, or overlap before accepting a run.",
+        },
+        {
+            "name": "overlap",
+            "status": statuses.get("overlap", "unknown"),
+            "severity": "required",
+            "evidence": f"min_overlap_ratio={coarse_metrics.get('min_overlap_ratio')}",
+            "action": "Reject low-overlap relations or collect scenes with shared structure.",
+        },
+        {
+            "name": "fitness",
+            "status": statuses.get("fitness", "unknown"),
+            "severity": "required",
+            "evidence": f"average_fitness={coarse_metrics.get('average_fitness')}",
+            "action": "Review registration inputs and dynamic objects before trusting the edge.",
+        },
+        {
+            "name": "condition_number",
+            "status": statuses.get("condition_number", "unknown"),
+            "severity": "required",
+            "evidence": f"max_condition_number={coarse_metrics.get('max_condition_number')}",
+            "action": "Treat geometrically degenerate edges as diagnostic-only.",
+        },
+        {
+            "name": "degeneracy",
+            "status": statuses.get("degeneracy", "unknown"),
+            "severity": "required",
+            "evidence": "information_matrix.degenerate",
+            "action": "Use richer geometry or stronger topology priors before promotion.",
+        },
+        {
+            "name": "scene_sufficiency",
+            "status": statuses.get("scene_sufficiency", "unknown"),
+            "severity": "required",
+            "evidence": "diagnostics/scene_sufficiency.yaml",
+            "action": "Collect scenes with enough overlap, wall support, and corner/slice structure.",
+        },
+        {
+            "name": "relation_connectivity",
+            "status": statuses.get("relation_connectivity", "unknown"),
+            "severity": "required",
+            "evidence": "solution_graph.baseline_unresolved_topics",
+            "action": "Do not promote rigs with unresolved required relations.",
+        },
+        {
+            "name": "repeatability",
+            "status": statuses.get("repeatability", "unknown"),
+            "severity": "required",
+            "evidence": (
+                "edge_repeatability_translation_p95_m="
+                f"{coarse_metrics.get('edge_repeatability_translation_p95_m')}, "
+                "edge_repeatability_rotation_p95_deg="
+                f"{coarse_metrics.get('edge_repeatability_rotation_p95_deg')}"
+            ),
+            "action": "Require multi-window consistency or keep the edge as diagnostic-only.",
+        },
+        {
+            "name": "visual_geometry",
+            "status": statuses.get("visual_geometry", "unknown"),
+            "severity": "required",
+            "evidence": (
+                f"wall_thickness_p95_m={coarse_metrics.get('wall_thickness_p95_m')}, "
+                "corner_spread_radius_p95_m="
+                f"{coarse_metrics.get('corner_spread_radius_p95_m')}, "
+                f"min_slice_sharpness_score={coarse_metrics.get('min_slice_sharpness_score')}"
+            ),
+            "action": "Inspect colored clouds and require wall/corner/slice agreement.",
+        },
+        {
+            "name": "loop_closure",
+            "status": statuses.get("loop_closure", "unknown"),
+            "severity": "advisory",
+            "evidence": "diagnostics/loop_closure.yaml",
+            "action": "Use graph consistency as a rig-level check when loop edges exist.",
+        },
+    ]
+    return build_final_acceptance(
+        module="lidar2lidar",
+        gates=gates,
+        pass_recommendation="release_rig_extrinsics",
+        review_recommendation="review_metrics_and_visuals",
+        fail_recommendation="reject_and_recollect_or_fix_topology",
+    )
+
+
 def write_calibrated_edge_files(
     output_dir: Path, base_frame: str, edge_results: list[dict]
 ) -> list[str]:
@@ -2036,7 +2146,11 @@ def main() -> None:
         with open(diagnostics_dir / "loop_closure.yaml", "w", encoding="utf-8") as file:
             yaml.safe_dump(loop_closure_report, file, sort_keys=False)
 
-    if should_render_visuals and reference_target_meta is not None and final_topic_transforms:
+    if (
+        should_render_visuals
+        and reference_target_meta is not None
+        and final_topic_transforms
+    ):
         baseline_snapshot = build_aligned_snapshot(
             target_topic=target_topic,
             reference_target_meta=reference_target_meta,
@@ -2084,7 +2198,9 @@ def main() -> None:
             )
             loop_closed_merged_summary = save_snapshot_clouds(
                 loop_snapshot,
-                plain_output_path=str(diagnostics_dir / "merged_cloud_loop_closure.pcd"),
+                plain_output_path=str(
+                    diagnostics_dir / "merged_cloud_loop_closure.pcd"
+                ),
                 colored_output_path=str(
                     diagnostics_dir / "merged_cloud_loop_closure_colored.ply"
                 ),
@@ -2171,8 +2287,7 @@ def main() -> None:
         edge_result["repeatability"]["rotation_to_reference_deg"]["p95"]
         for edge_result in edge_results
         if edge_result.get("repeatability")
-        and edge_result["repeatability"]["rotation_to_reference_deg"]["p95"]
-        is not None
+        and edge_result["repeatability"]["rotation_to_reference_deg"]["p95"] is not None
     ]
     metrics_output["workflow"] = workflow_plan
     metrics_output["scene_sufficiency"] = scene_sufficiency_report
@@ -2188,9 +2303,7 @@ def main() -> None:
         else None
     )
     metrics_output["coarse_metrics"]["edge_repeatability_rotation_p95_deg"] = (
-        float(max(repeatability_rotation_p95))
-        if repeatability_rotation_p95
-        else None
+        float(max(repeatability_rotation_p95)) if repeatability_rotation_p95 else None
     )
     metrics_output["coarse_metrics"]["statuses"]["scene_sufficiency"] = (
         scene_sufficiency_report["summary"]["status"]
@@ -2279,10 +2392,9 @@ def main() -> None:
             "loop_closed_merged_cloud"
         ] = loop_closed_merged_summary
     if visual_evaluation_report is not None:
-        visual_target = (
-            visual_evaluation_report.get("loop_closure")
-            or visual_evaluation_report.get("final_solution")
-        )
+        visual_target = visual_evaluation_report.get(
+            "loop_closure"
+        ) or visual_evaluation_report.get("final_solution")
         if visual_target is not None:
             wall_p95 = visual_target["wall_metrics"]["wall_signed_span_p95_m"]["p95"]
             corner_p95 = visual_target["wall_metrics"]["corner_metrics"][
@@ -2295,34 +2407,120 @@ def main() -> None:
             ]
             min_slice_score = min(slice_scores) if slice_scores else None
             visual_status = "pass"
-            if (
-                wall_p95 is not None
-                and wall_p95
-                > float(workflow_plan["visualization"]["max_wall_double_edge_m"])
+            if wall_p95 is not None and wall_p95 > float(
+                workflow_plan["visualization"]["max_wall_double_edge_m"]
             ):
                 visual_status = "warning"
-            if (
-                corner_p95 is not None
-                and corner_p95
-                > float(workflow_plan["visualization"]["max_corner_spread_p95_m"])
+            if corner_p95 is not None and corner_p95 > float(
+                workflow_plan["visualization"]["max_corner_spread_p95_m"]
             ):
                 visual_status = "warning"
-            if (
-                min_slice_score is not None
-                and min_slice_score
-                < float(workflow_plan["visualization"]["min_slice_sharpness_score"])
+            if min_slice_score is not None and min_slice_score < float(
+                workflow_plan["visualization"]["min_slice_sharpness_score"]
             ):
                 visual_status = "warning"
-            metrics_output["coarse_metrics"]["statuses"]["visual_geometry"] = (
-                visual_status
-            )
+            metrics_output["coarse_metrics"]["statuses"][
+                "visual_geometry"
+            ] = visual_status
             metrics_output["coarse_metrics"]["wall_thickness_p95_m"] = wall_p95
-            metrics_output["coarse_metrics"]["corner_spread_radius_p95_m"] = (
-                corner_p95
-            )
-            metrics_output["coarse_metrics"]["min_slice_sharpness_score"] = (
-                min_slice_score
-            )
+            metrics_output["coarse_metrics"]["corner_spread_radius_p95_m"] = corner_p95
+            metrics_output["coarse_metrics"][
+                "min_slice_sharpness_score"
+            ] = min_slice_score
+    final_acceptance = _build_lidar2lidar_final_acceptance(metrics_output)
+    metrics_output["final_acceptance"] = final_acceptance
+    metrics_output["summary"]["final_acceptance_status"] = final_acceptance["status"]
+    metrics_output["summary"]["release_ready"] = final_acceptance["release_ready"]
+    acceptance_artifacts = write_acceptance_artifacts(diagnostics_dir, final_acceptance)
+    table_artifacts = {
+        "edge_metrics_csv": write_table_csv(
+            diagnostics_dir / "edge_metrics.csv",
+            metrics_output.get("per_edge", []),
+        ),
+        "skipped_edges_csv": write_table_csv(
+            diagnostics_dir / "skipped_edges.csv",
+            metrics_output.get("skipped_edges", []),
+        ),
+    }
+    standardized_data = {
+        "schema_version": 1,
+        "module": "lidar2lidar",
+        "representation": "record_or_prepared_dataset_plus_relation_graph",
+        "record_files": record_files,
+        "input": {
+            "record_path": args.record_path,
+            "prepared_dataset_yaml": args.prepared_dataset_yaml,
+            "conf_dir": args.conf_dir,
+            "workflow_yaml": args.workflow_yaml,
+        },
+        "target": {
+            "topic": target_topic,
+            "frame": target_frame,
+        },
+        "workflow": {
+            "planner_mode": workflow_plan["planner_mode"],
+            "required_relation_count": workflow_plan["summary"][
+                "required_relation_count"
+            ],
+            "relation_count": workflow_plan["summary"]["relation_count"],
+        },
+        "normalized_entities": {
+            "calibrated_edges": len(edge_results),
+            "skipped_edges": len(skipped_edges),
+        },
+    }
+    data_quality = {
+        "schema_version": 1,
+        "module": "lidar2lidar",
+        "status": final_acceptance["status"],
+        "release_ready": final_acceptance["release_ready"],
+        "quality_gates": final_acceptance["gates"],
+        "coarse_statuses": metrics_output["coarse_metrics"]["statuses"],
+        "scene_sufficiency": scene_sufficiency_report["summary"],
+        "recommendation": final_acceptance["recommendation"],
+    }
+    visual_layers = [
+        str(diagnostics_dir / "visual_evaluation.yaml"),
+        table_artifacts["edge_metrics_csv"],
+        table_artifacts["skipped_edges_csv"],
+    ]
+    if merged_summary is not None:
+        visual_layers.append(str(merged_summary))
+    if loop_closed_merged_summary is not None:
+        visual_layers.append(str(loop_closed_merged_summary))
+    visualization_index = {
+        "schema_version": 1,
+        "module": "lidar2lidar",
+        "layers": {
+            "conclusion": [
+                acceptance_artifacts["acceptance_report"],
+                acceptance_artifacts["status_summary_csv"],
+            ],
+            "detail_metrics": [
+                str(output_dir / "metrics.yaml"),
+                str(diagnostics_dir / "scene_sufficiency.yaml"),
+                str(diagnostics_dir / "calibration.yaml"),
+                str(diagnostics_dir / "loop_closure.yaml"),
+                table_artifacts["edge_metrics_csv"],
+                table_artifacts["skipped_edges_csv"],
+            ],
+            "visual_review": visual_layers,
+        },
+        "manual_review": [
+            "Open colored PLY/PCD overlays in CloudCompare or Open3D when present.",
+            "Check wall double edges, corner spread, slice sharpness, and per-edge repeatability.",
+            "Treat missing visual geometry as review-only, not release-ready.",
+        ],
+    }
+    paradigm_artifacts = write_paradigm_artifacts(
+        diagnostics_dir,
+        standardized_data=standardized_data,
+        data_quality=data_quality,
+        visualization_index=visualization_index,
+    )
+    metrics_output["artifacts"].update(acceptance_artifacts)
+    metrics_output["artifacts"].update(table_artifacts)
+    metrics_output["artifacts"].update(paradigm_artifacts)
     with open(output_dir / "metrics.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(metrics_output, file, sort_keys=False)
 
@@ -2368,6 +2566,13 @@ def main() -> None:
                     if visual_evaluation_report is not None
                     else None
                 ),
+                "acceptance_report": acceptance_artifacts["acceptance_report"],
+                "status_summary_csv": acceptance_artifacts["status_summary_csv"],
+                "standardized_data": paradigm_artifacts["standardized_data"],
+                "data_quality": paradigm_artifacts["data_quality"],
+                "visualization_index": paradigm_artifacts["visualization_index"],
+                "edge_metrics_csv": table_artifacts["edge_metrics_csv"],
+                "skipped_edges_csv": table_artifacts["skipped_edges_csv"],
                 "merged_cloud": merged_summary,
                 "loop_closed_merged_cloud": loop_closed_merged_summary,
             },

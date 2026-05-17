@@ -95,7 +95,7 @@ right -> main 在 `record_data_0402` 上的新增结论：
 
 ## 2026-04-18 synology front-lidar bag
 
-`/mnt/synology/raw-data/2026-04-13-06-54-28` 的新增结论：
+`/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28` 的新增结论：
 
 - 这个包只有单个前向 LiDAR，且 bag 内没有 `lidar_front -> imu` 静态 TF。
 - 因此给 `lidar2imu-convert-record` 增加了两种入口：

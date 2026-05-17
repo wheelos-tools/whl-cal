@@ -19,7 +19,22 @@ Quick run (automatic):
 lidar2lidar-auto --record-path /path/to/record --conf-dir lidar2lidar/conf --output-dir outputs/lidar2lidar/run
 ```
 
-Outputs: `calibrated_tf.yaml`, `metrics.yaml`, `diagnostics/`
+Outputs follow the shared calibration paradigm:
+
+1. **Data**: normalized run metadata and data quality
+2. **Algorithm**: calibrated transforms and solver diagnostics
+3. **Evaluation**: conclusion, detailed metrics, and visual review artifacts
+
+Core outputs:
+
+- `calibrated_tf.yaml`
+- `metrics.yaml`
+- `diagnostics/manifest.yaml`
+- `diagnostics/standardized_data.yaml`
+- `diagnostics/data_quality.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/status_summary.csv`
+- `diagnostics/visualization_index.yaml`
 
 Generic no-loop workflow driven by TF adjacency:
 ```bash
@@ -81,5 +96,46 @@ Extra comparison outputs:
 - colored sensor overlays:
   - `diagnostics/merged_cloud_baseline_colored.ply`
   - `diagnostics/merged_cloud_loop_closure_colored.ply`
+- tabular visual-review inputs:
+  - `diagnostics/edge_metrics.csv`
+  - `diagnostics/skipped_edges.csv`
+
+## How to judge a result
+
+Start from the conclusion layer:
+
+```bash
+python - <<'PY'
+import yaml
+d = yaml.safe_load(open("outputs/lidar2lidar/rig_run/metrics.yaml"))
+print(d["summary"]["final_acceptance_status"])
+print(d["summary"]["release_ready"])
+print(d["final_acceptance"]["recommendation"])
+PY
+```
+
+Then inspect the data-quality layer:
+
+```bash
+cat outputs/lidar2lidar/rig_run/diagnostics/data_quality.yaml
+cat outputs/lidar2lidar/rig_run/diagnostics/status_summary.csv
+```
+
+Finally inspect visual evidence:
+
+```bash
+cat outputs/lidar2lidar/rig_run/diagnostics/visualization_index.yaml
+```
+
+For production release, require:
+
+- `release_ready: true`
+- all required gates in `diagnostics/acceptance_report.yaml` are `pass`
+- required relations are connected
+- scene sufficiency and repeatability are `pass`
+- visual overlays do not show wall color fringing, double edges, or corner spread
+
+If visual geometry is missing or `warning`, treat the run as review-only even if
+the optimizer converged.
 
 See docs/lidar2lidar_design.md for tuning.

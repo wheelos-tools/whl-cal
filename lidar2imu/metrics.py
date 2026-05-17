@@ -23,6 +23,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from calibration_common.evaluation import build_final_acceptance
 from lidar2imu.algorithms import (
     circular_span_deg,
     normalize_vector,
@@ -1124,6 +1125,137 @@ def _build_motion_assessment(
     return assessment
 
 
+def _build_final_acceptance(coarse_metrics: dict, motion_assessment: dict) -> dict:
+    statuses = coarse_metrics["statuses"]
+    gates = [
+        {
+            "name": "ground_sample_count",
+            "status": "pass" if coarse_metrics["ground_sample_count"] > 0 else "fail",
+            "severity": "required",
+            "evidence": f"{coarse_metrics['ground_sample_count']} ground samples",
+            "action": "Collect or extract ground-support windows before trusting z/roll/pitch.",
+        },
+        {
+            "name": "motion_sample_count",
+            "status": "pass" if coarse_metrics["motion_sample_count"] > 0 else "fail",
+            "severity": "required",
+            "evidence": f"{coarse_metrics['motion_sample_count']} motion samples",
+            "action": "Collect or select motion windows before trusting x/y/yaw.",
+        },
+        {
+            "name": "ground_orientation",
+            "status": statuses["ground_orientation"],
+            "severity": "required",
+            "evidence": f"ground_normal_angle_p95_deg={coarse_metrics['ground_normal_angle_p95_deg']}",
+            "action": "Review ground plane extraction and remove non-ground / sloped samples.",
+        },
+        {
+            "name": "ground_height",
+            "status": statuses["ground_height"],
+            "severity": "required",
+            "evidence": f"ground_height_residual_p95_m={coarse_metrics['ground_height_residual_p95_m']}",
+            "action": "Check lidar mounting height, extraction transform, and ground-plane inliers.",
+        },
+        {
+            "name": "motion_registration",
+            "status": statuses["motion_registration"],
+            "severity": "required",
+            "evidence": (
+                "motion_registration_fitness_p05="
+                f"{coarse_metrics['motion_registration_fitness_p05']}"
+            ),
+            "action": "Reject low-fitness motion factors or recollect with more static structure.",
+        },
+        {
+            "name": "motion_rotation",
+            "status": statuses["motion_rotation"],
+            "severity": "required",
+            "evidence": f"motion_rotation_residual_p95_deg={coarse_metrics['motion_rotation_residual_p95_deg']}",
+            "action": "Improve angular excitation or keep yaw diagnostic-only.",
+        },
+        {
+            "name": "motion_translation",
+            "status": statuses["motion_translation"],
+            "severity": "required",
+            "evidence": f"motion_translation_residual_p95_m={coarse_metrics['motion_translation_residual_p95_m']}",
+            "action": "Improve translational excitation and scan-registration quality.",
+        },
+        {
+            "name": "turn_balance",
+            "status": statuses["turn_balance"],
+            "severity": "required",
+            "evidence": (
+                f"left_turn_count={coarse_metrics['left_turn_count']}, "
+                f"right_turn_count={coarse_metrics['right_turn_count']}, "
+                f"turn_balance_ratio={coarse_metrics['turn_balance_ratio']}"
+            ),
+            "action": "Collect balanced left/right turns before promoting full planar DOF.",
+        },
+        {
+            "name": "observability",
+            "status": statuses["observability"],
+            "severity": "required",
+            "evidence": f"joint_condition_number={coarse_metrics['joint_condition_number']}",
+            "action": "Do not release weakly observable components; freeze or recollect data.",
+        },
+        {
+            "name": "yaw_observability",
+            "status": motion_assessment["yaw_observability"],
+            "severity": "required",
+            "evidence": motion_assessment.get("yaw_diagnostic", {}).get(
+                "primary_cause"
+            ),
+            "action": "Use yaw cost-scan width and turn balance to decide whether yaw is releasable.",
+        },
+        {
+            "name": "extraction_geometry",
+            "status": statuses["extraction_geometry"],
+            "severity": "required",
+            "evidence": "delta_to_extraction",
+            "action": "Re-extract samples when the final transform diverges from extraction geometry.",
+        },
+        {
+            "name": "trusted_reference",
+            "status": statuses["trusted_reference"],
+            "severity": "required",
+            "evidence": "delta_to_reference",
+            "action": "Resolve conflicts against trusted in-record TF or external measurement.",
+        },
+        {
+            "name": "planar_basin_stability",
+            "status": statuses["planar_basin_stability"],
+            "severity": "advisory",
+            "evidence": "perturbed-prior basin stability",
+            "action": "Review basin sensitivity before overriding prior planar components.",
+        },
+        {
+            "name": "holdout_generalization",
+            "status": statuses["holdout_generalization"],
+            "severity": "required",
+            "evidence": "calibration vs holdout residual agreement",
+            "action": "Do not release if holdout or repeatability conflicts with calibration residuals.",
+        },
+        {
+            "name": "motion_assessment_recommendation",
+            "status": (
+                "pass"
+                if motion_assessment["recommendation"] == "full_6dof_candidate"
+                else "warning"
+            ),
+            "severity": "required",
+            "evidence": f"recommendation={motion_assessment['recommendation']}",
+            "action": "Treat non-full-6DoF recommendations as review or partial-DOF outputs.",
+        },
+    ]
+    return build_final_acceptance(
+        module="lidar2imu",
+        gates=gates,
+        pass_recommendation="release_full_6dof",
+        review_recommendation="review_or_partial_dof_only",
+        fail_recommendation="reject_and_recollect",
+    )
+
+
 def build_metrics_output(
     dataset: CalibrationDataset,
     final_transform: np.ndarray,
@@ -1250,6 +1382,7 @@ def build_metrics_output(
         holdout_validation=holdout_validation,
         holdout_repeatability=holdout_repeatability,
     )
+    final_acceptance = _build_final_acceptance(coarse_metrics, motion_assessment)
 
     metrics_output = {
         "summary": {
@@ -1288,8 +1421,11 @@ def build_metrics_output(
                     None if holdout_plan is None else holdout_plan.get("offset")
                 ),
             },
+            "final_acceptance_status": final_acceptance["status"],
+            "release_ready": final_acceptance["release_ready"],
         },
         "coarse_metrics": coarse_metrics,
+        "final_acceptance": final_acceptance,
         "vehicle_motion_assessment": motion_assessment,
         "fine_metrics": {
             "ground": ground_summary,

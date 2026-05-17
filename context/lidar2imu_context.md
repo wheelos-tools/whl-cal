@@ -76,7 +76,7 @@ Interpretation:
 - on `record_data_0402`, trust `z/roll/pitch` first
 - do not accept `x/y/yaw` from this bag as a production conclusion
 
-## 4. Additional bag: `/mnt/synology/raw-data/2026-04-13-06-54-28`
+## 4. Additional bag: `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28`
 
 ### Bag structure
 
@@ -135,7 +135,7 @@ Interpretation:
 ## 5. Current recommendation
 
 - keep `record_data_0402` as the main lidar2imu reference bag for now
-- for `/mnt/synology/raw-data/2026-04-13-06-54-28`, the best exploratory setup is:
+- for `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28`, the best exploratory setup is:
   - `--identity-initial-transform`
   - `--motion-frame-stride 1`
   - `--min-registration-fitness 0.45`
@@ -185,7 +185,7 @@ Interpretation:
 - on this bag, auto mode gives up a small amount of motion residual quality but
   prevents the solver from inventing a large planar offset on a one-sided-turn bag
 
-### Validation on `/mnt/synology/raw-data/2026-04-13-06-54-28`
+### Validation on `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28`
 
 Using:
 
@@ -262,7 +262,7 @@ Interpretation:
   the accepted motion set local enough to preserve angular excitation without
   letting large overlapping stride-40 pairs dominate selection
 
-### Validation on `/mnt/synology/raw-data/2026-04-13-06-54-28`
+### Validation on `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28`
 
 - `8` motion windows
 - `6` valid windows
@@ -278,7 +278,7 @@ Interpretation:
 - but window + gate now selects more local and cleaner motion windows, which keeps
   the final solve tighter to the trusted prior
 
-## 9. 2026-04-23 8-shape bag investigation: `/mnt/synology/raw-data/lidar2imu`
+## 9. 2026-04-23 8-shape bag investigation: `/mnt/synology/REDACTED/raw-data/lidar2imu`
 
 This bag was explicitly collected as an `8`-shape run, so the repeated
 `x/y/yaw` weakness needed a deeper check than the earlier "not enough turn

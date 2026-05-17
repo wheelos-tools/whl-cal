@@ -42,7 +42,7 @@ is weak here, so the next main direction should be **scan2map**.
 
 Record:
 
-- `/mnt/synology/raw-data/2026-04-13-06-54-28/20260413065428.record.00000`
+- `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28/20260413065428.record.00000`
 
 Observed topics / frames:
 
