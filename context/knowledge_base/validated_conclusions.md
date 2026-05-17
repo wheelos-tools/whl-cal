@@ -11,7 +11,7 @@ This file lists the current conclusions that are supported by tested data.
 
 ### Four-corner raw-rig loop closure
 
-- On `/mnt/synology/中集/2026-05-07-xiaomogang/bag/20260508032341.record.00000`,
+- On `/mnt/synology/REDACTED/2026-05-07-REDACTED_USER/bag/20260508032341.record.00000`,
   the four raw corner LiDARs support a single-component rectangle loop under
   static conditions.
 - The perimeter edges (`LF-RF`, `RF-RB`, `RB-LB`, `LB-LF`) can all be retained
@@ -49,7 +49,7 @@ This file lists the current conclusions that are supported by tested data.
 
 ### Synology front-LiDAR bag
 
-- `/mnt/synology/raw-data/2026-04-13-06-54-28` is useful for diagnostics.
+- `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28` is useful for diagnostics.
 - Without a trusted prior, it should not be used to directly accept final `lidar2imu` extrinsics.
 - With the user-provided prior, it is still diagnostic-only because turn balance remains one-sided.
 

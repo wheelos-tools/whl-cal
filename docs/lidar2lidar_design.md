@@ -218,6 +218,7 @@ or by `planner.enable_global_optimization: true` in a workflow YAML):
 - relation connectivity status
 - edge repeatability p95
 - visual geometry status
+- final acceptance status / release readiness
 
 Per-edge metrics include:
 
@@ -257,6 +258,37 @@ These files already form a good iteration surface:
 - `metrics.yaml`: quick run summary
 - `loop_closure.yaml`: graph-level before/after consistency
 - `visual_evaluation.yaml`: wall / corner / slice summaries for human review
+
+### Shared release-review artifacts
+
+`lidar2lidar` now follows the same final review contract as `lidar2imu`.
+Every completed run should expose:
+
+- `metrics.yaml.summary.final_acceptance_status`
+- `metrics.yaml.summary.release_ready`
+- `metrics.yaml.final_acceptance`
+- `diagnostics/standardized_data.yaml`
+- `diagnostics/data_quality.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/status_summary.csv`
+- `diagnostics/visualization_index.yaml`
+- `diagnostics/edge_metrics.csv`
+- `diagnostics/skipped_edges.csv`
+
+The final acceptance decision combines coverage, overlap, registration fitness,
+conditioning, degeneracy, scene sufficiency, relation connectivity,
+repeatability, visual geometry, and loop-closure evidence when available. A
+solver result with warning visual geometry, weak scene sufficiency, unresolved
+relations, or poor repeatability is therefore explicitly a review candidate
+rather than a release-ready calibration.
+
+This keeps the production review order stable:
+
+1. `standardized_data.yaml` confirms the normalized input representation.
+2. `data_quality.yaml` confirms whether the data is eligible for optimization.
+3. `metrics.yaml` and `acceptance_report.yaml` state the final conclusion.
+4. `visualization_index.yaml` lists the visual / tabular evidence needed for
+   human review.
 
 ## 6. What already matches the lidar2imu pattern
 

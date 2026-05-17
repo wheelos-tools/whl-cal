@@ -10,8 +10,8 @@ last_tested: 2026-05-11
 
 This note records the current timing-chain analysis for:
 
-- bag:
-  - `/mnt/synology/中集/2026-05-07-xiaomogang/bag/20260508032341.record.00000`
+-- bag:
+  - `/mnt/synology/REDACTED/2026-05-07-REDACTED_USER/bag/20260508032341.record.00000`
 - LiDAR stack:
   - `modules/drivers/lidar/vanjeelidar`
 - GNSS stack:
@@ -31,7 +31,7 @@ but **which clock each topic is using**:
 
 Generated artifact:
 
-- `outputs/analysis/xiaomogang_timing_summary.yaml`
+-- `outputs/analysis/REDACTED_USER_timing_summary.yaml`
 
 ### 1. Vanjee LiDAR time chain
 

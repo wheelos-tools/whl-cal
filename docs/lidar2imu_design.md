@@ -139,6 +139,14 @@ The solver writes:
 - `diagnostics/evaluation.yaml`
 - `diagnostics/observability.yaml`
 - `diagnostics/manifest.yaml`
+- `diagnostics/standardized_data.yaml`
+- `diagnostics/data_quality.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/status_summary.csv`
+- `diagnostics/visualization_index.yaml`
+- `diagnostics/ground_residuals.csv`
+- `diagnostics/motion_residuals.csv`
+- `diagnostics/holdout_motion_residuals.csv`
 
 ### Coarse metrics
 
@@ -157,6 +165,7 @@ Used as gate metrics for iteration:
 - `joint_condition_number`
 - `statuses`
 - `vehicle_motion_assessment`
+- `final_acceptance`
 
 ### Fine metrics
 
@@ -168,6 +177,37 @@ Used for debugging and model iteration:
 - selected-motion axis / heading diversity
 - per-sample ground diagnostics
 - per-sample motion diagnostics
+
+### Shared release-review artifacts
+
+`lidar2imu` now follows the same final review contract as `lidar2lidar`.
+Every completed run should expose:
+
+- `metrics.yaml.summary.final_acceptance_status`
+- `metrics.yaml.summary.release_ready`
+- `metrics.yaml.final_acceptance`
+- `diagnostics/standardized_data.yaml`
+- `diagnostics/data_quality.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/status_summary.csv`
+- `diagnostics/visualization_index.yaml`
+
+The final acceptance decision combines ground support, motion registration,
+motion residuals, turn balance, observability, yaw cost-scan health,
+extraction/reference consistency, holdout generalization, and the existing
+`vehicle_motion_assessment.recommendation`. Non-`full_6dof_candidate`
+recommendations remain valid diagnostics, but they are not release-ready full
+6DoF calibration results.
+
+This keeps the production review order stable:
+
+1. `standardized_data.yaml` confirms normalized sample counts, frames, metadata,
+   and transform provenance.
+2. `data_quality.yaml` confirms whether the samples are eligible for full
+   optimization.
+3. `metrics.yaml` and `acceptance_report.yaml` state the final conclusion.
+4. `visualization_index.yaml` points to residual CSVs and observability outputs
+   that should be plotted or inspected.
 
 ### Observability semantics
 
@@ -573,7 +613,7 @@ Interpretation:
 - the evaluation layer now exposes this directly through registration-quality
   gates, turn-balance metrics, and `vehicle_motion_assessment`
 
-### Additional exploratory bag: `/mnt/synology/raw-data/2026-04-13-06-54-28`
+### Additional exploratory bag: `/mnt/synology/REDACTED/raw-data/2026-04-13-06-54-28`
 
 This bag contains:
 

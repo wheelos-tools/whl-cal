@@ -8,7 +8,7 @@ last_tested: 2026-05-11
 
 生成时间（UTC+8）: 2026-05-11T19:27:28.448+08:00
 
-说明：本表基于 `outputs/analysis/xiaomogang_timing_summary.yaml` 的统计和仓内源码追踪（Vanjee driver / Huace parser / MSF localization）。建议后续分析严格按“应看字段”执行，不要混用 header 与 measurement。
+说明：本表基于 `outputs/analysis/REDACTED_USER_timing_summary.yaml` 的统计和仓内源码追踪（Vanjee driver / Huace parser / MSF localization）。建议后续分析严格按“应看字段”执行，不要混用 header 与 measurement。
 
 | Topic | 时间出处（代码） | 后续分析应看 | 本包实测（中位数/说明） | 风险/备注 |
 | --- | --- | --- | --- | --- |
