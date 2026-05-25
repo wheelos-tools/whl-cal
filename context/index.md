@@ -21,7 +21,8 @@ The organizing rule is:
 3. `knowledge_base/validated_conclusions.md`
 4. `knowledge_base/engineering_index.md`
 5. `calibration_paradigm.md`
-6. module detail notes:
+6. `calibration_target_requirements.md`
+7. module detail notes:
    - `lidar2imu_context.md`
    - `prepared_rig_dataset_context.md`
    - `lidar2lidar_advanced_strategy.md`
@@ -32,7 +33,7 @@ The organizing rule is:
    - `scan2map_context.md`
    - `scan2map_metrics_framework.md`
    - `lidar2camera_context.md`
-7. `knowledge_base/verification_points.md`
+8. `knowledge_base/verification_points.md`
 
 ## Directory structure
 
@@ -64,6 +65,10 @@ The organizing rule is:
 
 - `calibration_paradigm.md`
   - shared data -> algorithm -> evaluation and visualization contract
+- `calibration_target_requirements.md`
+  - which modules require a physical target board
+  - current hard requirements vs upgrade recommendations
+  - external references behind the judgment
 - `lidar2imu_context.md`
   - detailed lidar2imu iteration history
   - bag-by-bag findings

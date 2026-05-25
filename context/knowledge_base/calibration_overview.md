@@ -21,6 +21,16 @@ This means:
 | `camera` | metrics-first intrinsic workflow with diagnostics | capture-mode review + per-view reprojection + coverage + radial-monotonicity should drive intrinsic acceptance | active and usable |
 | `lidar2camera` | reference pipeline with screening / staged review artifacts | target-based reference calibration is the release baseline; learning-based remains experimental until repeatability is validated | active and usable |
 
+## Target requirement summary
+
+- `camera`: requires a real planar calibration board today
+- `lidar2camera`: requires a real planar reference board today
+- `lidar2lidar`: current production path is scene-based, not board-based
+- `lidar2imu`: current production path is motion/observability-based, not board-based
+
+See `context/calibration_target_requirements.md` for the detailed justification,
+hard requirements, upgrade recommendations, and external references.
+
 ## lidar2lidar summary
 
 ### What is already established
