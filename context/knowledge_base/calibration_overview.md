@@ -18,8 +18,8 @@ This means:
 | --- | --- | --- | --- |
 | `lidar2lidar` | metrics-first, real-bag validated | `scan2scan` is the production baseline; `scan2map` is conditional refinement | active and usable |
 | `lidar2imu` | metrics-first, real-bag validated | weak-planar bags should use `--planar-motion-policy auto`; trust `z/roll/pitch` before `x/y/yaw` on one-sided-turn bags | active and usable |
-| `camera` | intrinsic calibration script exists | current script is usable as a standalone intrinsic tool | present but not yet folded into repo-wide iteration framework |
-| `camera2lidar` | industrial reference baseline scaffold started | target-based reference calibration is the baseline; targetless remains experimental until repeatability is validated | active refactor target |
+| `camera` | metrics-first intrinsic workflow with diagnostics | capture-mode review + per-view reprojection + coverage + radial-monotonicity should drive intrinsic acceptance | active and usable |
+| `lidar2camera` | reference pipeline with screening / staged review artifacts | target-based reference calibration is the release baseline; learning-based remains experimental until repeatability is validated | active and usable |
 
 ## lidar2lidar summary
 
@@ -73,25 +73,24 @@ This means:
   - select rotation-qualified local candidates
   - reject low-fitness registrations
 
-## Next module: lidar2camera / camera2lidar
+## Next module: lidar2camera
 
-The active repository-level target is to finish bringing camera-related
-calibration into the same structure already used by `lidar2lidar` and
-`lidar2imu`.
+The active repository-level target is now to keep camera-related calibration in
+the same structure already used by `lidar2lidar` and `lidar2imu`, and continue
+iterating on physical target observability rather than script structure.
 
 ### Current codebase state
 
 - `camera/intrinsic.py`
-  - standalone camera intrinsic calibration script
-  - chessboard-based interactive capture
-- `camera2lidar/reference_based.py`
+  - chessboard-based intrinsic calibration with stable diagnostics / acceptance artifacts
+- `lidar2camera/reference_pipeline.py`
   - checkerboard / reference-based LiDAR-camera calibration
-- `camera2lidar/learning_based.py`
+- `lidar2camera/learning_based.py`
   - targetless LiDAR-camera calibration experiment
 
 ### Current engineering goal
 
-Bring `lidar2camera` into the same repo-wide pattern:
+Keep `camera` and `lidar2camera` inside the same repo-wide pattern:
 
 1. **data layer**
    - image / LiDAR pair ingestion
@@ -113,6 +112,13 @@ Current baseline decision:
    - release baseline
 2. **targetless / learning-based**
    - experimental comparison / diagnostic branch
+
+Current tested workflow decision:
+
+1. **camera intrinsics**
+   - release only when capture mode, coverage, per-view error, and radial monotonicity all look sane
+2. **lidar2camera**
+   - release only when data screening, geometry resolution, reprojection, holdout, repeatability, and visual diagnostics all pass
 
 ## Read next
 

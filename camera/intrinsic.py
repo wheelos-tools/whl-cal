@@ -25,12 +25,34 @@ calibration without any GUI. This enables CI and smoke tests.
 """
 
 import glob
+from pathlib import Path
 import cv2
 import numpy as np
 import yaml
 import time
 import os
 from datetime import datetime
+
+from calibration_common.evaluation import (
+    build_final_acceptance,
+    write_acceptance_artifacts,
+    write_paradigm_artifacts,
+    write_table_csv,
+)
+
+
+def _float_list_summary(values):
+    if not values:
+        return None
+    series = np.asarray(values, dtype=float)
+    return {
+        "mean": float(np.mean(series)),
+        "std": float(np.std(series)),
+        "min": float(np.min(series)),
+        "p50": float(np.percentile(series, 50)),
+        "p95": float(np.percentile(series, 95)),
+        "max": float(np.max(series)),
+    }
 
 
 class CameraCalibrator:
@@ -61,6 +83,8 @@ class CameraCalibrator:
         self.result_canvas = None
         self.last_raw_frame = None
         self.capture_runtime_info = None
+        self.sample_records = []
+        self.comparison_view_path = None
 
         self._reset_auto_capture_state()
 
@@ -76,6 +100,7 @@ class CameraCalibrator:
         self.last_corners_center = None
         self.last_capture_time = 0
         self.objpoints, self.imgpoints = [], []
+        self.sample_records = []
         self.state = "CAPTURING"
         print("\n[INFO] Session reset and ready.")
 
@@ -227,6 +252,401 @@ class CameraCalibrator:
                 thickness=2,
             )
 
+    def _build_sample_record(
+        self,
+        refined,
+        image_size_wh,
+        *,
+        source,
+        source_path=None,
+        grid_cell=None,
+    ):
+        width, height = int(image_size_wh[0]), int(image_size_wh[1])
+        corners = np.asarray(refined, dtype=float).reshape(-1, 2)
+        bbox_min = np.min(corners, axis=0)
+        bbox_max = np.max(corners, axis=0)
+        center = np.mean(corners, axis=0)
+        if grid_cell is None:
+            cell_x = min(2, max(0, int((center[0] / max(width, 1)) * 3.0)))
+            cell_y = min(2, max(0, int((center[1] / max(height, 1)) * 3.0)))
+        else:
+            cell_x = int(grid_cell[0])
+            cell_y = int(grid_cell[1])
+        return {
+            "sample_id": len(self.sample_records) + 1,
+            "source": str(source),
+            "source_path": source_path,
+            "grid_cell": {"x": cell_x, "y": cell_y},
+            "image_size_wh": {"width": width, "height": height},
+            "image_bbox": {
+                "min_xy_px": {"x": float(bbox_min[0]), "y": float(bbox_min[1])},
+                "max_xy_px": {"x": float(bbox_max[0]), "y": float(bbox_max[1])},
+                "center_xy_normalized": {
+                    "x": float(center[0] / max(width, 1)),
+                    "y": float(center[1] / max(height, 1)),
+                },
+                "edge_margin_px": float(
+                    min(
+                        bbox_min[0],
+                        bbox_min[1],
+                        max(width - bbox_max[0], 0.0),
+                        max(height - bbox_max[1], 0.0),
+                    )
+                ),
+                "bbox_area_ratio": float(
+                    max((bbox_max[0] - bbox_min[0]), 0.0)
+                    * max((bbox_max[1] - bbox_min[1]), 0.0)
+                    / max(width * height, 1)
+                ),
+            },
+        }
+
+    def _append_sample(
+        self,
+        refined,
+        image_size_wh,
+        *,
+        source,
+        source_path=None,
+        grid_cell=None,
+    ):
+        self.objpoints.append(self.objp.copy())
+        self.imgpoints.append(np.asarray(refined, dtype=np.float32).copy())
+        self.sample_records.append(
+            self._build_sample_record(
+                refined,
+                image_size_wh,
+                source=source,
+                source_path=source_path,
+                grid_cell=grid_cell,
+            )
+        )
+
+    def _coverage_metrics(self):
+        if not self.sample_records:
+            return None
+        grid_counts = [[0, 0, 0] for _ in range(3)]
+        center_x = []
+        center_y = []
+        margins = []
+        areas = []
+        for record in self.sample_records:
+            grid_cell = record["grid_cell"]
+            grid_counts[int(grid_cell["y"])][int(grid_cell["x"])] += 1
+            bbox = record["image_bbox"]
+            center_x.append(float(bbox["center_xy_normalized"]["x"]))
+            center_y.append(float(bbox["center_xy_normalized"]["y"]))
+            margins.append(float(bbox["edge_margin_px"]))
+            areas.append(float(bbox["bbox_area_ratio"]))
+        occupied = sum(1 for row in grid_counts for count in row if int(count) > 0)
+        return {
+            "occupied_cell_count": int(occupied),
+            "grid_counts": grid_counts,
+            "horizontal_span_ratio": float(max(center_x) - min(center_x)),
+            "vertical_span_ratio": float(max(center_y) - min(center_y)),
+            "edge_margin_px": _float_list_summary(margins),
+            "bbox_area_ratio": _float_list_summary(areas),
+            "per_sample": list(self.sample_records),
+        }
+
+    def _per_view_reprojection_report(self, rvecs, tvecs):
+        rows = []
+        for index in range(len(self.objpoints)):
+            imgpts2, _ = cv2.projectPoints(
+                self.objpoints[index],
+                rvecs[index],
+                tvecs[index],
+                self.mtx,
+                self.dist,
+            )
+            observed = np.asarray(self.imgpoints[index], dtype=float).reshape(-1, 2)
+            predicted = np.asarray(imgpts2, dtype=float).reshape(-1, 2)
+            residuals = predicted - observed
+            point_errors = np.linalg.norm(residuals, axis=1)
+            record = (
+                self.sample_records[index] if index < len(self.sample_records) else {}
+            )
+            rows.append(
+                {
+                    "sample_id": int(record.get("sample_id", index + 1)),
+                    "source": record.get("source"),
+                    "source_path": record.get("source_path"),
+                    "grid_cell": record.get("grid_cell"),
+                    "rms_px": float(np.sqrt(np.mean(np.sum(residuals**2, axis=1)))),
+                    "p95_px": float(np.percentile(point_errors, 95)),
+                    "max_px": float(np.max(point_errors)),
+                }
+            )
+        return rows
+
+    def _distortion_monotonicity_report(self, image_size_wh):
+        coeffs = np.asarray(self.dist, dtype=float).reshape(-1)
+        k1 = float(coeffs[0]) if coeffs.size > 0 else 0.0
+        k2 = float(coeffs[1]) if coeffs.size > 1 else 0.0
+        k3 = float(coeffs[4]) if coeffs.size > 4 else 0.0
+        width, height = int(image_size_wh[0]), int(image_size_wh[1])
+        fx = float(self.mtx[0, 0]) if self.mtx is not None else 1.0
+        fy = float(self.mtx[1, 1]) if self.mtx is not None else 1.0
+        cx = float(self.mtx[0, 2]) if self.mtx is not None else width / 2.0
+        cy = float(self.mtx[1, 2]) if self.mtx is not None else height / 2.0
+        corner_radii = []
+        for px, py in ((0.0, 0.0), (width, 0.0), (0.0, height), (width, height)):
+            xn = (px - cx) / max(fx, 1e-6)
+            yn = (py - cy) / max(fy, 1e-6)
+            corner_radii.append(float(np.sqrt(xn**2 + yn**2)))
+        max_radius = max(max(corner_radii), 1.0)
+        sample_r = np.linspace(0.0, max_radius, 256)
+        derivative = (
+            1.0
+            + 3.0 * k1 * sample_r**2
+            + 5.0 * k2 * sample_r**4
+            + 7.0 * k3 * sample_r**6
+        )
+        min_derivative = float(np.min(derivative))
+        return {
+            "status": "pass" if min_derivative > 0.0 else "warning",
+            "max_normalized_radius": float(max_radius),
+            "min_radial_derivative": min_derivative,
+            "sample_count": int(sample_r.size),
+        }
+
+    def _build_heatmap_artifact(self, diagnostics_dir, coverage):
+        if not coverage:
+            return None
+        grid_counts = coverage.get("grid_counts", [])
+        if not grid_counts:
+            return None
+        rows = len(grid_counts)
+        cols = max((len(row) for row in grid_counts), default=0)
+        if rows <= 0 or cols <= 0:
+            return None
+        cell_size = 120
+        image = np.full(
+            (rows * cell_size + 120, cols * cell_size + 120, 3), 245, np.uint8
+        )
+        cv2.putText(
+            image,
+            "Intrinsic sample coverage",
+            (30, 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (30, 30, 30),
+            2,
+        )
+        max_count = max(max(int(v) for v in row) for row in grid_counts)
+        max_count = max(max_count, 1)
+        for row_index, row in enumerate(grid_counts):
+            for col_index, count in enumerate(row):
+                x0 = 70 + col_index * cell_size
+                y0 = 80 + row_index * cell_size
+                x1 = x0 + cell_size - 10
+                y1 = y0 + cell_size - 10
+                intensity = int(255 * float(count) / max_count)
+                color = (255 - intensity, 210 - intensity // 4, 80 + intensity // 2)
+                cv2.rectangle(image, (x0, y0), (x1, y1), color, -1)
+                cv2.rectangle(image, (x0, y0), (x1, y1), (50, 50, 50), 2)
+                cv2.putText(
+                    image,
+                    str(int(count)),
+                    (x0 + 40, y0 + 68),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (20, 20, 20),
+                    2,
+                )
+        artifact = diagnostics_dir / "image_coverage_heatmap.png"
+        cv2.imwrite(str(artifact), image)
+        return str(artifact)
+
+    def _build_intrinsic_acceptance(
+        self, avg_error, per_view_report, coverage, monotonicity_report
+    ):
+        per_view_rms = [float(row["rms_px"]) for row in per_view_report]
+        occupied_cell_target = max(4, min(6, int(self.min_total_samples)))
+        gates = [
+            {
+                "name": "sample_count",
+                "status": (
+                    "pass"
+                    if len(self.sample_records) >= int(self.min_total_samples)
+                    else "fail"
+                ),
+                "severity": "required",
+                "evidence": f"samples={len(self.sample_records)}, required={self.min_total_samples}",
+                "action": "Collect more valid checkerboard views before trusting the intrinsic result.",
+            },
+            {
+                "name": "image_coverage",
+                "status": (
+                    "pass"
+                    if coverage is not None
+                    and int(coverage["occupied_cell_count"]) >= occupied_cell_target
+                    and float(coverage["horizontal_span_ratio"]) >= 0.35
+                    and float(coverage["vertical_span_ratio"]) >= 0.35
+                    else "warning"
+                ),
+                "severity": "required",
+                "evidence": (
+                    "occupied_cells="
+                    f"{None if coverage is None else coverage['occupied_cell_count']}, "
+                    "horizontal_span_ratio="
+                    f"{None if coverage is None else coverage['horizontal_span_ratio']}, "
+                    "vertical_span_ratio="
+                    f"{None if coverage is None else coverage['vertical_span_ratio']}"
+                ),
+                "action": "Collect checkerboard views across more image regions instead of clustering near the center.",
+            },
+            {
+                "name": "avg_reprojection",
+                "status": "pass" if float(avg_error) <= 1.0 else "warning",
+                "severity": "required",
+                "evidence": f"avg_reprojection_error_px={float(avg_error)}",
+                "action": "Recheck board dimensions, image sharpness, and capture mode if average reprojection remains high.",
+            },
+            {
+                "name": "per_view_reprojection",
+                "status": (
+                    "pass"
+                    if per_view_rms
+                    and float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))
+                    <= 1.5
+                    else "warning"
+                ),
+                "severity": "required",
+                "evidence": (
+                    "per_view_rms_p95_px="
+                    f"{None if not per_view_rms else float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))}"
+                ),
+                "action": "Remove weak captures and recollect views with better corner sharpness and pose diversity.",
+            },
+            {
+                "name": "radial_monotonicity",
+                "status": monotonicity_report["status"],
+                "severity": "required",
+                "evidence": (
+                    "min_radial_derivative="
+                    f"{float(monotonicity_report['min_radial_derivative'])}"
+                ),
+                "action": "Treat non-monotonic radial distortion as calibration failure; verify capture mode and recollect broader views.",
+            },
+            {
+                "name": "capture_mode_review",
+                "status": (
+                    "pass"
+                    if not (self.capture_runtime_info or {}).get(
+                        "force_capture_resolution"
+                    )
+                    else "warning"
+                ),
+                "severity": "advisory",
+                "evidence": (
+                    "force_capture_resolution="
+                    f"{bool((self.capture_runtime_info or {}).get('force_capture_resolution'))}"
+                ),
+                "action": "Prefer native capture mode for intrinsic calibration to avoid hidden ISP crop before the 3x3 grid.",
+            },
+        ]
+        return build_final_acceptance(
+            module="camera_intrinsic",
+            gates=gates,
+            pass_recommendation="release_intrinsics",
+            review_recommendation="review_intrinsic_diagnostics",
+            fail_recommendation="reject_and_recollect_intrinsic_samples",
+        )
+
+    def _write_review_artifacts(
+        self,
+        output_yaml_path,
+        *,
+        avg_error,
+        per_view_report,
+        coverage,
+        monotonicity_report,
+    ):
+        output_path = Path(output_yaml_path)
+        diagnostics_dir = output_path.with_name(f"{output_path.stem}_diagnostics")
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        per_view_csv = write_table_csv(
+            diagnostics_dir / "per_view_reprojection.csv", per_view_report
+        )
+        sample_records_csv = write_table_csv(
+            diagnostics_dir / "sample_records.csv", self.sample_records
+        )
+        heatmap_path = self._build_heatmap_artifact(diagnostics_dir, coverage)
+        final_acceptance = self._build_intrinsic_acceptance(
+            avg_error, per_view_report, coverage, monotonicity_report
+        )
+        acceptance_artifacts = write_acceptance_artifacts(
+            diagnostics_dir, final_acceptance
+        )
+        standardized_data = {
+            "schema_version": 1,
+            "module": "camera_intrinsic",
+            "representation": "checkerboard_image_samples",
+            "sample_counts": {
+                "accepted_samples": int(len(self.sample_records)),
+                "required_samples": int(self.min_total_samples),
+            },
+            "capture_runtime": self.capture_runtime_info,
+            "sample_records": list(self.sample_records),
+        }
+        data_quality = {
+            "schema_version": 1,
+            "module": "camera_intrinsic",
+            "status": final_acceptance["status"],
+            "release_ready": final_acceptance["release_ready"],
+            "quality_gates": final_acceptance["gates"],
+            "avg_reprojection_error_px": float(avg_error),
+            "per_view_reprojection_summary": _float_list_summary(
+                [float(row["rms_px"]) for row in per_view_report]
+            ),
+            "image_coverage": coverage,
+            "radial_monotonicity": monotonicity_report,
+        }
+        visualization_index = {
+            "schema_version": 1,
+            "module": "camera_intrinsic",
+            "layers": {
+                "conclusion": [
+                    acceptance_artifacts["acceptance_report"],
+                    acceptance_artifacts["status_summary_csv"],
+                ],
+                "detail_metrics": [
+                    str(output_path),
+                    per_view_csv,
+                    sample_records_csv,
+                ],
+                "visual_review": [
+                    item
+                    for item in (
+                        self.comparison_view_path,
+                        heatmap_path,
+                    )
+                    if item is not None
+                ],
+            },
+            "manual_review": [
+                "Read diagnostics/data_quality.yaml before trusting average reprojection alone.",
+                "Inspect per_view_reprojection.csv for tail samples instead of only the mean.",
+                "Inspect image_coverage_heatmap.png to confirm the checkerboard covered multiple image regions.",
+                "Treat radial_monotonicity warnings as calibration failure, not a cosmetic issue.",
+            ],
+        }
+        paradigm_artifacts = write_paradigm_artifacts(
+            diagnostics_dir,
+            standardized_data=standardized_data,
+            data_quality=data_quality,
+            visualization_index=visualization_index,
+        )
+        return {
+            "diagnostics_dir": str(diagnostics_dir),
+            "acceptance": acceptance_artifacts,
+            "paradigm": paradigm_artifacts,
+            "per_view_reprojection_csv": per_view_csv,
+            "sample_records_csv": sample_records_csv,
+            "image_coverage_heatmap": heatmap_path,
+        }
+
     def run(self):
         """Interactive GUI capture mode (existing behaviour)."""
         print("[INFO] Industrial Calibration Tool (Grid Overlay Stable Edition)")
@@ -377,9 +797,12 @@ class CameraCalibrator:
                 (-1, -1),
                 (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
             )
-            # append copies to avoid mutation issues
-            self.objpoints.append(self.objp.copy())
-            self.imgpoints.append(refined)
+            self._append_sample(
+                refined,
+                (int(img.shape[1]), int(img.shape[0])),
+                source="headless",
+                source_path=str(ip),
+            )
             processed += 1
             if h is None:
                 h, w = img.shape[:2]
@@ -555,8 +978,19 @@ class CameraCalibrator:
             (-1, -1),
             (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
         )
-        self.objpoints.append(self.objp)
-        self.imgpoints.append(refined)
+        center = np.mean(np.asarray(refined, dtype=float).reshape(-1, 2), axis=0)
+        width = int(gray.shape[1])
+        height = int(gray.shape[0])
+        grid_cell = (
+            min(2, max(0, int((center[0] / max(width, 1)) * 3.0))),
+            min(2, max(0, int((center[1] / max(height, 1)) * 3.0))),
+        )
+        self._append_sample(
+            refined,
+            (width, height),
+            source="interactive",
+            grid_cell=grid_cell,
+        )
         self.last_capture_time = time.time()
 
     def _calibrate(self, w, h):
@@ -568,10 +1002,16 @@ class CameraCalibrator:
             print("[ERROR] Calibration failed.")
             return
         self.mtx, self.dist = mtx, dist
+        per_view_report = self._per_view_reprojection_report(rvecs, tvecs)
         err = self._reprojection_error(rvecs, tvecs)
         print(f"[REPORT] Avg Reprojection Error: {err:.4f}px")
         self._build_result_canv(w, h)
-        self._save_results(w, h, err)
+        self._save_results(
+            w,
+            h,
+            err,
+            per_view_report=per_view_report,
+        )
         self.state = "SHOWING_RESULT"
 
     def _reprojection_error(self, rvecs, tvecs):
@@ -610,8 +1050,9 @@ class CameraCalibrator:
             (w + 80, 95),
             (180, 255, 180),
         )
-        cv2.imwrite("comparison_view.png", canvas)
-        print("[SAVED] comparison_view.png")
+        self.comparison_view_path = "comparison_view.png"
+        cv2.imwrite(self.comparison_view_path, canvas)
+        print(f"[SAVED] {self.comparison_view_path}")
         self.result_canvas = canvas
 
     def _draw_text(
@@ -633,10 +1074,12 @@ class CameraCalibrator:
             thickness,
         )
 
-    def _save_results(self, w, h, error):
+    def _save_results(self, w, h, error, *, per_view_report):
         fname = f"calibration_{datetime.now():%Y%m%d_%H%M%S}.yaml"
         _, preview_info = self._build_undistortion_model((w, h))
         distortion = np.asarray(self.dist, dtype=float).reshape(-1)
+        coverage = self._coverage_metrics()
+        monotonicity_report = self._distortion_monotonicity_report((w, h))
         data = dict(
             time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             image_width=w,
@@ -650,11 +1093,31 @@ class CameraCalibrator:
             ),
             capture_runtime=self.capture_runtime_info,
             undistortion_preview=preview_info,
+            sample_quality={
+                "accepted_sample_count": int(len(self.sample_records)),
+                "required_sample_count": int(self.min_total_samples),
+                "image_coverage": coverage,
+                "radial_monotonicity": monotonicity_report,
+            },
+            per_view_reprojection_summary=_float_list_summary(
+                [float(row["rms_px"]) for row in per_view_report]
+            ),
             avg_reprojection_error=float(error),
         )
         with open(fname, "w") as f:
             yaml.dump(data, f, indent=4)
         print(f"[SAVED] Calibration file: {fname}")
+        review_artifacts = self._write_review_artifacts(
+            fname,
+            avg_error=error,
+            per_view_report=per_view_report,
+            coverage=coverage,
+            monotonicity_report=monotonicity_report,
+        )
+        print(
+            "[SAVED] Intrinsic diagnostics:",
+            review_artifacts["diagnostics_dir"],
+        )
 
 
 if __name__ == "__main__":

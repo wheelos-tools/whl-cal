@@ -48,17 +48,19 @@ This file lists what still needs evidence before conclusions can be promoted.
 2. validate whether constrained scan2map remains stable across perturbations
 3. add stronger repeatability / perturbation testing for accepted scan2map candidates
 
-## lidar2camera / camera2lidar
+## lidar2camera / camera
 
-1. define the repo-level data -> algorithm -> evaluation split
-2. create a stable dataset artifact for image + LiDAR pair selection
-3. add window + gate for invalid image / point-cloud / board windows
-4. define stable evaluation outputs:
-   - reprojection error
-   - holdout reprojection error
-   - overlay quality
-   - drift to initial prior
-   - recommendation field
-5. decide the current acceptance baseline between:
-   - reference-based checkerboard path
-   - targetless learning / scene path
+1. validate the new intrinsic acceptance gates on multiple real camera models:
+   - forced vs native capture modes
+   - wide-angle vs narrow-FOV distortion
+   - per-view outlier behavior
+2. validate the new lidar2camera visual review surfaces on real runs:
+   - image_coverage_heatmap
+   - pose_diversity_plot
+   - geometry_resolution.csv
+   - per_pose_reprojection.csv
+3. keep measuring whether geometry-resolution warnings correlate with manual board-observability review
+4. decide when physical target upgrades become mandatory rather than optional:
+   - reflective / coded LiDAR board
+   - ChArUco / AprilTag-grid variants
+5. continue treating targetless / learning-based calibration as experimental until repeatability is validated against the reference path

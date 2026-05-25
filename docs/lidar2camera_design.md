@@ -35,6 +35,7 @@ P26-04-27
 5. 提取诊断：记录 plane_inlier_count、plane_residual_rmse_m、board_extent_ratio_xy、candidate_summaries、selected_candidate、sample_quality、skip_reason（如 plane_segmentation_failed、insufficient_plane_points、image_corners_not_found、image_board_too_close_to_edge、image_board_too_small 等）。
 6. 弱样本前置门控：在进入优化前，按图像 edge margin、board bbox area、plane residual、board geometry warnings 剔除明显不可靠 pose，并统计 accepted_pair_ratio。
 7. 几何解析汇总：`extraction.yaml.geometry_resolution` 会记录候选 pose 数、每轮变更数、每个 pose 最终选择的 source / swap / sign 组合，以及迭代后的 seed transform。
+8. 结构化表格/可视化：当前还会输出 `extraction_entries.csv`、`per_pose_reprojection.csv`、`leave_one_out_trials.csv`、`geometry_resolution.csv`、`image_coverage_heatmap.png`、`pose_diversity_plot.png`，让数据筛选与优化结果更容易复盘。
 
 三、初始变换选择
 
@@ -90,7 +91,7 @@ P26-04-27
 - final_acceptance:
   - `paired_pose_count`、`accepted_pose_count`、`optimization_success`、`final_reprojection`
     、`accepted_pair_ratio`、`per_pose_reprojection`、`holdout_reprojection`、`pose_repeatability`
-    、`image_coverage`、`pose_diversity`、`board_geometry`
+    、`image_coverage`、`pose_diversity`、`board_geometry`、`geometry_resolution`
     共同决定 `metrics.yaml.summary.final_acceptance_status`
   - 量产放行应看 `final_acceptance.release_ready`，而不是只看优化是否收敛
 
@@ -134,6 +135,12 @@ P26-04-27
   - `diagnostics/standardized_data.yaml`
   - `diagnostics/data_quality.yaml`
   - `diagnostics/visualization_index.yaml`
+  - `diagnostics/extraction_entries.csv`
+  - `diagnostics/per_pose_reprojection.csv`
+  - `diagnostics/leave_one_out_trials.csv`
+  - `diagnostics/geometry_resolution.csv`
+  - `diagnostics/image_coverage_heatmap.png`
+  - `diagnostics/pose_diversity_plot.png`
 
 八、可调参数与工程建议
 
@@ -145,6 +152,7 @@ P26-04-27
 - image coverage / pose diversity：优先通过重采数据提升，不建议只靠放宽阈值掩盖观测不足。
 - board extent ratio：若经常偏大，优先改进 LiDAR 板提取，而不是继续相信平面启发式结果。
 - geometry_resolution：若 extraction.yaml 中多轮迭代仍频繁 changed 或 candidate_resolution_failed，优先检查板面点云是否混入背景、棋盘尺寸配置是否错误、以及采样姿态是否过于单一。
+- image_coverage_heatmap / pose_diversity_plot：应作为每次迭代后的固定 review 面，不建议只看 YAML 数值而跳过这些图。
 
 九、扩展点与注意事项
 

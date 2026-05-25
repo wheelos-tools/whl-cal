@@ -29,7 +29,7 @@ Current release-oriented path:
    - read `diagnostics/standardized_data.yaml`
    - read `diagnostics/data_quality.yaml`
    - read `diagnostics/acceptance_report.yaml`
-   - inspect overlay evidence before promotion
+   - inspect heatmap / pose-diversity / overlay evidence before promotion
 
 `learning_based.py` remains experimental and should not be treated as the first
 production release path.
@@ -61,8 +61,22 @@ The intrinsic YAML now records:
 - `capture_runtime`
 - `distortion_model`
 - `undistortion_preview`
+- `sample_quality`
+- `per_view_reprojection_summary`
 
-so field debugging can distinguish acquisition crop from undistortion ROI.
+and its diagnostics directory now writes:
+
+- `acceptance_report.yaml`
+- `status_summary.csv`
+- `standardized_data.yaml`
+- `data_quality.yaml`
+- `visualization_index.yaml`
+- `per_view_reprojection.csv`
+- `sample_records.csv`
+- `image_coverage_heatmap.png`
+
+so field debugging can distinguish acquisition crop from undistortion ROI, and
+calibration review can move beyond average reprojection error.
 
 ## 3. Current lidar2camera extraction contract
 
@@ -115,6 +129,7 @@ Production promotion requires:
 - image coverage pass
 - pose diversity pass
 - board geometry pass
+- geometry resolution pass
 
 The most important new industrial gates are:
 
@@ -157,14 +172,22 @@ The reference pipeline now writes:
 - `diagnostics/standardized_data.yaml`
 - `diagnostics/data_quality.yaml`
 - `diagnostics/visualization_index.yaml`
+- `diagnostics/extraction_entries.csv`
+- `diagnostics/per_pose_reprojection.csv`
+- `diagnostics/leave_one_out_trials.csv`
+- `diagnostics/geometry_resolution.csv`
+- `diagnostics/image_coverage_heatmap.png`
+- `diagnostics/pose_diversity_plot.png`
 
 Review order:
 
 1. `diagnostics/standardized_data.yaml`
 2. `diagnostics/data_quality.yaml`
-3. `metrics.yaml.summary`
-4. `diagnostics/acceptance_report.yaml`
-5. overlay / visual evidence
+3. `diagnostics/extraction.yaml` + `diagnostics/geometry_resolution.csv`
+4. `diagnostics/optimization.yaml`
+5. `metrics.yaml.summary`
+6. `diagnostics/acceptance_report.yaml`
+7. heatmap / pose-diversity / overlay evidence
 
 ## 6. Current practical limitation
 
@@ -203,4 +226,5 @@ That is the correct baseline for this repo right now:
 - release decisions are now much stricter
 - weak collection workflows are easier to catch
 - multi-hypothesis board geometry resolution is now part of the stable workflow
+- CSV + image diagnostics now make sample screening / optimization iteration / promotion review easier to repeat
 - future target improvements can plug into the same stable review contract

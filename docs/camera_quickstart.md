@@ -87,11 +87,38 @@ Headless (images dir):
 python camera/intrinsic.py --config tmp_config.yaml --images-dir /path/to/images --pattern-size 4,3
 ```
 
-Outputs: `calibration_YYYYmmdd_HHMMSS.yaml`, `comparison_view.png`.
+Outputs now include:
+
+- `calibration_YYYYmmdd_HHMMSS.yaml`
+- `comparison_view.png`
+- `calibration_YYYYmmdd_HHMMSS_diagnostics/`
+  - `acceptance_report.yaml`
+  - `status_summary.csv`
+  - `standardized_data.yaml`
+  - `data_quality.yaml`
+  - `visualization_index.yaml`
+  - `per_view_reprojection.csv`
+  - `sample_records.csv`
+  - `image_coverage_heatmap.png`
 
 The YAML now also records `distortion_model` plus an `undistortion_preview`
 section with `alpha`, `optimized_camera_matrix`, and the valid ROI. This helps
 distinguish "full-FOV undistortion preview" from the all-valid crop window when
 the display would otherwise look clipped.
 
-Acceptance: avg reprojection error < 1.0 px. See docs/lidar2camera_quickstart.md for extrinsic workflow.
+Review order:
+
+1. Read `*_diagnostics/data_quality.yaml` instead of trusting only the mean error.
+2. Read `*_diagnostics/per_view_reprojection.csv` to catch long-tail bad views.
+3. Inspect `*_diagnostics/image_coverage_heatmap.png` to confirm the checkerboard covered multiple image regions.
+4. Inspect `comparison_view.png` and the YAML's `undistortion_preview`.
+5. Treat `radial_monotonicity: warning` as calibration failure, not as a cosmetic issue.
+
+Acceptance baseline:
+
+- avg reprojection error < 1.0 px
+- per-view reprojection p95 < 1.5 px
+- image coverage should span multiple grid cells, not only the center
+- radial distortion should remain monotonic over the image radius
+
+See docs/lidar2camera_quickstart.md for extrinsic workflow.

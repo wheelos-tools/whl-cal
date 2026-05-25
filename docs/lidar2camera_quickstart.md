@@ -73,6 +73,12 @@ Production-style review artifacts now include:
 - `diagnostics/standardized_data.yaml`
 - `diagnostics/data_quality.yaml`
 - `diagnostics/visualization_index.yaml`
+- `diagnostics/extraction_entries.csv`
+- `diagnostics/per_pose_reprojection.csv`
+- `diagnostics/leave_one_out_trials.csv` (when L1O is available)
+- `diagnostics/geometry_resolution.csv` (when board-geometry hypotheses were resolved)
+- `diagnostics/image_coverage_heatmap.png`
+- `diagnostics/pose_diversity_plot.png`
 
 Acceptance heuristics: final_rms_px ≤ 1.0 px; pose p95 ≤ 1.5 px; L1O p95 ≤ 1.5 px.
 Release should follow `final_acceptance`, not solver convergence alone.
@@ -85,6 +91,7 @@ Release review now also expects:
   patch
 - successful `diagnostics/extraction.yaml.geometry_resolution` so the selected
   board orientation is consistent across poses
+- clean `geometry_resolution` status in `metrics.yaml.final_acceptance`
 
 If these gates fail, the run should remain review-only even when the optimizer
 converges and aggregate RMS looks good.
@@ -97,10 +104,12 @@ Recommended run/review order:
 3. Run `lidar2camera-calibrate --config config.yaml`.
 4. Read `diagnostics/standardized_data.yaml` to confirm accepted vs rejected
    sample counts.
-5. Read `diagnostics/extraction.yaml` and confirm `geometry_resolution` selected
-   stable candidates rather than falling back to weak per-pose guesses.
-6. Read `diagnostics/data_quality.yaml` and `diagnostics/acceptance_report.yaml`.
-7. Open the overlay artifact and inspect checkerboard edge alignment before
+5. Read `diagnostics/extraction.yaml` and `diagnostics/geometry_resolution.csv`
+   to confirm multi-hypothesis board geometry resolution converged cleanly.
+6. Read `diagnostics/optimization.yaml` and confirm the stage summary is sane.
+7. Read `diagnostics/data_quality.yaml` and `diagnostics/acceptance_report.yaml`.
+8. Open `diagnostics/image_coverage_heatmap.png`,
+   `diagnostics/pose_diversity_plot.png`, and the overlay artifact before
    promoting any result.
 
 Treat the run as release-ready only when:
