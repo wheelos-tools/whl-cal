@@ -9,6 +9,13 @@ P26-04-27
 
 This document records the current implementation for future iteration work.
 
+Related docs:
+
+- bag preparation: [docs/apollo_data_collection.md](apollo_data_collection.md)
+- run / review flow: [docs/calibration_review_guide.md](calibration_review_guide.md)
+- methodology / SOTA / references:
+  [docs/calibration_methodology.md](calibration_methodology.md)
+
 ## 1. Design goal
 
 Keep the system split into two independent layers:

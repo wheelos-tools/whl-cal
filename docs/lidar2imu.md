@@ -12,6 +12,10 @@ P26-04-27
 - **Overview**: this file
 - **Quick Start**: [docs/lidar2imu_quickstart.md](lidar2imu_quickstart.md)
 - **Current design**: [docs/lidar2imu_design.md](lidar2imu_design.md)
+- **Apollo data collection**: [docs/apollo_data_collection.md](apollo_data_collection.md)
+- **Run / review guide**: [docs/calibration_review_guide.md](calibration_review_guide.md)
+- **Methodology / SOTA**:
+  [docs/calibration_methodology.md](calibration_methodology.md)
 
 ## What is implemented
 

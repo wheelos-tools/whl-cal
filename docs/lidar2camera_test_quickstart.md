@@ -11,6 +11,13 @@ This page shows a minimal YAML config and a lightweight smoke-test to verify the
 lidar2camera reference pipeline on synthetic data. The smoke test is intended to
 be runnable without any recorded inputs and to demonstrate the metric surface.
 
+For Apollo-side data collection, production run review, and method background,
+see:
+
+- [docs/apollo_data_collection.md](apollo_data_collection.md)
+- [docs/calibration_review_guide.md](calibration_review_guide.md)
+- [docs/calibration_methodology.md](calibration_methodology.md)
+
 1) Minimal YAML config example (for real data)
 
 ```yaml

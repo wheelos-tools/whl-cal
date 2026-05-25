@@ -1,41 +1,64 @@
 ---
 audience: user
 stability: stable
-P26-04-27
+P26-05-25
 ---
-
 
 # Quickstart index — whl-cal
 
-This page provides quick entry points to the repository's calibration tools and shows where to find the immediate results.
+Use this page as the navigation hub for the repo's calibration workflows.
 
-Install
+## Recommended reading order
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
+1. Apollo preparation and bag recording:
+   [docs/apollo_data_collection.md](apollo_data_collection.md)
+2. Module quickstart from the list below
+3. Metrics / visualization review:
+   [docs/calibration_review_guide.md](calibration_review_guide.md)
+4. Advanced design / method / SOTA context:
+   [docs/calibration_methodology.md](calibration_methodology.md)
 
-Quickstarts
+## Quickstarts
 
-- LiDAR-to-LiDAR (scan2scan / scan2map): docs/lidar2lidar_quickstart.md
-- LiDAR-to-IMU (sample conversion + solver): docs/lidar2imu_quickstart.md
-- Camera intrinsic: docs/camera_quickstart.md
-- LiDAR↔Camera (target-based baseline + experimental targetless): docs/lidar2camera_quickstart.md
+- LiDAR-to-LiDAR (scan2scan / scan2map):
+  [docs/lidar2lidar_quickstart.md](lidar2lidar_quickstart.md)
+- LiDAR-to-IMU (record conversion + staged solver):
+  [docs/lidar2imu_quickstart.md](lidar2imu_quickstart.md)
+- Camera intrinsic:
+  [docs/camera_quickstart.md](camera_quickstart.md)
+- LiDAR↔Camera (target-based baseline):
+  [docs/lidar2camera_quickstart.md](lidar2camera_quickstart.md)
 
-Common output artifacts (where to look first)
+## Which quickstart should I open?
 
-- calibrated_tf.yaml — consolidated extrinsics for the run
-- metrics.yaml — coarse and fine evaluation metrics
-- diagnostics/ — per-stage diagnostics and recommended inspection files
-- initial_guess/*.yaml and calibrated/*.yaml — per-edge or per-pose extrinsics
+| Need | Open this doc first |
+| --- | --- |
+| I have an Apollo bag with multiple LiDARs and need inter-LiDAR extrinsics | `docs/lidar2lidar_quickstart.md` |
+| I have an Apollo bag and need LiDAR↔IMU extrinsics | `docs/lidar2imu_quickstart.md` |
+| I need camera intrinsic calibration from live capture or exported images | `docs/camera_quickstart.md` |
+| I need LiDAR↔Camera extrinsics from paired image / PCD files | `docs/lidar2camera_quickstart.md` |
 
-Quick "what to check" (first pass)
+## Common output artifacts
 
-1. Open metrics.yaml and read coarse_metrics (calibrated edges, average_fitness, min_overlap, max_condition_number).
-2. Open diagnostics/extraction.yaml and diagnostics/topology.yaml to confirm extraction and why edges were skipped.
-3. For LiDAR↔Camera runs, open reprojection summaries and overlay visualizations.
-4. Use review helpers (lidar2imu-review-runs, lidar2lidar-scan2map candidate outputs) for multi-run comparison.
+Most calibration runs expose the same top-level review surface:
 
-If an artifact looks suspicious, follow the module quickstart for the relevant package (links above) to dig into diagnostics and parameters.
+- `calibrated_tf.yaml` — consolidated extrinsics
+- `metrics.yaml` — main quantitative result
+- `diagnostics/standardized_data.yaml` — normalized input summary
+- `diagnostics/data_quality.yaml` — quality / gating summary
+- `diagnostics/acceptance_report.yaml` — release-review gate results
+- `diagnostics/status_summary.csv` — tabular review summary
+- `diagnostics/visualization_index.yaml` — where to find visual / CSV evidence
+
+For `camera`, the equivalent files live under
+`calibration_YYYYmmdd_HHMMSS_diagnostics/`.
+
+## Fast first-pass review
+
+1. Open the module quickstart and run the shortest meaningful command.
+2. Open `standardized_data.yaml` and `data_quality.yaml`.
+3. Read `metrics.yaml` and `acceptance_report.yaml`.
+4. Open the visualization files listed in `visualization_index.yaml`.
+
+Use [docs/calibration_review_guide.md](calibration_review_guide.md) for the
+module-specific thresholds and visual review checklist.

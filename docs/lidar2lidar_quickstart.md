@@ -1,25 +1,52 @@
 ---
 audience: user
 stability: stable
-P26-04-27
+P26-05-25
 ---
 
+# LiDAR-to-LiDAR quick start
 
-# LiDAR-to-LiDAR Quick Start
+Before running this tool:
 
-Install:
+1. collect the Apollo bag with
+   [docs/apollo_data_collection.md](apollo_data_collection.md)
+2. inspect the bag with `lidar2lidar-topics`
+3. review outputs with
+   [docs/calibration_review_guide.md](calibration_review_guide.md)
+4. use [docs/lidar2lidar_design.md](lidar2lidar_design.md) and
+   [docs/calibration_methodology.md](calibration_methodology.md) for tuning
+
+## What this tool needs
+
+| Item | Required | Notes |
+| --- | --- | --- |
+| Apollo `.record` directory or file | yes | or a prepared dataset manifest |
+| LiDAR topic set | yes | one target LiDAR plus one or more source LiDARs |
+| `/tf_static` | strongly recommended | used for initial graph / fallback extrinsics |
+| initial extrinsic priors | recommended | can come from TF or `lidar2lidar/conf/*.yaml` |
+| static scene geometry | yes | walls, corners, facades, poles are ideal |
+
+For four-LiDAR rigs, prefer the rectangle perimeter edges as primary constraints
+and use diagonals as consistency checks.
+
+## Install
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-Quick run (automatic):
+## Quick run
+
 ```bash
-lidar2lidar-auto --record-path /path/to/record --conf-dir lidar2lidar/conf --output-dir outputs/lidar2lidar/run
+lidar2lidar-auto \
+  --record-path /path/to/record \
+  --conf-dir lidar2lidar/conf \
+  --output-dir outputs/lidar2lidar/run
 ```
 
-Outputs follow the shared calibration paradigm:
+## Outputs follow the shared calibration paradigm
 
 1. **Data**: normalized run metadata and data quality
 2. **Algorithm**: calibrated transforms and solver diagnostics
@@ -36,7 +63,22 @@ Core outputs:
 - `diagnostics/status_summary.csv`
 - `diagnostics/visualization_index.yaml`
 
-Generic no-loop workflow driven by TF adjacency:
+## Apollo bag checklist
+
+Recommended bag contents:
+
+- all LiDAR raw `PointCloud2` topics to be calibrated
+- `/tf_static`
+- optional `/tf`
+
+Scene guidance:
+
+- prefer walls, corners, poles, facades, and curb geometry
+- avoid long feature-poor segments
+- avoid bags dominated by moving traffic
+
+## Generic no-loop workflow driven by TF adjacency
+
 ```bash
 lidar2lidar-auto \
   --record-path /path/to/record \
@@ -49,8 +91,10 @@ lidar2lidar-auto \
   --max-samples 2
 ```
 
-Prepare a reusable raw-only rig dataset first when the same bag will feed both
-`lidar2lidar` and `lidar2imu`:
+## Prepare a reusable raw-only rig dataset first
+
+When one bag will feed both `lidar2lidar` and `lidar2imu`:
+
 ```bash
 lidar2lidar-rig-dataset \
   --record-path /path/to/record \
@@ -72,7 +116,8 @@ Prepared dataset outputs:
 - `cache/pointclouds/**/*.pcd`
 - `cache/state.npz`
 
-Four-LiDAR rig run with explicit relations and loop refinement:
+## Four-LiDAR rig run with explicit relations and loop refinement
+
 ```bash
 lidar2lidar-auto \
   --prepared-dataset-yaml outputs/prepared/rig_run/diagnostics/prepared_rig_dataset.yaml \
@@ -87,18 +132,16 @@ lidar2lidar-auto \
 
 Extra comparison outputs:
 
-- workflow plan: `diagnostics/workflow.yaml`
-- scene sufficiency: `diagnostics/scene_sufficiency.yaml`
-- baseline star result: `calibrated_tf.yaml`
-- loop-closed result: `loop_closed_tf.yaml`
-- graph comparison: `diagnostics/loop_closure.yaml`
-- wall / corner / slice summary: `diagnostics/visual_evaluation.yaml`
-- colored sensor overlays:
-  - `diagnostics/merged_cloud_baseline_colored.ply`
-  - `diagnostics/merged_cloud_loop_closure_colored.ply`
-- tabular visual-review inputs:
-  - `diagnostics/edge_metrics.csv`
-  - `diagnostics/skipped_edges.csv`
+- `diagnostics/workflow.yaml`
+- `diagnostics/scene_sufficiency.yaml`
+- `calibrated_tf.yaml`
+- `loop_closed_tf.yaml`
+- `diagnostics/loop_closure.yaml`
+- `diagnostics/visual_evaluation.yaml`
+- `diagnostics/merged_cloud_baseline_colored.ply`
+- `diagnostics/merged_cloud_loop_closure_colored.ply`
+- `diagnostics/edge_metrics.csv`
+- `diagnostics/skipped_edges.csv`
 
 ## How to judge a result
 
@@ -135,7 +178,5 @@ For production release, require:
 - scene sufficiency and repeatability are `pass`
 - visual overlays do not show wall color fringing, double edges, or corner spread
 
-If visual geometry is missing or `warning`, treat the run as review-only even if
-the optimizer converged.
-
-See docs/lidar2lidar_design.md for tuning.
+If visual geometry is missing or `warning`, keep the run review-only even if the
+optimizer converged.
