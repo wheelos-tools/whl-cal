@@ -1,196 +1,147 @@
 ---
 audience: dev
 stability: stable
-last_tested: 2026-04-27
+last_tested: 2026-05-25
 ---
 
 # lidar2camera current context
 
-## 1. Current codebase state
+## 1. Current production baseline
 
-The repository already has camera-related code, but it is not yet organized into
-the same repo-wide calibration framework used by `lidar2lidar` and `lidar2imu`.
+`lidar2camera` now follows the same repo-wide **data -> algorithm -> evaluation**
+structure used by the other calibration modules.
 
-Current files:
+Current release-oriented path:
 
-- `camera/intrinsic.py`
-  - interactive chessboard-based camera intrinsic calibration (supports headless --images-dir)
-- `docs/camera_quickstart.md`
-  - quick start for the intrinsic tool and headless usage
-- `lidar2camera/reference_based.py`
-  - checkerboard / reference-based LiDAR-camera extrinsic calibration
-- `lidar2camera/learning_based.py`
-  - targetless LiDAR-camera calibration experiment
+1. **camera intrinsics first**
+   - use `camera/intrinsic.py`
+   - keep capture resolution separate from display window size
+   - default to `capture.force_resolution: false` unless a native sensor mode is known
+2. **reference-based lidar2camera**
+   - use `lidar2camera-calibrate`
+   - pair image and PCD files by stem
+   - extract checkerboard corners plus LiDAR board plane support
+   - resolve board orientation with gravity/PCA candidate hypotheses instead of a
+     single fixed in-plane-axis guess
+   - reject obviously weak samples before optimization
+3. **evaluation / promotion**
+   - read `metrics.yaml`
+   - read `diagnostics/standardized_data.yaml`
+   - read `diagnostics/data_quality.yaml`
+   - read `diagnostics/acceptance_report.yaml`
+   - inspect overlay evidence before promotion
 
-## 2. Gap versus the current repo standard
+`learning_based.py` remains experimental and should not be treated as the first
+production release path.
 
-Compared with `lidar2lidar` and `lidar2imu`, camera-related calibration is still
-missing a repo-level split into:
+## 2. Camera intrinsic live-capture rule
 
-1. **data layer**
-   - explicit dataset artifact
-   - pairing / synchronization diagnostics
-   - sample or window gating
-2. **algorithm layer**
-   - stable command entrypoints
-   - comparable reference-based vs targetless paths
-3. **evaluation layer**
-   - stable `metrics.yaml`
-   - stable `diagnostics/*.yaml`
-   - explicit acceptance recommendation
+The most important operational rule for the intrinsic tool is now:
 
-## 3. Recommended next direction
+- **do not use the display window size as the camera capture size**
 
-The next repo-level calibration target should be **lidar2camera**.
+The tool now separates:
 
-Recommended pattern:
+- `window_width` / `window_height`
+- `capture.force_resolution`
+- `capture.width`
+- `capture.height`
+- `capture.fourcc`
 
-### A. Data layer
+Why this matters:
 
-- define an explicit dataset artifact for image + LiDAR pairs
-- add window + gate logic:
-  - sync quality
-  - board detection quality or feature coverage quality
-  - image blur / visibility gates
-  - point-cloud support / plane quality gates
+- many cameras have native 4:3 sensor modes
+- forcing a 16:9 mode such as 1280x720 can trigger ISP or driver crop before the
+  3x3 guidance grid is drawn
+- if the live 3x3 grid already looks clipped, trust the capture diagnostics first
+  and disable forced capture resolution before collecting data
 
-### B. Algorithm layer
+The intrinsic YAML now records:
 
-Keep two branches visible:
+- `capture_runtime`
+- `distortion_model`
+- `undistortion_preview`
 
-1. **reference-based**
-   - checkerboard / target-based
-   - stronger acceptance path
-2. **targetless**
-   - scene / feature-based
-   - comparison and diagnostic path first
+so field debugging can distinguish acquisition crop from undistortion ROI.
 
-### C. Evaluation layer
+## 3. Current lidar2camera extraction contract
 
-Use stable outputs such as:
+The reference pipeline currently performs:
 
-- reprojection error
-- holdout reprojection error
-- board-plane consistency
-- LiDAR-to-image overlay quality
-- transform drift to initial prior
-- repeatability across poses / windows
-- recommendation field
+1. file pairing
+2. chessboard corner extraction
+3. LiDAR plane segmentation
+4. multi-hypothesis board coordinate construction from plane support using:
+   - gravity-projected axes
+   - PCA-derived in-plane axes
+   - axis swap / sign-flip candidates
+   - single-pose IPPE reprojection scoring
+   - cross-pose consistency refinement against the global transform seed
+5. per-pose sample-quality gating
 
-## 4. Repo-level rule for this module
+Per-pose gating now rejects obviously weak samples before optimization, including:
 
-`lidar2camera` should follow the same principle as the other modules:
+- board too close to the image edge
+- board too small in the image
+- LiDAR plane residual too high
+- LiDAR board geometry warnings when configured to reject them
 
-- algorithms and metrics keep iterating
-- conclusions are driven by tested data
-- validated conclusions and open verification points must stay separate
+The extraction report now records:
 
-## 5. Immediate next step
+- `accepted_pose_count`
+- `accepted_pair_ratio`
+- `rejected_pose_count`
+- `skip_reason_counts`
+- `geometry_resolution`
+- per-entry `sample_quality`
 
-Before changing algorithms, first document and stabilize:
+This is important: the solver should not see obviously bad samples and then
+"average them out" later.
 
-1. current command entrypoints
-2. expected inputs / outputs
-3. evaluation surfaces
-4. what counts as an accepted run vs a diagnostic run
+## 4. Current lidar2camera release gates
 
-## 6. 2026-04-24 industrial lidar2camera plan
+`final_acceptance` is now the release contract.
 
-The next industrial lidar2camera direction is now clearer after reviewing both the
-existing scripts and repo-wide practice in `lidar2lidar` / `lidar2imu`.
+Production promotion requires:
 
-### 6.1 Repo-level baseline decision
+- enough paired samples
+- enough accepted samples
+- healthy accepted-pair ratio
+- solver success
+- final reprojection pass
+- per-pose reprojection pass
+- holdout reprojection pass
+- leave-one-out repeatability pass
+- image coverage pass
+- pose diversity pass
+- board geometry pass
 
-For this repo, the industrial baseline should be:
+The most important new industrial gates are:
 
-1. **reference-based / target-based**
-   - checkerboard / ChArUco / AprilTag-grid style workflow
-   - multi-pose joint optimization
-   - stable metrics and diagnostics
-   - this is the release path
-2. **targetless / learning-based**
-   - comparison / initialization / drift-monitoring path first
-   - do not treat it as the first production release path
+### A. Extraction yield
 
-This matches common industry practice:
+- if too many paired samples are rejected, the workflow is not stable enough for
+  production even if the surviving subset optimizes well
 
-- use explicit observable targets for the first high-precision offline baseline
-- keep targetless methods as a secondary path until they show comparable stability,
-  repeatability, and uncertainty under tested data
+### B. Image coverage
 
-### 6.2 Industrial architecture for this module
+- board centers should cover multiple image regions
+- left / center / right and up / center / down coverage matters
+- production cannot rely on center-only board captures
 
-`lidar2camera` should now follow the same repo-wide split:
+### C. Pose diversity
 
-1. **data extraction**
-   - pair image / PCD files explicitly
-   - detect 2D board corners
-   - detect LiDAR board plane / board support
-   - record skip reasons and quality diagnostics
-2. **algorithm**
-   - choose an initial transform from a best single-pose candidate or explicit prior
-   - optimize one shared LiDAR->camera transform jointly over all accepted poses
-   - keep the targetless path separate
-3. **evaluation**
-   - stable `metrics.yaml`
-   - stable `diagnostics/`
-   - repeatability and uncertainty instead of one-shot promotion
+- accepted poses should span multiple depths and tilts
+- otherwise the solution is too likely to be pose-family dependent
 
-### 6.3 Current industrial recommendation
+### D. Board geometry
 
-The first industrial-grade baseline for this repo should use:
+- LiDAR support should look like a board-sized plane, not a large wall patch or
+  tiny under-supported patch
 
-- camera intrinsic already calibrated first
-- target-based LiDAR-camera extrinsic
-- multiple diverse board poses
-- robust least-squares over all poses
-- leave-one-pose-out repeatability
-- uncertainty summary
+## 5. Stable artifacts to expect
 
-The minimum evaluation surfaces should be:
-
-- final reprojection RMS
-- per-pose reprojection distribution
-- leave-one-pose-out holdout reprojection
-- transform repeatability under leave-one-pose-out
-- parameter uncertainty
-- recommendation field
-- extraction skip reasons and board support diagnostics
-
-### 6.4 Known current limitation from the old script
-
-The legacy `lidar2camera/reference_based.py` had a useful multi-pose structure, but
-it was still missing repo-wide industrial scaffolding:
-
-- no stable CLI entrypoint
-- no stable `metrics.yaml`
-- no stable `diagnostics/*.yaml`
-- no explicit extraction artifact
-- no leave-one-pose-out repeatability gate
-- no repo-level recommendation field
-
-It also used a heuristic LiDAR board orientation construction from plane normal plus
-gravity-aligned in-plane axes. That is acceptable as a **starting baseline**, but it
-must remain visible as a limitation until stronger board-side geometry extraction is
-validated.
-
-### 6.5 Industrial refactor started in this round
-
-This round starts the actual repo-level refactor:
-
-- new package: `lidar2camera/`
-- new stable CLI baseline:
-  - `lidar2camera-calibrate`
-- new layered implementation:
-  - `lidar2camera/models.py`
-  - `lidar2camera/reference_pipeline.py`
-  - `lidar2camera/metrics.py`
-  - `lidar2camera/io.py`
-  - `lidar2camera/cli.py`
-- old `lidar2camera/reference_based.py` becomes a compatibility entrypoint to the
-  new baseline
-
-The new baseline now writes stable artifacts:
+The reference pipeline now writes:
 
 - `calibrated_tf.yaml`
 - `metrics.yaml`
@@ -201,43 +152,55 @@ The new baseline now writes stable artifacts:
 - `diagnostics/optimization.yaml`
 - `diagnostics/evaluation.yaml`
 - `diagnostics/manifest.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/status_summary.csv`
+- `diagnostics/standardized_data.yaml`
+- `diagnostics/data_quality.yaml`
+- `diagnostics/visualization_index.yaml`
 
-### 6.6 First industrial metrics now adopted
+Review order:
 
-The new baseline now evaluates:
+1. `diagnostics/standardized_data.yaml`
+2. `diagnostics/data_quality.yaml`
+3. `metrics.yaml.summary`
+4. `diagnostics/acceptance_report.yaml`
+5. overlay / visual evidence
 
-- pose count
-- initial RMS
-- final RMS
-- per-pose reprojection RMS
-- leave-one-pose-out holdout reprojection
-- leave-one-pose-out transform repeatability
-- uncertainty summary from leave-one-pose-out spread
-- delta to initial transform
+## 6. Current practical limitation
 
-Current recommendation meanings:
+The biggest remaining risk is no longer a single hard-coded LiDAR in-plane axis.
+The current residual limitation is now narrower:
 
-- `accepted_reference_candidate`
-  - current reference-based run passes the current release-oriented checks
-- `repeatability_review`
-  - leave-one-pose-out stability is not good enough yet
-- `reference_quality_review`
-  - reprojection quality is still weak even if the solver converged
-- `recollect_data`
-  - not enough accepted poses
+- the LiDAR-side board still comes from **plane support**, not direct LiDAR board
+  corners / coded target identities
+- so runs still depend on clean board isolation, enough on-board points, and
+  board-vs-background separation in the point cloud
 
-### 6.7 Next industrial tasks after this baseline
+The new candidate-resolution stage and release gates remove the old dominant
+failure mode, but they do **not** make a weak physical target design magically
+observable.
 
-After the baseline scaffolding, the next high-value work is:
+If higher release confidence is required, the next algorithm iteration should
+prioritize one of:
 
-1. validate the new CLI on real lidar2camera calibration data
-2. improve LiDAR-side board geometry extraction beyond the current heuristic
-3. add better pose-coverage metrics:
-   - left / center / right image coverage
-   - near / mid / far depth coverage
-   - board tilt / yaw coverage
-4. decide whether the current board should remain checkerboard-only or move to a
-   more industrial target such as ChArUco / AprilTag-grid for stronger corner
-   identity and better in-plane orientation observability
-5. keep `learning_based.py` as experimental until it can match the same repeatability
-   and uncertainty surfaces
+1. reflective / coded LiDAR target upgrade
+2. reflective target support
+3. ChArUco / AprilTag-grid style target upgrade
+
+## 7. Current judgment
+
+Current status is best described as:
+
+- **production-ready for the current reference-board workflow, assuming the data
+  collection contract is followed**
+- **safer against the previous false-pass modes in both sample selection and
+  LiDAR board orientation**
+- **still improved further by stronger physical targets, but no longer blocked on
+  the old single-heuristic geometry step**
+
+That is the correct baseline for this repo right now:
+
+- release decisions are now much stricter
+- weak collection workflows are easier to catch
+- multi-hypothesis board geometry resolution is now part of the stable workflow
+- future target improvements can plug into the same stable review contract

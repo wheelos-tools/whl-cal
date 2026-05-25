@@ -38,6 +38,12 @@ def default_reference_config_payload() -> dict[str, Any]:
             "plane_dist_thresh": 0.02,
             "min_plane_points": 500,
         },
+        "extraction": {
+            "min_bbox_area_ratio": 0.0008,
+            "min_edge_margin_px": 8.0,
+            "max_plane_residual_rmse_m": 0.02,
+            "reject_board_geometry_warnings": True,
+        },
         "frames": {
             "parent": "camera",
             "child": "lidar",
@@ -56,6 +62,15 @@ def default_reference_config_payload() -> dict[str, Any]:
             "warning_repeatability_translation_m": 0.05,
             "warning_repeatability_rotation_deg": 1.0,
             "min_leave_one_out_pose_count": 5,
+            "warning_image_coverage_min_cells": 4,
+            "warning_image_horizontal_span_ratio": 0.35,
+            "warning_image_vertical_span_ratio": 0.35,
+            "warning_depth_span_m": 0.3,
+            "warning_tilt_span_deg": 8.0,
+            "warning_plane_residual_rmse_m": 0.02,
+            "warning_board_extent_ratio_min": 0.5,
+            "warning_board_extent_ratio_max": 4.0,
+            "warning_accepted_pair_ratio": 0.5,
         },
         "output": {"directory": "calibration_output"},
     }
@@ -67,6 +82,7 @@ def _load_config(config_path: str) -> tuple[dict[str, Any], ReferenceCalibration
 
     checkerboard = payload.get("checkerboard", {}) or {}
     point_cloud = payload.get("point_cloud", {}) or {}
+    extraction = payload.get("extraction", {}) or {}
     optimization = payload.get("optimization", {}) or {}
     metrics = payload.get("metrics", {}) or {}
     frames = payload.get("frames", {}) or {}
@@ -78,6 +94,19 @@ def _load_config(config_path: str) -> tuple[dict[str, Any], ReferenceCalibration
         board_square_size_m=float(checkerboard.get("square_size", 0.05)),
         plane_distance_threshold_m=float(point_cloud.get("plane_dist_thresh", 0.02)),
         min_plane_points=int(point_cloud.get("min_plane_points", 500)),
+        extraction_min_bbox_area_ratio=float(
+            extraction.get("min_bbox_area_ratio", 0.0008)
+        ),
+        extraction_min_edge_margin_px=float(extraction.get("min_edge_margin_px", 8.0)),
+        extraction_max_plane_residual_rmse_m=float(
+            extraction.get(
+                "max_plane_residual_rmse_m",
+                point_cloud.get("plane_dist_thresh", 0.02),
+            )
+        ),
+        extraction_reject_board_geometry_warnings=bool(
+            extraction.get("reject_board_geometry_warnings", True)
+        ),
         min_pose_count=int(optimization.get("min_poses", 5)),
         optimization_loss=str(optimization.get("loss", "huber")),
         optimization_f_scale=float(optimization.get("f_scale", 1.0)),
@@ -97,6 +126,32 @@ def _load_config(config_path: str) -> tuple[dict[str, Any], ReferenceCalibration
         ),
         metrics_min_leave_one_out_pose_count=int(
             metrics.get("min_leave_one_out_pose_count", 5)
+        ),
+        metrics_warning_image_coverage_min_cells=int(
+            metrics.get("warning_image_coverage_min_cells", 4)
+        ),
+        metrics_warning_image_horizontal_span_ratio=float(
+            metrics.get("warning_image_horizontal_span_ratio", 0.35)
+        ),
+        metrics_warning_image_vertical_span_ratio=float(
+            metrics.get("warning_image_vertical_span_ratio", 0.35)
+        ),
+        metrics_warning_depth_span_m=float(metrics.get("warning_depth_span_m", 0.3)),
+        metrics_warning_tilt_span_deg=float(metrics.get("warning_tilt_span_deg", 8.0)),
+        metrics_warning_plane_residual_rmse_m=float(
+            metrics.get(
+                "warning_plane_residual_rmse_m",
+                point_cloud.get("plane_dist_thresh", 0.02),
+            )
+        ),
+        metrics_warning_board_extent_ratio_min=float(
+            metrics.get("warning_board_extent_ratio_min", 0.5)
+        ),
+        metrics_warning_board_extent_ratio_max=float(
+            metrics.get("warning_board_extent_ratio_max", 4.0)
+        ),
+        metrics_warning_accepted_pair_ratio=float(
+            metrics.get("warning_accepted_pair_ratio", 0.5)
         ),
     )
     return payload, config
@@ -148,16 +203,277 @@ def _find_image_corners(
     return corners.reshape(-1, 2)
 
 
+def _normalized(vector: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-12:
+        raise ValueError("Cannot normalize a near-zero vector.")
+    return np.asarray(vector, dtype=float) / norm
+
+
+def _build_candidate_axes(
+    plane_points: np.ndarray,
+    centroid: np.ndarray,
+    normal: np.ndarray,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    global_up = np.array([0.0, 0.0, 1.0], dtype=float)
+    projected_up = global_up - float(np.dot(global_up, normal)) * normal
+    if np.linalg.norm(projected_up) < 1e-6:
+        global_up = np.array([0.0, 1.0, 0.0], dtype=float)
+        projected_up = global_up - float(np.dot(global_up, normal)) * normal
+    if np.linalg.norm(projected_up) >= 1e-6:
+        y_axis = _normalized(projected_up)
+        x_axis = _normalized(np.cross(y_axis, normal))
+        y_axis = _normalized(np.cross(normal, x_axis))
+        candidates.append(
+            {
+                "source": "gravity_projected_vertical",
+                "x_axis": x_axis,
+                "y_axis": y_axis,
+            }
+        )
+
+    centered = plane_points - centroid
+    projected = centered - np.outer(centered @ normal, normal)
+    try:
+        _, _, vh = np.linalg.svd(projected, full_matrices=False)
+        principal_a = _normalized(vh[0])
+        principal_b = _normalized(vh[1])
+        principal_b = _normalized(np.cross(normal, principal_a))
+        principal_a = _normalized(np.cross(principal_b, normal))
+        candidates.append(
+            {
+                "source": "pca_major_axis",
+                "x_axis": principal_a,
+                "y_axis": principal_b,
+            }
+        )
+        if np.linalg.norm(projected_up) >= 1e-6:
+            if abs(float(np.dot(principal_a, projected_up))) >= abs(
+                float(np.dot(principal_b, projected_up))
+            ):
+                y_axis = principal_a
+                x_axis = principal_b
+            else:
+                y_axis = principal_b
+                x_axis = principal_a
+            if float(np.dot(y_axis, projected_up)) < 0.0:
+                y_axis = -y_axis
+            x_axis = _normalized(np.cross(y_axis, normal))
+            y_axis = _normalized(np.cross(normal, x_axis))
+            candidates.append(
+                {
+                    "source": "pca_gravity_aligned",
+                    "x_axis": x_axis,
+                    "y_axis": y_axis,
+                }
+            )
+    except np.linalg.LinAlgError:
+        pass
+
+    deduped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        duplicate = False
+        for existing in deduped:
+            if (
+                abs(float(np.dot(candidate["x_axis"], existing["x_axis"]))) > 0.999
+                and abs(float(np.dot(candidate["y_axis"], existing["y_axis"]))) > 0.999
+            ):
+                duplicate = True
+                break
+        if not duplicate:
+            deduped.append(candidate)
+    return deduped
+
+
+def _robust_board_support_summary(
+    plane_points: np.ndarray,
+    centroid: np.ndarray,
+    x_axis: np.ndarray,
+    y_axis: np.ndarray,
+) -> dict[str, Any]:
+    projected_x = (plane_points - centroid) @ x_axis
+    projected_y = (plane_points - centroid) @ y_axis
+    low_x, high_x = np.percentile(projected_x, [5, 95])
+    low_y, high_y = np.percentile(projected_y, [5, 95])
+    center = (
+        centroid + 0.5 * (low_x + high_x) * x_axis + 0.5 * (low_y + high_y) * y_axis
+    )
+    return {
+        "center": np.asarray(center, dtype=float),
+        "extent_xy_m": {
+            "x": float(high_x - low_x),
+            "y": float(high_y - low_y),
+        },
+        "support_interval_xy_m": {
+            "x": {"min": float(low_x), "max": float(high_x)},
+            "y": {"min": float(low_y), "max": float(high_y)},
+        },
+    }
+
+
+def _candidate_object_points(
+    template: np.ndarray,
+    center: np.ndarray,
+    x_axis: np.ndarray,
+    y_axis: np.ndarray,
+    *,
+    swap_axes: bool,
+    sign_x: int,
+    sign_y: int,
+) -> np.ndarray:
+    centered_template = template.astype(float) - np.mean(template, axis=0)
+    template_xy = centered_template[:, :2]
+    if swap_axes:
+        template_xy = template_xy[:, [1, 0]]
+    return (
+        np.outer(sign_x * template_xy[:, 0], x_axis)
+        + np.outer(sign_y * template_xy[:, 1], y_axis)
+        + center
+    )
+
+
+def _solve_pose_transform(
+    object_points: np.ndarray,
+    image_points: np.ndarray,
+    camera_matrix: np.ndarray,
+    camera_distortion: np.ndarray,
+) -> tuple[np.ndarray | None, float | None]:
+    success, rvec, tvec = cv2.solvePnP(
+        np.asarray(object_points, dtype=float),
+        np.asarray(image_points, dtype=float),
+        camera_matrix,
+        camera_distortion,
+        flags=cv2.SOLVEPNP_IPPE,
+    )
+    if not success:
+        return None, None
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3], _ = cv2.Rodrigues(rvec)
+    transform[:3, 3] = tvec.reshape(3)
+    camera_points = (transform[:3, :3] @ object_points.T).T + transform[:3, 3]
+    if float(np.min(camera_points[:, 2])) <= 1e-6:
+        return None, None
+    projected, _ = cv2.projectPoints(
+        object_points,
+        rvec,
+        tvec,
+        camera_matrix,
+        camera_distortion,
+    )
+    residuals = projected.reshape(-1, 2) - np.asarray(image_points, dtype=float)
+    return transform, float(np.sqrt(np.mean(residuals**2)))
+
+
+def _build_board_geometry_candidates(
+    plane_points: np.ndarray,
+    centroid: np.ndarray,
+    normal: np.ndarray,
+    board_template: np.ndarray,
+    image_points: np.ndarray,
+    camera_matrix: np.ndarray,
+    camera_distortion: np.ndarray,
+    config: ReferenceCalibrationConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    expected_extent_x = float(np.ptp(board_template[:, 0]))
+    expected_extent_y = float(np.ptp(board_template[:, 1]))
+    candidates = []
+    for base in _build_candidate_axes(plane_points, centroid, normal):
+        support = _robust_board_support_summary(
+            plane_points, centroid, base["x_axis"], base["y_axis"]
+        )
+        observed_extent_x = float(support["extent_xy_m"]["x"])
+        observed_extent_y = float(support["extent_xy_m"]["y"])
+        for swap_axes in (False, True):
+            candidate_expected_x = expected_extent_y if swap_axes else expected_extent_x
+            candidate_expected_y = expected_extent_x if swap_axes else expected_extent_y
+            extent_ratio_x = (
+                None
+                if candidate_expected_x <= 1e-9
+                else float(observed_extent_x / candidate_expected_x)
+            )
+            extent_ratio_y = (
+                None
+                if candidate_expected_y <= 1e-9
+                else float(observed_extent_y / candidate_expected_y)
+            )
+            extent_penalty = 0.0
+            for ratio in (extent_ratio_x, extent_ratio_y):
+                if ratio is not None:
+                    extent_penalty += abs(float(np.log(max(ratio, 1e-6))))
+            for sign_x in (-1, 1):
+                for sign_y in (-1, 1):
+                    object_points = _candidate_object_points(
+                        board_template,
+                        support["center"],
+                        base["x_axis"],
+                        base["y_axis"],
+                        swap_axes=swap_axes,
+                        sign_x=sign_x,
+                        sign_y=sign_y,
+                    )
+                    transform, reprojection_rms = _solve_pose_transform(
+                        object_points,
+                        image_points,
+                        camera_matrix,
+                        camera_distortion,
+                    )
+                    if transform is None or reprojection_rms is None:
+                        continue
+                    candidate = {
+                        "object_points": object_points,
+                        "summary": {
+                            "source": base["source"],
+                            "swap_axes": bool(swap_axes),
+                            "sign_x": int(sign_x),
+                            "sign_y": int(sign_y),
+                            "board_center_m": {
+                                "x": float(support["center"][0]),
+                                "y": float(support["center"][1]),
+                                "z": float(support["center"][2]),
+                            },
+                            "board_extent_xy_m": {
+                                "x": observed_extent_x,
+                                "y": observed_extent_y,
+                            },
+                            "support_interval_xy_m": support["support_interval_xy_m"],
+                            "extent_ratio_xy": {
+                                "x": extent_ratio_x,
+                                "y": extent_ratio_y,
+                            },
+                            "extent_penalty": float(extent_penalty),
+                            "single_pose_reprojection_rms_px": float(reprojection_rms),
+                            "single_pose_transform": transform.tolist(),
+                        },
+                    }
+                    candidates.append(candidate)
+    if not candidates:
+        return [], None
+    candidates.sort(
+        key=lambda item: (
+            float(item["summary"]["extent_penalty"]),
+            float(item["summary"]["single_pose_reprojection_rms_px"]),
+            0 if item["summary"]["source"] == "pca_gravity_aligned" else 1,
+        )
+    )
+    return candidates, candidates[0]
+
+
 def _extract_lidar_board_points(
     pcd: o3d.geometry.PointCloud,
     board_template: np.ndarray,
+    image_points: np.ndarray,
+    camera_matrix: np.ndarray,
+    camera_distortion: np.ndarray,
     config: ReferenceCalibrationConfig,
 ) -> tuple[np.ndarray | None, dict]:
     diagnostics: dict[str, Any] = {
         "plane_inlier_count": 0,
         "plane_inlier_ratio": 0.0,
         "plane_residual_rmse_m": None,
-        "orientation_source": "gravity_projected_vertical",
+        "orientation_source": None,
+        "quality_warnings": [],
     }
     try:
         plane_model, inliers = pcd.segment_plane(
@@ -205,14 +521,149 @@ def _extract_lidar_board_points(
             },
         }
     )
-
-    centered_template = board_template.astype(float) - np.mean(board_template, axis=0)
-    object_points = (
-        np.outer(centered_template[:, 0], x_axis)
-        + np.outer(centered_template[:, 1], y_axis)
-        + centroid
+    expected_extent_x = float(np.ptp(board_template[:, 0]))
+    expected_extent_y = float(np.ptp(board_template[:, 1]))
+    extent_ratio_x = (
+        None
+        if expected_extent_x <= 1e-9
+        else float(diagnostics["board_extent_xy_m"]["x"] / expected_extent_x)
     )
+    extent_ratio_y = (
+        None
+        if expected_extent_y <= 1e-9
+        else float(diagnostics["board_extent_xy_m"]["y"] / expected_extent_y)
+    )
+    diagnostics["expected_board_extent_xy_m"] = {
+        "x": expected_extent_x,
+        "y": expected_extent_y,
+    }
+    diagnostics["board_extent_ratio_xy"] = {
+        "x": extent_ratio_x,
+        "y": extent_ratio_y,
+    }
+    quality_warnings = []
+    if (
+        extent_ratio_x is not None
+        and extent_ratio_x > float(config.metrics_warning_board_extent_ratio_max)
+    ) or (
+        extent_ratio_y is not None
+        and extent_ratio_y > float(config.metrics_warning_board_extent_ratio_max)
+    ):
+        quality_warnings.append("plane_extent_much_larger_than_board")
+    if (
+        extent_ratio_x is not None
+        and extent_ratio_x < float(config.metrics_warning_board_extent_ratio_min)
+    ) or (
+        extent_ratio_y is not None
+        and extent_ratio_y < float(config.metrics_warning_board_extent_ratio_min)
+    ):
+        quality_warnings.append("plane_extent_smaller_than_board")
+    if diagnostics["plane_residual_rmse_m"] is not None and float(
+        diagnostics["plane_residual_rmse_m"]
+    ) > float(config.metrics_warning_plane_residual_rmse_m):
+        quality_warnings.append("plane_residual_rmse_high")
+    diagnostics["quality_warnings"] = quality_warnings
+    geometry_candidates, provisional = _build_board_geometry_candidates(
+        plane_points,
+        centroid,
+        normal,
+        board_template,
+        image_points,
+        camera_matrix,
+        camera_distortion,
+        config,
+    )
+    if provisional is None:
+        diagnostics["skip_reason"] = "board_geometry_candidate_scoring_failed"
+        return None, diagnostics
+
+    diagnostics["orientation_source"] = str(provisional["summary"]["source"])
+    diagnostics["board_center_m"] = dict(provisional["summary"]["board_center_m"])
+    diagnostics["support_interval_xy_m"] = dict(
+        provisional["summary"]["support_interval_xy_m"]
+    )
+    diagnostics["candidate_count"] = int(len(geometry_candidates))
+    diagnostics["candidate_summaries"] = [
+        dict(candidate["summary"]) for candidate in geometry_candidates
+    ]
+    diagnostics["selected_candidate_provisional"] = dict(provisional["summary"])
+    diagnostics["_geometry_candidates"] = geometry_candidates
+    object_points = np.asarray(provisional["object_points"], dtype=float)
     return object_points, diagnostics
+
+
+def _summarize_skip_reasons(entries: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in entries:
+        if entry.get("status") == "accepted":
+            continue
+        reason = str(entry.get("skip_reason", "unknown"))
+        counts[reason] = counts.get(reason, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _assess_pose_sample_quality(
+    image_points: np.ndarray,
+    image_size_wh: tuple[int, int],
+    board_diagnostics: dict[str, Any],
+    config: ReferenceCalibrationConfig,
+) -> dict[str, Any]:
+    width, height = image_size_wh
+    bbox_min = np.min(image_points, axis=0)
+    bbox_max = np.max(image_points, axis=0)
+    edge_margin_px = float(
+        min(
+            bbox_min[0],
+            bbox_min[1],
+            max(width - bbox_max[0], 0.0),
+            max(height - bbox_max[1], 0.0),
+        )
+    )
+    bbox_area_ratio = float(
+        max((bbox_max[0] - bbox_min[0]), 0.0)
+        * max((bbox_max[1] - bbox_min[1]), 0.0)
+        / max(width * height, 1)
+    )
+    center = np.mean(image_points, axis=0)
+    quality_report = {
+        "image_bbox": {
+            "min_xy_px": {"x": float(bbox_min[0]), "y": float(bbox_min[1])},
+            "max_xy_px": {"x": float(bbox_max[0]), "y": float(bbox_max[1])},
+            "edge_margin_px": edge_margin_px,
+            "bbox_area_ratio": bbox_area_ratio,
+            "center_xy_normalized": {
+                "x": float(center[0] / max(width, 1)),
+                "y": float(center[1] / max(height, 1)),
+            },
+        },
+        "board_quality_warnings": list(
+            board_diagnostics.get("quality_warnings", []) or []
+        ),
+    }
+    if edge_margin_px < float(config.extraction_min_edge_margin_px):
+        quality_report["status"] = "rejected"
+        quality_report["skip_reason"] = "image_board_too_close_to_edge"
+        return quality_report
+    if bbox_area_ratio < float(config.extraction_min_bbox_area_ratio):
+        quality_report["status"] = "rejected"
+        quality_report["skip_reason"] = "image_board_too_small"
+        return quality_report
+    plane_residual = board_diagnostics.get("plane_residual_rmse_m")
+    if plane_residual is not None and float(plane_residual) > float(
+        config.extraction_max_plane_residual_rmse_m
+    ):
+        quality_report["status"] = "rejected"
+        quality_report["skip_reason"] = "plane_residual_rmse_high"
+        return quality_report
+    if (
+        bool(config.extraction_reject_board_geometry_warnings)
+        and quality_report["board_quality_warnings"]
+    ):
+        quality_report["status"] = "rejected"
+        quality_report["skip_reason"] = "board_geometry_quality_warning"
+        return quality_report
+    quality_report["status"] = "accepted"
+    return quality_report
 
 
 def _load_reference_dataset(
@@ -259,13 +710,32 @@ def _load_reference_dataset(
             extraction_entries.append(entry)
             continue
         object_points, board_diagnostics = _extract_lidar_board_points(
-            pcd, board_template, config
+            pcd,
+            board_template,
+            np.asarray(image_points, dtype=float),
+            camera_matrix,
+            camera_distortion,
+            config,
         )
         entry["board_diagnostics"] = board_diagnostics
         if object_points is None:
             entry["status"] = "skipped"
             entry["skip_reason"] = board_diagnostics.get(
                 "skip_reason", "board_geometry_unavailable"
+            )
+            extraction_entries.append(entry)
+            continue
+        sample_quality = _assess_pose_sample_quality(
+            np.asarray(image_points, dtype=float),
+            (int(image.shape[1]), int(image.shape[0])),
+            board_diagnostics,
+            config,
+        )
+        entry["sample_quality"] = sample_quality
+        if sample_quality.get("status") != "accepted":
+            entry["status"] = "skipped"
+            entry["skip_reason"] = str(
+                sample_quality.get("skip_reason", "sample_quality_rejected")
             )
             extraction_entries.append(entry)
             continue
@@ -281,7 +751,10 @@ def _load_reference_dataset(
                 image_size_wh=(int(image.shape[1]), int(image.shape[0])),
                 image_points=np.asarray(image_points, dtype=float),
                 object_points=np.asarray(object_points, dtype=float),
-                metadata={"board_diagnostics": board_diagnostics},
+                metadata={
+                    "board_diagnostics": board_diagnostics,
+                    "sample_quality": sample_quality,
+                },
             )
         )
         extraction_entries.append(entry)
@@ -300,15 +773,26 @@ def _load_reference_dataset(
             "config_path": str(Path(config_path).expanduser().resolve()),
             "data_directory": str(data_directory),
             "extractor": "checkerboard_reference_based",
-            "orientation_assumption": "gravity_projected_vertical",
+            "orientation_assumption": "candidate_resolved_plane_axes",
+            "board_geometry_strategy": "gravity_pca_hypotheses_plus_ippe_consistency",
+            "board_template_extent_xy_m": {
+                "x": float(np.ptp(board_template[:, 0])),
+                "y": float(np.ptp(board_template[:, 1])),
+            },
         },
     )
     extraction_report = {
         "pairing_summary": pairing_summary,
         "accepted_pose_count": len(observations),
+        "accepted_pair_ratio": (
+            0.0
+            if pairing_summary["paired_count"] <= 0
+            else float(len(observations) / pairing_summary["paired_count"])
+        ),
         "rejected_pose_count": int(
             sum(1 for item in extraction_entries if item["status"] != "accepted")
         ),
+        "skip_reason_counts": _summarize_skip_reasons(extraction_entries),
         "entries": extraction_entries,
     }
     return dataset, config, config_payload, extraction_report
@@ -389,6 +873,173 @@ def _compute_rms(params: np.ndarray, dataset: ReferenceCalibrationDataset) -> fl
     if residuals.size == 0:
         return float("inf")
     return float(np.sqrt(np.mean(residuals**2)))
+
+
+def _resolve_geometry_candidate_for_observation(
+    observation: ReferencePoseObservation,
+    camera_matrix: np.ndarray,
+    camera_distortion: np.ndarray,
+    seed_transform: np.ndarray,
+) -> tuple[ReferencePoseObservation, dict[str, Any]]:
+    diagnostics = dict(observation.metadata.get("board_diagnostics", {}) or {})
+    raw_candidates = diagnostics.get("_geometry_candidates") or []
+    if not raw_candidates:
+        return observation, {
+            "pose_id": observation.pose_id,
+            "candidate_count": 0,
+            "selected_source": diagnostics.get("orientation_source"),
+            "changed": False,
+            "status": "no_candidates",
+        }
+
+    selected_candidate = None
+    selected_score = float("inf")
+    selected_summary = None
+    for candidate in raw_candidates:
+        candidate_object_points = np.asarray(candidate["object_points"], dtype=float)
+        candidate_transform, reprojection_rms = _solve_pose_transform(
+            candidate_object_points,
+            observation.image_points,
+            camera_matrix,
+            camera_distortion,
+        )
+        if candidate_transform is None or reprojection_rms is None:
+            continue
+        delta = transform_delta_metrics(seed_transform, candidate_transform)
+        summary = dict(candidate["summary"])
+        summary["seed_delta"] = delta
+        score = (
+            float(reprojection_rms)
+            + 0.25 * float(delta["rotation_deg"])
+            + 2.0 * float(delta["translation_norm_m"])
+            + 0.5 * float(summary.get("extent_penalty", 0.0))
+        )
+        if score < selected_score:
+            selected_score = score
+            selected_candidate = candidate_object_points
+            selected_summary = summary
+    if selected_candidate is None or selected_summary is None:
+        return observation, {
+            "pose_id": observation.pose_id,
+            "candidate_count": int(len(raw_candidates)),
+            "selected_source": diagnostics.get("orientation_source"),
+            "changed": False,
+            "status": "candidate_resolution_failed",
+        }
+
+    previous_summary = diagnostics.get("selected_candidate_provisional", {}) or {}
+    changed = (
+        previous_summary.get("source") != selected_summary.get("source")
+        or bool(previous_summary.get("swap_axes"))
+        != bool(selected_summary.get("swap_axes"))
+        or int(previous_summary.get("sign_x", 0))
+        != int(selected_summary.get("sign_x", 0))
+        or int(previous_summary.get("sign_y", 0))
+        != int(selected_summary.get("sign_y", 0))
+    )
+    diagnostics["selected_candidate"] = dict(selected_summary)
+    diagnostics["orientation_source"] = selected_summary.get("source")
+    metadata = dict(observation.metadata)
+    metadata["board_diagnostics"] = diagnostics
+    return (
+        ReferencePoseObservation(
+            pose_id=observation.pose_id,
+            image_path=observation.image_path,
+            pcd_path=observation.pcd_path,
+            image_size_wh=observation.image_size_wh,
+            image_points=np.asarray(observation.image_points, dtype=float),
+            object_points=np.asarray(selected_candidate, dtype=float),
+            metadata=metadata,
+        ),
+        {
+            "pose_id": observation.pose_id,
+            "candidate_count": int(len(raw_candidates)),
+            "selected_source": selected_summary.get("source"),
+            "selected_swap_axes": bool(selected_summary.get("swap_axes")),
+            "selected_signs": {
+                "x": int(selected_summary.get("sign_x", 0)),
+                "y": int(selected_summary.get("sign_y", 0)),
+            },
+            "score": float(selected_score),
+            "changed": bool(changed),
+            "status": "resolved",
+        },
+    )
+
+
+def _resolve_board_geometry_candidates(
+    dataset: ReferenceCalibrationDataset,
+    config: ReferenceCalibrationConfig,
+) -> tuple[ReferenceCalibrationDataset, dict[str, Any] | None]:
+    candidate_pose_count = 0
+    for observation in dataset.observations:
+        board_diagnostics = observation.metadata.get("board_diagnostics", {}) or {}
+        if board_diagnostics.get("_geometry_candidates"):
+            candidate_pose_count += 1
+    if candidate_pose_count <= 0:
+        return dataset, None
+
+    if dataset.initial_transform is not None:
+        seed_transform = np.asarray(dataset.initial_transform, dtype=float)
+        seed_source = "config_initial_transform"
+    else:
+        seed_transform, _ = _select_initial_transform(dataset)
+        seed_source = "best_single_pose_ippe"
+
+    current_dataset = dataset
+    rounds = []
+    for iteration in range(2):
+        resolved_observations = []
+        resolution_rows = []
+        for observation in current_dataset.observations:
+            resolved_observation, resolution_row = (
+                _resolve_geometry_candidate_for_observation(
+                    observation,
+                    current_dataset.camera_matrix,
+                    current_dataset.camera_distortion,
+                    seed_transform,
+                )
+            )
+            resolved_observations.append(resolved_observation)
+            resolution_rows.append(resolution_row)
+        changed_count = int(sum(1 for row in resolution_rows if row.get("changed")))
+        current_dataset = ReferenceCalibrationDataset(
+            parent_frame=current_dataset.parent_frame,
+            child_frame=current_dataset.child_frame,
+            camera_matrix=np.asarray(current_dataset.camera_matrix, dtype=float),
+            camera_distortion=np.asarray(
+                current_dataset.camera_distortion, dtype=float
+            ),
+            observations=resolved_observations,
+            initial_transform=current_dataset.initial_transform,
+            metadata=dict(current_dataset.metadata),
+        )
+        optimized_transform, _ = _optimize_dataset(
+            current_dataset, config, seed_transform
+        )
+        rounds.append(
+            {
+                "iteration": iteration + 1,
+                "seed_source": (
+                    seed_source if iteration == 0 else "optimized_previous_round"
+                ),
+                "changed_pose_count": changed_count,
+                "selected": resolution_rows,
+                "seed_transform": np.asarray(seed_transform, dtype=float).tolist(),
+                "optimized_transform": np.asarray(
+                    optimized_transform, dtype=float
+                ).tolist(),
+            }
+        )
+        seed_transform = optimized_transform
+        seed_source = "optimized_previous_round"
+        if changed_count <= 0:
+            break
+    return current_dataset, {
+        "candidate_pose_count": int(candidate_pose_count),
+        "iterations": rounds,
+        "final_seed_transform": np.asarray(seed_transform, dtype=float).tolist(),
+    }
 
 
 def _select_initial_transform(
@@ -688,6 +1339,9 @@ def run_reference_calibration_from_config(
     dataset, config, raw_config, extraction_report = _load_reference_dataset(
         config_path
     )
+    dataset, geometry_resolution = _resolve_board_geometry_candidates(dataset, config)
+    if geometry_resolution is not None:
+        extraction_report["geometry_resolution"] = geometry_resolution
     if len(dataset.observations) < int(config.min_pose_count):
         raise RuntimeError(
             f"Insufficient valid poses ({len(dataset.observations)}). Need at least {config.min_pose_count}."

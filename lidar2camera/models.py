@@ -37,6 +37,10 @@ class ReferenceCalibrationConfig:
     board_square_size_m: float = 0.05
     plane_distance_threshold_m: float = 0.02
     min_plane_points: int = 500
+    extraction_min_bbox_area_ratio: float = 0.0008
+    extraction_min_edge_margin_px: float = 8.0
+    extraction_max_plane_residual_rmse_m: float = 0.02
+    extraction_reject_board_geometry_warnings: bool = True
     min_pose_count: int = 5
     optimization_loss: str = "huber"
     optimization_f_scale: float = 1.0
@@ -47,3 +51,12 @@ class ReferenceCalibrationConfig:
     metrics_warning_repeatability_translation_m: float = 0.05
     metrics_warning_repeatability_rotation_deg: float = 1.0
     metrics_min_leave_one_out_pose_count: int = 5
+    metrics_warning_image_coverage_min_cells: int = 4
+    metrics_warning_image_horizontal_span_ratio: float = 0.35
+    metrics_warning_image_vertical_span_ratio: float = 0.35
+    metrics_warning_depth_span_m: float = 0.3
+    metrics_warning_tilt_span_deg: float = 8.0
+    metrics_warning_plane_residual_rmse_m: float = 0.02
+    metrics_warning_board_extent_ratio_min: float = 0.5
+    metrics_warning_board_extent_ratio_max: float = 4.0
+    metrics_warning_accepted_pair_ratio: float = 0.5

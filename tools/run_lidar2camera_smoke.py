@@ -16,20 +16,22 @@ import argparse
 import numpy as np
 
 # Ensure repo root is importable when this script is executed from tools/
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 try:
     from scipy.spatial.transform import Rotation as R
-    # least_squares is invoked internally by the pipeline
-    from scipy.optimize import least_squares
 except Exception:
     print("[SKIP] scipy is not available — install scipy to run the smoke test.")
     sys.exit(0)
 
 from lidar2camera.reference_pipeline import _build_board_template, _optimize_dataset
-from lidar2camera.models import ReferenceCalibrationDataset, ReferencePoseObservation, ReferenceCalibrationConfig
+from lidar2camera.models import (
+    ReferenceCalibrationDataset,
+    ReferencePoseObservation,
+    ReferenceCalibrationConfig,
+)
 from lidar2camera.metrics import transform_delta_metrics
 
 
@@ -93,7 +95,9 @@ def run_smoke(pattern_size=(4, 3), square_size=0.05, num_poses=5):
     initial_transform = true_T
 
     print("[INFO] Running optimizer on synthetic dataset...")
-    final_transform, optimization = _optimize_dataset(dataset, config, initial_transform)
+    final_transform, optimization = _optimize_dataset(
+        dataset, config, initial_transform
+    )
 
     delta = transform_delta_metrics(true_T, final_transform)
     print("\n[RESULT] True -> Recovered delta:")
@@ -102,17 +106,26 @@ def run_smoke(pattern_size=(4, 3), square_size=0.05, num_poses=5):
     print(f"  distinct_solution_indicator: {optimization.get('success', False)}")
 
     # Simple pass/fail heuristic
-    if delta['translation_norm_m'] < 0.05 and delta['rotation_deg'] < 5.0:
-        print("[PASS] Smoke test passed — recovered transform is close to ground truth.")
+    if delta["translation_norm_m"] < 0.05 and delta["rotation_deg"] < 5.0:
+        print(
+            "[PASS] Smoke test passed — recovered transform is close to ground truth."
+        )
         return 0
     else:
         print("[FAIL] Smoke test failed — result deviates from ground truth.")
         return 2
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Run a lightweight lidar2camera smoke test on synthetic data.")
-    parser.add_argument("--poses", type=int, default=5, help="Number of synthetic board poses to generate")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run a lightweight lidar2camera smoke test on synthetic data."
+    )
+    parser.add_argument(
+        "--poses",
+        type=int,
+        default=5,
+        help="Number of synthetic board poses to generate",
+    )
     args = parser.parse_args()
     rc = run_smoke(num_poses=args.poses)
     sys.exit(rc)

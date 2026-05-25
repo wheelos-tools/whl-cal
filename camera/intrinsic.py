@@ -60,6 +60,7 @@ class CameraCalibrator:
         self.feedback_text = "Searching for board..."
         self.result_canvas = None
         self.last_raw_frame = None
+        self.capture_runtime_info = None
 
         self._reset_auto_capture_state()
 
@@ -78,6 +79,154 @@ class CameraCalibrator:
         self.state = "CAPTURING"
         print("\n[INFO] Session reset and ready.")
 
+    def _display_size(self):
+        return (
+            int(self.cfg.get("window_width", 1280)),
+            int(self.cfg.get("window_height", 720)),
+        )
+
+    def _capture_config(self):
+        capture_cfg = self.cfg.get("capture", {}) or {}
+        width = capture_cfg.get("width", self.cfg.get("capture_width"))
+        height = capture_cfg.get("height", self.cfg.get("capture_height"))
+        return {
+            "force_resolution": bool(
+                capture_cfg.get(
+                    "force_resolution",
+                    self.cfg.get("force_capture_resolution", False),
+                )
+            ),
+            "width": None if width in (None, "") else int(width),
+            "height": None if height in (None, "") else int(height),
+            "fourcc": capture_cfg.get("fourcc"),
+        }
+
+    def _apply_capture_settings(self, cap):
+        capture_cfg = self._capture_config()
+        fourcc = capture_cfg.get("fourcc")
+        if isinstance(fourcc, str) and len(fourcc) == 4:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        if (
+            capture_cfg["force_resolution"]
+            and capture_cfg["width"] is not None
+            and capture_cfg["height"] is not None
+        ):
+            print(
+                "[INFO] Requesting capture resolution "
+                f"{capture_cfg['width']}x{capture_cfg['height']}."
+            )
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, capture_cfg["width"])
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, capture_cfg["height"])
+        else:
+            print(
+                "[INFO] Capture resolution is not forced. "
+                "Using the camera's native/as-is output avoids accidental FOV crop."
+            )
+
+    def _build_capture_runtime_info(self, cap, frame):
+        capture_cfg = self._capture_config()
+        display_w, display_h = self._display_size()
+        actual_h, actual_w = frame.shape[:2]
+        reported_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        reported_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        warnings = []
+        if capture_cfg["force_resolution"]:
+            warnings.append(
+                "Forced capture resolution can crop some sensors before the 3x3 grid is drawn."
+            )
+            warnings.append(
+                "If the live grid looks clipped, disable capture.force_resolution or switch to a native mode such as 4:3."
+            )
+        if abs((display_w / max(display_h, 1)) - (actual_w / max(actual_h, 1))) > 0.05:
+            warnings.append(
+                "Display window aspect differs from capture; the app letterboxes for display, but that is not sensor crop."
+            )
+        return {
+            "camera_index": int(self.cfg["camera_index"]),
+            "requested_capture_resolution": (
+                None
+                if capture_cfg["width"] is None or capture_cfg["height"] is None
+                else {
+                    "width": int(capture_cfg["width"]),
+                    "height": int(capture_cfg["height"]),
+                }
+            ),
+            "force_capture_resolution": bool(capture_cfg["force_resolution"]),
+            "fourcc": capture_cfg.get("fourcc"),
+            "actual_capture_resolution": {
+                "width": int(actual_w),
+                "height": int(actual_h),
+            },
+            "reported_capture_resolution": {
+                "width": int(reported_w),
+                "height": int(reported_h),
+            },
+            "display_resolution": {
+                "width": int(display_w),
+                "height": int(display_h),
+            },
+            "warnings": warnings,
+        }
+
+    def _log_capture_runtime_info(self, runtime_info):
+        actual = runtime_info["actual_capture_resolution"]
+        display = runtime_info["display_resolution"]
+        requested = runtime_info.get("requested_capture_resolution")
+        print(
+            "[INFO] Live capture resolution:",
+            f"{actual['width']}x{actual['height']}",
+            "| display window:",
+            f"{display['width']}x{display['height']}",
+        )
+        if requested is not None:
+            print(
+                "[INFO] Requested capture resolution:",
+                f"{requested['width']}x{requested['height']}",
+            )
+        for warning in runtime_info.get("warnings", []):
+            print("[WARN]", warning)
+
+    def _draw_capture_runtime_info(self, image):
+        runtime_info = self.capture_runtime_info or {}
+        actual = runtime_info.get("actual_capture_resolution", {})
+        display = runtime_info.get("display_resolution", {})
+        requested = runtime_info.get("requested_capture_resolution")
+        lines = [
+            (
+                "Capture "
+                f"{actual.get('width', 0)}x{actual.get('height', 0)}"
+                f" | Display {display.get('width', 0)}x{display.get('height', 0)}"
+            ),
+            (
+                "Forced capture: "
+                + (
+                    "ON"
+                    if runtime_info.get("force_capture_resolution")
+                    else "OFF (preferred for full FOV)"
+                )
+            ),
+        ]
+        if requested is not None:
+            lines.append(
+                "Requested capture "
+                f"{requested.get('width', 0)}x{requested.get('height', 0)}"
+            )
+        warnings = runtime_info.get("warnings", [])
+        if warnings:
+            lines.extend(warnings[:2])
+
+        start_y = max(30, image.shape[0] - 140)
+        for index, line in enumerate(lines):
+            color = (0, 180, 255) if index >= 2 else (255, 255, 255)
+            self._draw_text(
+                image,
+                line,
+                (30, start_y + index * 30),
+                color=color,
+                scale=0.7,
+                thickness=2,
+            )
+
     def run(self):
         """Interactive GUI capture mode (existing behaviour)."""
         print("[INFO] Industrial Calibration Tool (Grid Overlay Stable Edition)")
@@ -86,17 +235,12 @@ class CameraCalibrator:
             print("[ERROR] Cannot open camera index", self.cfg["camera_index"])
             return
 
-        # Try to request the display resolution from the camera (may be ignored by some drivers)
-        req_w = int(self.cfg.get("window_width", 1280))
-        req_h = int(self.cfg.get("window_height", 720))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, req_w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, req_h)
+        self._apply_capture_settings(cap)
 
         # Force window size
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(
-            self.window_name, self.cfg.get("window_width", 1280), self.cfg.get("window_height", 720)
-        )
+        win_w, win_h = self._display_size()
+        cv2.resizeWindow(self.window_name, win_w, win_h)
 
         h, w, grid_overlay = None, None, None
         frame_count = 0
@@ -111,13 +255,8 @@ class CameraCalibrator:
 
             if h is None:
                 h, w = frame.shape[:2]
-                # Log the actual captured frame size (helps debug capture vs window size)
-                print("[DEBUG] first captured frame.shape:", frame.shape)
-                print(
-                    "[DEBUG] cap reported (w,h):",
-                    int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-                )
+                self.capture_runtime_info = self._build_capture_runtime_info(cap, frame)
+                self._log_capture_runtime_info(self.capture_runtime_info)
                 grid_overlay = self._generate_grid_overlay(w, h)
 
             display = frame.copy()
@@ -138,6 +277,7 @@ class CameraCalibrator:
 
                 # 3. Design the dynamic UI (green completed grid and text).
                 self._draw_dynamic_ui(display, w, h)
+                self._draw_capture_runtime_info(display)
 
             elif self.state == "SHOWING_RESULT":
                 if self.result_canvas is not None:
@@ -145,11 +285,12 @@ class CameraCalibrator:
 
             elif self.state == "VALIDATING":
                 if self.mtx is not None:
-                    undist = cv2.undistort(frame, self.mtx, self.dist, None)
+                    undist, preview_info = self._undistort_for_preview(frame)
+                    undist = self._draw_valid_roi(undist, preview_info)
                     display = np.hstack((frame, undist))
                     self._draw_text(
                         display,
-                        "Left: Distorted | Right: Undistorted",
+                        f"Left: Distorted | Right: Undistorted alpha={preview_info['alpha']:.2f} (green ROI = valid crop)",
                         (50, 50),
                         (0, 255, 0),
                     )
@@ -160,9 +301,6 @@ class CameraCalibrator:
                 )
 
             # Render to window: preserve aspect ratio and center-pad to avoid distortion
-            win_w = int(self.cfg.get("window_width", 1280))
-            win_h = int(self.cfg.get("window_height", 720))
-
             src_h, src_w = display.shape[:2]
             if src_w == 0 or src_h == 0:
                 # fallback
@@ -196,7 +334,9 @@ class CameraCalibrator:
         cap.release()
         cv2.destroyAllWindows()
 
-    def run_headless(self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")) -> int:
+    def run_headless(
+        self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")
+    ) -> int:
         """Process a directory of images to run calibration without GUI.
 
         Returns 0 on success, 1 if no images found, 2 on calibration failure.
@@ -224,7 +364,9 @@ class CameraCalibrator:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             # direct detection (no resizing) for headless runs
             found, corners = cv2.findChessboardCorners(
-                gray, self.pattern_size, cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+                gray,
+                self.pattern_size,
+                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE,
             )
             if not found:
                 continue
@@ -246,7 +388,9 @@ class CameraCalibrator:
                 break
 
         if len(self.objpoints) < self.min_total_samples:
-            print(f"[ERROR] Not enough valid samples ({len(self.objpoints)}/{self.min_total_samples})")
+            print(
+                f"[ERROR] Not enough valid samples ({len(self.objpoints)}/{self.min_total_samples})"
+            )
             return 2
 
         # run calibration
@@ -258,6 +402,66 @@ class CameraCalibrator:
         else:
             print("[FAIL] Headless calibration failed.")
             return 2
+
+    def _undistortion_preview_config(self):
+        return self.cfg.get("undistortion_preview", {}) or {}
+
+    def _build_undistortion_model(self, image_size_wh, alpha=None):
+        if self.mtx is None or self.dist is None:
+            raise RuntimeError(
+                "Camera must be calibrated before building undistortion preview."
+            )
+        preview_cfg = self._undistortion_preview_config()
+        preview_alpha = float(preview_cfg.get("alpha", 1.0) if alpha is None else alpha)
+        width, height = map(int, image_size_wh)
+        center_principal_point = bool(preview_cfg.get("center_principal_point", False))
+        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+            self.mtx,
+            self.dist,
+            (width, height),
+            preview_alpha,
+            (width, height),
+            centerPrincipalPoint=center_principal_point,
+        )
+        x, y, roi_w, roi_h = [int(value) for value in roi]
+        preview_info = {
+            "alpha": float(preview_alpha),
+            "center_principal_point": center_principal_point,
+            "optimized_camera_matrix": np.asarray(
+                new_camera_matrix, dtype=float
+            ).tolist(),
+            "valid_roi": {
+                "x": x,
+                "y": y,
+                "width": roi_w,
+                "height": roi_h,
+            },
+        }
+        return new_camera_matrix, preview_info
+
+    def _undistort_for_preview(self, image, alpha=None):
+        new_camera_matrix, preview_info = self._build_undistortion_model(
+            (image.shape[1], image.shape[0]), alpha=alpha
+        )
+        undistorted = cv2.undistort(image, self.mtx, self.dist, None, new_camera_matrix)
+        return undistorted, preview_info
+
+    def _draw_valid_roi(self, image, preview_info):
+        roi = (preview_info or {}).get("valid_roi") or {}
+        x = int(roi.get("x", 0))
+        y = int(roi.get("y", 0))
+        roi_w = int(roi.get("width", 0))
+        roi_h = int(roi.get("height", 0))
+        annotated = image.copy()
+        if roi_w > 0 and roi_h > 0:
+            cv2.rectangle(
+                annotated,
+                (x, y),
+                (x + roi_w - 1, y + roi_h - 1),
+                (0, 255, 0),
+                2,
+            )
+        return annotated
 
     def _draw_dynamic_ui(self, display, w, h):
         """Draw dynamically updating UI elements: completed green grid and status text."""
@@ -389,26 +593,63 @@ class CameraCalibrator:
             self.last_raw_frame = np.zeros((h, w, 3), dtype=np.uint8)
 
         dist_img = self.last_raw_frame.copy()
-        und = cv2.undistort(dist_img, self.mtx, self.dist, None)
+        und, preview_info = self._undistort_for_preview(dist_img)
+        und = self._draw_valid_roi(und, preview_info)
         canvas[:, 20 : 20 + w] = dist_img
         canvas[:, 40 + w : 40 + 2 * w] = und
         self._draw_text(canvas, "Distorted", (50, 50), (200, 200, 255))
-        self._draw_text(canvas, "Undistorted", (w + 80, 50), (180, 255, 180))
+        self._draw_text(
+            canvas,
+            f"Undistorted alpha={preview_info['alpha']:.2f}",
+            (w + 80, 50),
+            (180, 255, 180),
+        )
+        self._draw_text(
+            canvas,
+            "Green ROI shows the all-valid crop window",
+            (w + 80, 95),
+            (180, 255, 180),
+        )
         cv2.imwrite("comparison_view.png", canvas)
         print("[SAVED] comparison_view.png")
         self.result_canvas = canvas
 
-    def _draw_text(self, img, text, pos, color=(255, 255, 255)):
-        cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+    def _draw_text(
+        self,
+        img,
+        text,
+        pos,
+        color=(255, 255, 255),
+        scale=1.0,
+        thickness=2,
+    ):
+        cv2.putText(
+            img,
+            text,
+            pos,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            color,
+            thickness,
+        )
 
     def _save_results(self, w, h, error):
         fname = f"calibration_{datetime.now():%Y%m%d_%H%M%S}.yaml"
+        _, preview_info = self._build_undistortion_model((w, h))
+        distortion = np.asarray(self.dist, dtype=float).reshape(-1)
         data = dict(
             time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             image_width=w,
             image_height=h,
             camera_matrix=dict(rows=3, cols=3, data=self.mtx.tolist()),
-            distortion_coefficients=dict(rows=1, cols=5, data=self.dist.tolist()[0]),
+            distortion_model=str(self.cfg.get("distortion_model", "plumb_bob")),
+            distortion_coefficients=dict(
+                rows=1,
+                cols=int(distortion.size),
+                data=distortion.tolist(),
+            ),
+            capture_runtime=self.capture_runtime_info,
+            undistortion_preview=preview_info,
             avg_reprojection_error=float(error),
         )
         with open(fname, "w") as f:
@@ -421,8 +662,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="WheelOS Industrial Camera Calibrator")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--images-dir", default=None, help="Directory of images for headless calibration")
-    parser.add_argument("--pattern-size", default=None, help="Override pattern size as W,H (optional)")
+    parser.add_argument(
+        "--images-dir",
+        default=None,
+        help="Directory of images for headless calibration",
+    )
+    parser.add_argument(
+        "--pattern-size", default=None, help="Override pattern size as W,H (optional)"
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.config):
@@ -431,9 +678,17 @@ if __name__ == "__main__":
             window_name="Industrial Calibration Tool",
             window_width=1280,
             window_height=720,
+            capture={
+                "force_resolution": False,
+                "width": None,
+                "height": None,
+                "fourcc": None,
+            },
+            distortion_model="plumb_bob",
             pattern_size=[11, 8],
             square_size=0.025,
             optimization={"resize_factor": 0.5, "detection_interval": 2},
+            undistortion_preview={"alpha": 1.0, "center_principal_point": False},
             auto_capture_settings=dict(
                 grid_shape=[3, 3],
                 samples_per_grid=1,
