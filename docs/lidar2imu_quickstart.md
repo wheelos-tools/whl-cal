@@ -1,25 +1,54 @@
 ---
 audience: user
 stability: stable
-P26-04-27
+P26-05-25
 ---
 
+# LiDAR-to-IMU quick start
 
-# LiDAR-to-IMU Quick Start
+Before running this tool:
 
-Install:
+1. collect the Apollo bag with
+   [docs/apollo_data_collection.md](apollo_data_collection.md)
+2. confirm the bag contains LiDAR, pose, IMU, and TF channels
+3. review results with
+   [docs/calibration_review_guide.md](calibration_review_guide.md)
+4. use [docs/lidar2imu_design.md](lidar2imu_design.md) and
+   [docs/calibration_methodology.md](calibration_methodology.md) for tuning
+
+## What this tool needs
+
+| Item | Required | Notes |
+| --- | --- | --- |
+| Apollo `.record` directory or file | yes | or a prepared dataset manifest / standardized samples |
+| LiDAR topic | yes | one LiDAR topic to calibrate against IMU |
+| pose topic | yes | usually `/apollo/localization/pose` |
+| IMU topic | yes | default pipeline expects `/apollo/sensor/gnss/imu` |
+| `lidar -> imu` initial transform | recommended | required if the bag does not contain the static TF |
+
+Motion guidance:
+
+- include both left and right turns when possible
+- include acceleration and braking, not only cruising
+- include flat-road segments so ground extraction remains reliable
+
+## Install
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-Quick run:
+## Quick run
+
 ```bash
-lidar2imu-calibrate --input lidar2imu_samples.yaml --output-dir outputs/lidar2imu/run01
+lidar2imu-calibrate \
+  --input lidar2imu_samples.yaml \
+  --output-dir outputs/lidar2imu/run01
 ```
 
-Outputs follow the shared calibration paradigm:
+## Outputs follow the shared calibration paradigm
 
 1. **Data**: normalized samples, metadata, and data quality
 2. **Algorithm**: staged solver result
@@ -40,8 +69,45 @@ Core outputs:
 - `diagnostics/motion_residuals.csv`
 - `diagnostics/holdout_motion_residuals.csv`
 
-When one bag needs to feed both `lidar2imu` and `lidar2lidar`, first prepare a
+## Recommended Apollo bag contents
+
+- LiDAR `PointCloud2`
+- `/apollo/localization/pose`
+- `/apollo/sensor/gnss/imu`
+- `/tf_static`
+- optional `/tf`
+
+For traceability and localization auditing, it is usually better to keep all
+GNSS / IMU related channels by recording with `cyber_recorder record -a`.
+
+## Convert directly from an Apollo record
+
+```bash
+lidar2imu-convert-record \
+  --record-path /path/to/record \
+  --output-dir outputs/lidar2imu/run01 \
+  --profile baseline \
+  --calibrate
+```
+
+If the bag uses different topics, specify them explicitly:
+
+```bash
+lidar2imu-convert-record \
+  --record-path /path/to/record \
+  --output-dir outputs/lidar2imu/run01 \
+  --lidar-topic /apollo/sensor/your_lidar/PointCloud2 \
+  --pose-topic /apollo/localization/pose \
+  --imu-topic /apollo/sensor/gnss/imu \
+  --profile baseline \
+  --calibrate
+```
+
+## Reuse a shared raw-LiDAR prepared dataset
+
+When one bag needs to feed both `lidar2imu` and `lidar2lidar`, first prepare the
 shared raw-LiDAR-only dataset:
+
 ```bash
 lidar2lidar-rig-dataset \
   --record-path /path/to/record \
@@ -58,6 +124,7 @@ lidar2lidar-rig-dataset \
 ```
 
 Then run conversion / calibration from that prepared dataset:
+
 ```bash
 lidar2imu-convert-record \
   --prepared-dataset-yaml outputs/prepared/rig_run/diagnostics/prepared_rig_dataset.yaml \
@@ -66,8 +133,6 @@ lidar2imu-convert-record \
   --profile baseline \
   --calibrate
 ```
-
-See docs/lidar2imu_design.md for parameters.
 
 ## How to judge a result
 

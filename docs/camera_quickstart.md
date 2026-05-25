@@ -1,25 +1,39 @@
 ---
 audience: user
 stability: stable
-P26-04-27
+P26-05-25
 ---
 
+# Camera intrinsic quick start
 
-# Camera Intrinsic Quick Start
+Before running this tool:
 
-Install:
+1. If you are collecting through Apollo, read
+   [docs/apollo_data_collection.md](apollo_data_collection.md).
+2. For result review, keep
+   [docs/calibration_review_guide.md](calibration_review_guide.md) open.
+3. For design background and references, see
+   [docs/calibration_methodology.md](calibration_methodology.md).
+
+## What this tool needs
+
+| Item | Required | Notes |
+| --- | --- | --- |
+| calibration board images | yes | either from live capture or an exported image directory |
+| pattern size | yes | inner-corner count, for example `[11, 8]` |
+| square size | yes | meter unit |
+| fixed camera mode | yes | keep resolution / exposure / focus stable during capture |
+| Apollo bag | optional | useful for traceability, but the tool itself consumes live frames or image files |
+
+## Install
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install opencv-python numpy pyyaml
 ```
 
-Interactive:
-```bash
-python camera/intrinsic.py --config camera_config.yaml
-```
-
-Recommended capture-first config:
+## Recommended capture-first config
 
 ```yaml
 camera_index: 0
@@ -48,9 +62,9 @@ auto_capture_settings:
   stability_threshold: 2.0
 ```
 
-If the live 3x3 acquisition grid already looks clipped before calibration,
-check the capture config first. The tool now separates **capture resolution**
-from **display window size**:
+If the live 3x3 acquisition grid already looks clipped before calibration, check
+the capture config first. The tool separates **capture resolution** from
+**display window size**:
 
 ```yaml
 camera_index: 0
@@ -65,29 +79,43 @@ capture:
 
 Recommended practice:
 
-- Keep `capture.force_resolution: false` unless you have verified the camera's
-  native mode.
-- If you must force a mode, prefer a native sensor aspect ratio (commonly 4:3)
-  instead of forcing 1280x720 blindly.
-- Confirm native modes with `v4l2-ctl --list-formats-ext` before overriding
-  capture resolution.
-- The app overlays live capture diagnostics so you can distinguish **sensor
-  crop during acquisition** from **letterboxing in the display window**.
+- keep `capture.force_resolution: false` unless you have verified the camera's
+  native mode
+- if you must force a mode, prefer a native sensor aspect ratio instead of
+  forcing `1280x720` blindly
+- confirm native modes with `v4l2-ctl --list-formats-ext` before overriding
+- use the same mode you will deploy in production
 
-Recommended review order:
+## Quick runs
 
-1. Start with `capture.force_resolution: false`.
-2. Confirm the live 3x3 grid is fully visible before collecting any samples.
-3. Only if needed, switch to a verified native capture mode and retry.
-4. After calibration, inspect `comparison_view.png` plus the YAML's
-   `capture_runtime` and `undistortion_preview` fields.
+### Interactive live capture
 
-Headless (images dir):
 ```bash
-python camera/intrinsic.py --config tmp_config.yaml --images-dir /path/to/images --pattern-size 4,3
+python camera/intrinsic.py --config camera_config.yaml
 ```
 
-Outputs now include:
+### Headless validation from an image directory
+
+```bash
+python camera/intrinsic.py \
+  --config tmp_config.yaml \
+  --images-dir /path/to/images \
+  --pattern-size 4,3
+```
+
+If your images were originally recorded in Apollo, export them with your normal
+image-extraction workflow first. The intrinsic tool does not consume `.record`
+files directly.
+
+## Recommended review order
+
+1. read `*_diagnostics/data_quality.yaml`
+2. read `*_diagnostics/per_view_reprojection.csv`
+3. inspect `*_diagnostics/image_coverage_heatmap.png`
+4. inspect `comparison_view.png`
+5. inspect the calibration YAML's `capture_runtime` and `undistortion_preview`
+
+Outputs include:
 
 - `calibration_YYYYmmdd_HHMMSS.yaml`
 - `comparison_view.png`
@@ -101,24 +129,22 @@ Outputs now include:
   - `sample_records.csv`
   - `image_coverage_heatmap.png`
 
-The YAML now also records `distortion_model` plus an `undistortion_preview`
-section with `alpha`, `optimized_camera_matrix`, and the valid ROI. This helps
-distinguish "full-FOV undistortion preview" from the all-valid crop window when
-the display would otherwise look clipped.
+The YAML also records `distortion_model` plus an `undistortion_preview` section
+with `alpha`, `optimized_camera_matrix`, and the valid ROI.
 
-Review order:
+## Acceptance baseline
 
-1. Read `*_diagnostics/data_quality.yaml` instead of trusting only the mean error.
-2. Read `*_diagnostics/per_view_reprojection.csv` to catch long-tail bad views.
-3. Inspect `*_diagnostics/image_coverage_heatmap.png` to confirm the checkerboard covered multiple image regions.
-4. Inspect `comparison_view.png` and the YAML's `undistortion_preview`.
-5. Treat `radial_monotonicity: warning` as calibration failure, not as a cosmetic issue.
+- average reprojection error < `1.0 px`
+- per-view reprojection p95 < `1.5 px`
+- image coverage spans multiple grid cells, not only the center
+- radial distortion remains monotonic over the image radius
 
-Acceptance baseline:
+Treat `radial_monotonicity: warning` as calibration failure, not as a cosmetic
+issue.
 
-- avg reprojection error < 1.0 px
-- per-view reprojection p95 < 1.5 px
-- image coverage should span multiple grid cells, not only the center
-- radial distortion should remain monotonic over the image radius
+## Next docs
 
-See docs/lidar2camera_quickstart.md for extrinsic workflow.
+- LiDAR↔Camera extrinsic workflow:
+  [docs/lidar2camera_quickstart.md](lidar2camera_quickstart.md)
+- shared review guide:
+  [docs/calibration_review_guide.md](calibration_review_guide.md)

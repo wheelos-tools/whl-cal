@@ -1,26 +1,70 @@
 ---
 audience: user
 stability: stable
-P26-04-27
+P26-05-25
 ---
 
+# LiDAR↪Camera quick start
 
-# LiDAR↪Camera Quick Start
+Before running this tool:
 
-Install:
+1. collect the Apollo session with
+   [docs/apollo_data_collection.md](apollo_data_collection.md)
+2. prepare paired `image + .pcd` files from that session
+3. review results with
+   [docs/calibration_review_guide.md](calibration_review_guide.md)
+4. read the design details in
+   [docs/lidar2camera_design.md](lidar2camera_design.md) and
+   [docs/calibration_methodology.md](calibration_methodology.md)
+
+## What this tool needs
+
+| Item | Required | Notes |
+| --- | --- | --- |
+| paired images and `.pcd` files | yes | current tool input is a prepared directory, not a raw Apollo bag |
+| camera intrinsics | yes | 3x3 intrinsics matrix |
+| camera distortion | yes | 5-parameter distortion vector |
+| checkerboard pattern size | yes | inner-corner count |
+| checkerboard square size | yes | meter unit |
+| output directory | yes | where `calibrated_tf.yaml` and diagnostics will be written |
+
+## Apollo recording prerequisites
+
+For a good bag, record at least:
+
+- one camera image topic
+- one LiDAR `PointCloud2` topic
+- `/tf_static`
+- optional `/tf`
+
+Capture guidance:
+
+- keep the board fully visible in both modalities
+- collect 15-30 poses if possible
+- change image region, distance, and tilt across poses
+- avoid motion blur, severe clipping, or partial board occlusion
+
+Current limitation: the repo does **not** yet provide a direct
+`.record -> lidar2camera dataset` exporter. After recording in Apollo, export
+synchronized image / point-cloud pairs with your existing dataset-preparation
+flow.
+
+## Install
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
 
-Quick run:
+## Quick run
+
 ```bash
 lidar2camera-calibrate --write-default-config --config config.yaml
 lidar2camera-calibrate --config config.yaml
 ```
 
-Recommended minimal config shape:
+## Recommended minimal config shape
 
 ```yaml
 camera:
@@ -61,9 +105,23 @@ output:
   directory: outputs/lidar2camera/run01
 ```
 
-Outputs: `calibrated_tf.yaml`, `metrics.yaml`, `diagnostics/`
+## Minimal runtime self-check
 
-Production-style review artifacts now include:
+If you want a fast pipeline smoke test before touching real data:
+
+```bash
+PYTHONPATH=. python3 tools/run_lidar2camera_smoke.py --poses 5
+```
+
+## Outputs
+
+Core outputs:
+
+- `calibrated_tf.yaml`
+- `metrics.yaml`
+- `diagnostics/`
+
+Production-style review artifacts:
 
 - `metrics.yaml.summary.final_acceptance_status`
 - `metrics.yaml.summary.release_ready`
@@ -75,50 +133,33 @@ Production-style review artifacts now include:
 - `diagnostics/visualization_index.yaml`
 - `diagnostics/extraction_entries.csv`
 - `diagnostics/per_pose_reprojection.csv`
-- `diagnostics/leave_one_out_trials.csv` (when L1O is available)
-- `diagnostics/geometry_resolution.csv` (when board-geometry hypotheses were resolved)
+- `diagnostics/leave_one_out_trials.csv`
+- `diagnostics/geometry_resolution.csv`
 - `diagnostics/image_coverage_heatmap.png`
 - `diagnostics/pose_diversity_plot.png`
 
-Acceptance heuristics: final_rms_px ≤ 1.0 px; pose p95 ≤ 1.5 px; L1O p95 ≤ 1.5 px.
-Release should follow `final_acceptance`, not solver convergence alone.
+## How to judge a result
 
-Release review now also expects:
+Acceptance heuristics:
 
-- broad image-region coverage across the checkerboard poses
-- enough depth / tilt diversity across accepted poses
-- LiDAR-side board support that looks like a board-sized plane, not a large wall
-  patch
-- successful `diagnostics/extraction.yaml.geometry_resolution` so the selected
-  board orientation is consistent across poses
-- clean `geometry_resolution` status in `metrics.yaml.final_acceptance`
+- `final_rms_px <= 1.0 px`
+- pose reprojection p95 `<= 1.5 px`
+- holdout reprojection p95 `<= 1.5 px`
+- accepted pair ratio stays healthy
+- image coverage, pose diversity, and board geometry all pass
+- geometry resolution completes cleanly
 
-If these gates fail, the run should remain review-only even when the optimizer
-converges and aggregate RMS looks good.
+Recommended review order:
 
-Recommended run/review order:
+1. read `diagnostics/standardized_data.yaml`
+2. read `diagnostics/extraction.yaml`
+3. read `diagnostics/geometry_resolution.csv`
+4. read `metrics.yaml`
+5. read `diagnostics/data_quality.yaml`
+6. read `diagnostics/acceptance_report.yaml`
+7. open `diagnostics/image_coverage_heatmap.png` and
+   `diagnostics/pose_diversity_plot.png`
+8. confirm the overlay / geometry evidence does not contradict the metrics
 
-1. Prepare image + PCD pairs with matching stems in `data_directory`.
-2. Confirm camera intrinsics were calibrated with the same camera mode that
-   will be used in production.
-3. Run `lidar2camera-calibrate --config config.yaml`.
-4. Read `diagnostics/standardized_data.yaml` to confirm accepted vs rejected
-   sample counts.
-5. Read `diagnostics/extraction.yaml` and `diagnostics/geometry_resolution.csv`
-   to confirm multi-hypothesis board geometry resolution converged cleanly.
-6. Read `diagnostics/optimization.yaml` and confirm the stage summary is sane.
-7. Read `diagnostics/data_quality.yaml` and `diagnostics/acceptance_report.yaml`.
-8. Open `diagnostics/image_coverage_heatmap.png`,
-   `diagnostics/pose_diversity_plot.png`, and the overlay artifact before
-   promoting any result.
-
-Treat the run as release-ready only when:
-
-- `metrics.yaml.summary.release_ready: true`
-- `diagnostics/data_quality.yaml.status: pass`
-- accepted pair ratio is healthy
-- image coverage / pose diversity / board geometry all pass
-- geometry resolution completed without unresolved candidate failures
-- visual overlay does not contradict the numeric metrics
-
-See docs/lidar2camera_design.md for details.
+If geometry resolution, image coverage, or pose diversity fails, keep the run
+review-only even when the optimizer converges.

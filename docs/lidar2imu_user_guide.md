@@ -9,6 +9,13 @@ P26-04-27
 
 本文档面向直接使用 `whl-cal` 进行 `lidar2imu` 标定的用户，目标是用**一个文档**说明完整操作流程：准备数据、检查 bag、执行标定、查看结果、处理常见失败。
 
+配套文档：
+
+- Apollo 侧准备与录包： [docs/apollo_data_collection.md](apollo_data_collection.md)
+- 通用指标 / 可视化复核： [docs/calibration_review_guide.md](calibration_review_guide.md)
+- 方法设计 / SOTA / 参考资料：
+  [docs/calibration_methodology.md](calibration_methodology.md)
+
 ## 1. 标定目标
 
 `lidar2imu` 用于估计：

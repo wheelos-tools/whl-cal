@@ -9,6 +9,13 @@ P26-04-27
 
 目标：为开发者和工程师描述实现细节、参数含义、预期行为与调参建议。
 
+关联文档：
+
+- 数据采集与 Apollo 准备： [docs/apollo_data_collection.md](apollo_data_collection.md)
+- 运行 / 指标 / 可视化复核： [docs/calibration_review_guide.md](calibration_review_guide.md)
+- 方法论 / SOTA / 参考资料：
+  [docs/calibration_methodology.md](calibration_methodology.md)
+
 一、整体架构概览
 
 遵循仓库统一模式：数据层（Extraction）→ 算法层（Optimization）→ 评估层（Evaluation）。

@@ -1,6 +1,7 @@
 # whl-cal
 
-Calibration tools for Apollo `.record` data and related image / point-cloud workflows.
+Calibration tools for Apollo `.record` data and related image / point-cloud
+workflows.
 
 ## Current status
 
@@ -9,28 +10,29 @@ Calibration tools for Apollo `.record` data and related image / point-cloud work
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
 | `lidar2imu` | real-bag validated | keep `--profile baseline` as regression reference; use `--profile production` as the current map-side production candidate |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
-| `camera2lidar` | industrial reference baseline scaffold added | keep the new target-based reference CLI as baseline; treat targetless as experimental until real-data validation is complete |
+| `lidar2camera` | target-based industrial baseline exists | use the target-based pipeline as the current production baseline; keep targetless paths experimental |
 
-## Knowledge base
+## Recommended documentation path
 
-The durable project knowledge base lives under [`context/`](context/).
+If you are new to the repo, follow the docs in this order:
 
-Recommended entry points:
+1. **Apollo-side prerequisites and recording**:
+   [docs/apollo_data_collection.md](docs/apollo_data_collection.md)
+2. **Module quick starts**:
+   [docs/quickstart_index.md](docs/quickstart_index.md)
+3. **How to review metrics and visualization**:
+   [docs/calibration_review_guide.md](docs/calibration_review_guide.md)
+4. **Advanced design / method / SOTA context**:
+   [docs/calibration_methodology.md](docs/calibration_methodology.md)
 
-- [`context/index.md`](context/index.md)
-- [`context/knowledge_base/calibration_overview.md`](context/knowledge_base/calibration_overview.md)
-- [`context/knowledge_base/validated_conclusions.md`](context/knowledge_base/validated_conclusions.md)
-- [`context/knowledge_base/verification_points.md`](context/knowledge_base/verification_points.md)
+## Which calibration needs what
 
-Documentation:
-
-- LiDAR-to-LiDAR overview: [docs/lidar2lidar.md](docs/lidar2lidar.md)
-- LiDAR-to-LiDAR Quick Start: [docs/lidar2lidar_quickstart.md](docs/lidar2lidar_quickstart.md)
-- LiDAR-to-LiDAR current design: [docs/lidar2lidar_design.md](docs/lidar2lidar_design.md)
-- LiDAR-to-IMU overview: [docs/lidar2imu.md](docs/lidar2imu.md)
-- LiDAR-to-IMU Quick Start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
-- LiDAR-to-IMU current design: [docs/lidar2imu_design.md](docs/lidar2imu_design.md)
-- Camera intrinsic quick start: [docs/camera_quickstart.md](docs/camera_quickstart.md)
+| Module | Current tool input | Apollo-side raw data that should be recorded | Extra information you must know in advance |
+| --- | --- | --- | --- |
+| `camera` | live camera or exported image directory | camera image topic if you want to archive the session in Apollo; direct live capture is also supported | board pattern size, square size, fixed camera mode / exposure |
+| `lidar2camera` | paired `image + .pcd` files | camera image topic, LiDAR `PointCloud2`, `/tf_static`, optional `/tf` | camera intrinsics, distortion, checkerboard size, square size |
+| `lidar2lidar` | Apollo `.record` or prepared dataset | all raw LiDAR `PointCloud2` topics, `/tf_static`, optional `/tf` | sensor topic list, approximate TF tree / initial extrinsics, scene plan |
+| `lidar2imu` | Apollo `.record`, prepared dataset, or `standardized_samples.yaml` | one LiDAR topic, `/apollo/localization/pose`, IMU-related topics, `/tf_static`, optional `/tf` | LiDAR topic, pose topic, IMU topic, initial LiDAR↔IMU TF if bag lacks it |
 
 ## Install
 
@@ -50,49 +52,75 @@ python -m pip config --site set global.index-url https://pypi.tuna.tsinghua.edu.
 pip install -e .
 ```
 
-## Usage
+## Common workflow
 
-Set your Apollo record directory:
+### 1. Collect a bag in Apollo
+
+See [docs/apollo_data_collection.md](docs/apollo_data_collection.md) for the full
+checklist. The short version is:
 
 ```bash
-RECORD_DIR=../apollo-lite/data/bag/record_data
-OUTPUT_DIR=outputs/lidar2lidar/auto_calib_review
+# examples from /home/humble/01code/apollo-base
+bash scripts/transform.sh start
+bash scripts/gps.sh start
+bash scripts/localization.sh start
+bash scripts/camera.sh start
+cyber_launch start /apollo/modules/drivers/lidar/launch/lidar_with_fusion_and_compensator.launch
+
+# record all channels from the target output directory
+cyber_recorder record -a -i 60 -m 2048
 ```
 
-Inspect topics:
+If you prefer Apollo's wrapper script, `scripts/record_bag.sh start` in
+`apollo-base` launches the same recorder command.
+
+### 2. Inspect the bag quickly
 
 ```bash
+RECORD_DIR=/path/to/record_dir
 lidar2lidar-topics "$RECORD_DIR"
 ```
 
-Bootstrap fallback extrinsics from `/tf_static` and run automatic calibration:
+### 3. Run the module you need
+
+- LiDAR-to-LiDAR:
+  [docs/lidar2lidar_quickstart.md](docs/lidar2lidar_quickstart.md)
+- LiDAR-to-IMU:
+  [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
+- Camera intrinsic:
+  [docs/camera_quickstart.md](docs/camera_quickstart.md)
+- LiDAR↔Camera:
+  [docs/lidar2camera_quickstart.md](docs/lidar2camera_quickstart.md)
+
+### 4. Review results in the same order every time
+
+Across modules, the stable review order is:
+
+1. `diagnostics/standardized_data.yaml`
+2. `diagnostics/data_quality.yaml`
+3. `metrics.yaml`
+4. `diagnostics/acceptance_report.yaml`
+5. `diagnostics/visualization_index.yaml`
+
+Use [docs/calibration_review_guide.md](docs/calibration_review_guide.md) for the
+module-specific thresholds and visualization files.
+
+## High-value example commands
+
+### LiDAR-to-LiDAR
 
 ```bash
 lidar2lidar-auto \
   --record-path "$RECORD_DIR" \
   --conf-dir lidar2lidar/conf \
-  --bootstrap-conf \
-  --output-dir "$OUTPUT_DIR" \
+  --output-dir outputs/lidar2lidar/auto_calib_review \
   --sync-threshold-ms 10 \
   --min-overlap 0.30 \
   --methods 2 \
-  --max-samples 1 \
-  --save-merged-pcd
+  --max-samples 1
 ```
 
-Results:
-
-- Final consolidated extrinsics: `$OUTPUT_DIR/calibrated_tf.yaml`
-- Example final extrinsics path: `outputs/lidar2lidar/auto_calib_review/calibrated_tf.yaml`
-- Evaluation metrics: `$OUTPUT_DIR/metrics.yaml`
-- Initial extrinsics snapshot: `$OUTPUT_DIR/initial_guess/*.yaml`
-- Per-edge calibrated extrinsics: `$OUTPUT_DIR/calibrated/*.yaml`
-- Refreshed fallback extrinsics: `lidar2lidar/conf/*.yaml`
-- Detailed diagnostics: `$OUTPUT_DIR/diagnostics/`
-
-For a four-LiDAR raw rig, first prepare a reusable raw-only dataset. This
-caches Open3D-readable PCD snapshots plus pose / IMU / TF state once, so both
-`lidar2lidar` and `lidar2imu` can reuse the same extraction output:
+For a four-LiDAR raw rig, prepare a reusable raw-only dataset first:
 
 ```bash
 lidar2lidar-rig-dataset \
@@ -109,144 +137,17 @@ lidar2lidar-rig-dataset \
   --export-voxel-size 0.10
 ```
 
-Prepared dataset artifacts:
-
-- `diagnostics/prepared_rig_dataset.yaml`: reusable manifest
-- `cache/pointclouds/**/*.pcd`: cached Open3D-readable raw LiDAR snapshots
-- `cache/state.npz`: cached pose / IMU state
-
-For production-style `lidar2lidar`, prefer driving the run from a workflow YAML
-instead of piling more CLI flags onto one command.
-
-```bash
-lidar2lidar-auto \
-  --prepared-dataset-yaml outputs/prepared/run-eight-raw4/diagnostics/prepared_rig_dataset.yaml \
-  --workflow-yaml lidar2lidar/conf/workflow_raw4_loop_example.yaml \
-  --conf-dir lidar2lidar/conf \
-  --output-dir outputs/lidar2lidar/rig_loop_review \
-  --sync-threshold-ms 40 \
-  --min-overlap 0.15 \
-  --methods 2 \
-  --max-samples 2
-```
-
-Workflow-driven artifacts:
-
-- `diagnostics/workflow.yaml`: resolved topics, relations, thresholds, and visualization settings
-- `diagnostics/scene_sufficiency.yaml`: windowed overlap, timestamp skew, wall support, dynamic unmatched ratio, and suggestions
-- `metrics.yaml`: coarse statuses now include `scene_sufficiency`, `repeatability`, `relation_connectivity`, and `visual_geometry`
-- `loop_closed_tf.yaml`: globally consistent rig result when the workflow enables graph refinement
-- `loop_closed/*.yaml`: per-sensor loop-closed extrinsics
-- `diagnostics/loop_closure.yaml`: graph edges, tree/loop split, and residuals before/after
-- `diagnostics/visual_evaluation.yaml`: wall, corner, and slice sharpness summaries
-- `diagnostics/merged_cloud_baseline_colored.ply`: pairwise baseline overlay, color by sensor
-- `diagnostics/merged_cloud_loop_closure_colored.ply`: loop-closed overlay, color by sensor
-
-Recommended manual inspection:
-
-- open the colored PLYs in CloudCompare or Open3D
-- compare wall color fringing, double edges, corner spreading, and slice sharpness
-- use `visual_evaluation.yaml` and `scene_sufficiency.yaml` as the numeric counterpart to what you see
-
-Build the scan2map dataset artifact on the same bag:
-
-```bash
-lidar2lidar-scan2map-dataset \
-  --record-path "$RECORD_DIR" \
-  --conf-dir lidar2lidar/conf \
-  --output-dir outputs/lidar2lidar/scan2map_dataset_review \
-  --pose-topic /apollo/localization/pose
-```
-
-This produces:
-
-- `diagnostics/scan2map_dataset.yaml`: aligned scans, keyframes, holdout split, and submap definitions
-- `diagnostics/manifest.yaml`: extraction artifact manifest
-
-Run the scan2map candidate calibration on that dataset artifact:
-
-```bash
-lidar2lidar-scan2map \
-  --record-path "$RECORD_DIR" \
-  --dataset-yaml outputs/lidar2lidar/scan2map_dataset_review/diagnostics/scan2map_dataset.yaml \
-  --conf-dir lidar2lidar/conf \
-  --output-dir outputs/lidar2lidar/scan2map_candidate_review \
-  --scan2scan-baseline-tf outputs/lidar2lidar/auto_calib_review/calibrated_tf.yaml
-```
-
-This produces:
-
-- `calibrated_tf.yaml`: accepted scan2map candidate extrinsics
-- `metrics.yaml`: coarse and fine scan2map metrics
-- `diagnostics/scan2map_optimization.yaml`: per-edge optimization and holdout diagnostics
-- `diagnostics/evaluation.yaml`: summarized comparison outputs
-
-For vehicle-rig verification, you can also lock selected transform components to the
-scan2scan baseline while testing one edge. This is useful when a scan2map candidate
-improves holdout fitness mainly through vertical-attitude drift:
-
-```bash
-lidar2lidar-scan2map   --record-path "$RECORD_DIR"   --dataset-yaml outputs/lidar2lidar/scan2map_dataset_review/diagnostics/scan2map_dataset.yaml   --conf-dir lidar2lidar/conf   --output-dir outputs/lidar2lidar/scan2map_candidate_review   --source-topics /apollo/sensor/lslidar_right/PointCloud2   --scan2scan-baseline-tf outputs/lidar2lidar/auto_calib_review/calibrated_tf.yaml   --constraint-reference scan2scan_baseline   --lock-components z pitch roll
-```
-
-Optional helpers:
-
-```bash
-lidar2lidar-inspect-pointcloud --record-path "$RECORD_DIR" --topic /apollo/sensor/vanjeelidar/left_front/PointCloud2 --max-messages 1
-lidar2lidar-extract --input-dir "$RECORD_DIR" --output-dir outputs/lidar2lidar/pcd_export -c /apollo/sensor/lslidar_main/PointCloud2
-lidar2lidar-calibrate --source-pcd source.pcd --target-pcd target.pcd --initial-transform lidar2lidar/conf/lslidar_main_lslidar_left_extrinsics.yaml --output-transform result.yaml
-lidar2lidar-merge --source-pcd source.pcd --target-pcd target.pcd --transform result.yaml --output-pcd merged_output.pcd
-```
-
-## LiDAR-to-IMU calibration
-
-`lidar2imu-calibrate` consumes curated feature samples instead of raw records.
-The implementation keeps **algorithm stages** and **evaluation metrics**
-separate, so the solver can evolve without changing the reporting layout.
-
-```bash
-lidar2imu-calibrate \
-  --input lidar2imu_samples.yaml \
-  --planar-motion-policy auto \
-  --output-dir outputs/lidar2imu/run01
-```
-
-Results:
-
-- Final extrinsics: `outputs/lidar2imu/run01/calibrated/<parent>_<child>_extrinsics.yaml`
-- Consolidated output: `outputs/lidar2imu/run01/calibrated_tf.yaml`
-- Evaluation metrics: `outputs/lidar2imu/run01/metrics.yaml`
-- Detailed diagnostics: `outputs/lidar2imu/run01/diagnostics/`
-
-Documentation:
-
-- Overview: [docs/lidar2imu.md](docs/lidar2imu.md)
-- Quick Start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
-- Current design: [docs/lidar2imu_design.md](docs/lidar2imu_design.md)
-
-To bootstrap those standardized samples from an Apollo record bag, use:
+### LiDAR-to-IMU
 
 ```bash
 lidar2imu-convert-record \
   --profile production \
-  --record-path /path/to/record_dir \
+  --record-path "$RECORD_DIR" \
   --output-dir outputs/lidar2imu/raw_validation \
   --calibrate
 ```
 
-If the bag does not contain a static LiDAR-to-parent TF, provide an explicit
-prior with `--initial-transform path/to/extrinsics.yaml`, or use
-`--identity-initial-transform` for exploratory-only runs.
-
-This produces:
-
-- `standardized_samples.yaml`: normalized ground and motion samples
-- `conversion_diagnostics.yaml`: conversion-layer diagnostics
-- `calibration/`: final extrinsics, metrics, and diagnostics from the staged solver,
-  including motion registration quality, turn-balance warnings, and a
-  `vehicle_motion_assessment` recommendation
-
-The same four-raw-LiDAR prepared dataset can also be reused directly:
+The same prepared dataset can also be reused directly:
 
 ```bash
 lidar2imu-convert-record \
@@ -257,76 +158,56 @@ lidar2imu-convert-record \
   --calibrate
 ```
 
-Current lidar2imu operating rule:
-
-- **baseline**: `lidar2imu-convert-record --profile baseline`
-- **production**: `lidar2imu-convert-record --profile production`
-- accept production only after checking:
-  - trusted-reference consistency
-  - extraction consistency
-  - planar basin stability
-  - holdout generalization
-
-For weak-planar bags, `--planar-motion-policy auto` keeps `x/y/yaw` near the
-initial prior when turn balance or yaw observability is weak, while still letting
-the solver refine `z/roll/pitch`.
-
-## Current calibration summary
-
-### lidar2lidar
-
-- The repo-level conclusion is:
-  - **baseline**: `scan2scan`
-  - **refinement path**: `scan2map`
-- For vehicle rigs, always judge:
-  - planar: `x/y/yaw`
-  - vertical-attitude: `z/pitch/roll`
-- On the current tested bag:
-  - `left -> main` scan2map can be accepted as a refinement candidate
-  - `right -> main` unconstrained scan2map remains diagnostic
-
-### lidar2imu
-
-- The repo-level conclusion is:
-  - pose-derived gravity stays the default
-  - keep `baseline = scan_to_scan`
-  - keep `production = submap_to_map + auto reextract + holdout acceptance`
-  - weak-planar bags should prefer `--planar-motion-policy auto`
-  - acceptance must be driven by tested data, not only by solver convergence
-- The current data-layer policy now uses:
-  - **window + gate** motion selection
-  - registration-fitness gating
-  - weak-planar solver freeze when needed
-  - trusted-reference / extraction / basin / holdout acceptance gates
-
-## Next module
-
-The active repo-level cleanup target is **lidar2camera / camera2lidar**.
-
-The goal is to bring camera-related calibration into the same pattern already used
-by `lidar2lidar` and `lidar2imu`:
-
-1. data layer
-2. algorithm layer
-3. stable evaluation layer
-
-That includes:
-
-- explicit dataset artifacts
-- window + gate for invalid samples
-- stable metrics / diagnostics
-- separating validated conclusions from open verification points
-
-The first industrial baseline now starts with:
+### LiDAR↔Camera
 
 ```bash
+lidar2camera-calibrate --write-default-config --config config.yaml
 lidar2camera-calibrate --config config.yaml
 ```
 
-This writes the same stable repo-wide artifact pattern used elsewhere:
+### Camera intrinsic
+
+```bash
+python camera/intrinsic.py --config camera_config.yaml
+```
+
+## Common output artifacts
+
+The repo keeps the final review surface stable on purpose. Depending on the
+module, look for:
 
 - `calibrated_tf.yaml`
 - `metrics.yaml`
+- `diagnostics/standardized_data.yaml`
+- `diagnostics/data_quality.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/status_summary.csv`
+- `diagnostics/visualization_index.yaml`
 - `initial_guess/*.yaml`
 - `calibrated/*.yaml`
-- `diagnostics/`
+
+For `camera`, the equivalent outputs live under
+`calibration_YYYYmmdd_HHMMSS_diagnostics/`.
+
+## Knowledge base and deeper docs
+
+The durable project knowledge base lives under [`context/`](context/).
+
+Recommended entry points:
+
+- [`context/index.md`](context/index.md)
+- [`context/knowledge_base/calibration_overview.md`](context/knowledge_base/calibration_overview.md)
+- [`context/knowledge_base/validated_conclusions.md`](context/knowledge_base/validated_conclusions.md)
+- [`context/knowledge_base/verification_points.md`](context/knowledge_base/verification_points.md)
+
+Module docs:
+
+- LiDAR-to-LiDAR overview: [docs/lidar2lidar.md](docs/lidar2lidar.md)
+- LiDAR-to-LiDAR Quick Start: [docs/lidar2lidar_quickstart.md](docs/lidar2lidar_quickstart.md)
+- LiDAR-to-LiDAR current design: [docs/lidar2lidar_design.md](docs/lidar2lidar_design.md)
+- LiDAR-to-IMU overview: [docs/lidar2imu.md](docs/lidar2imu.md)
+- LiDAR-to-IMU Quick Start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
+- LiDAR-to-IMU current design: [docs/lidar2imu_design.md](docs/lidar2imu_design.md)
+- Camera intrinsic quick start: [docs/camera_quickstart.md](docs/camera_quickstart.md)
+- LiDAR↔Camera Quick Start: [docs/lidar2camera_quickstart.md](docs/lidar2camera_quickstart.md)
+- LiDAR↔Camera current design: [docs/lidar2camera_design.md](docs/lidar2camera_design.md)
