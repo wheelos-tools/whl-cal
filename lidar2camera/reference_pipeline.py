@@ -1374,8 +1374,72 @@ def run_reference_calibration_from_config(
     except np.linalg.LinAlgError:
         jacobian_uncertainty = None
 
+    optimization_stages: list[dict[str, Any]] = [
+        {
+            "stage": "initial_guess",
+            "pose_count": len(dataset.observations),
+            "source": initial_guess_summary.get("source"),
+            "pose_id": initial_guess_summary.get("pose_id"),
+            "rms_px": float(initial_rms_px),
+        }
+    ]
+    if geometry_resolution is not None:
+        optimization_stages.append(
+            {
+                "stage": "geometry_resolution",
+                "pose_count": len(dataset.observations),
+                "candidate_pose_count": int(
+                    geometry_resolution.get("candidate_pose_count", 0) or 0
+                ),
+                "iteration_count": int(
+                    len(geometry_resolution.get("iterations", []) or [])
+                ),
+                "final_changed_pose_count": int(
+                    ((geometry_resolution.get("iterations", []) or [{}])[-1]).get(
+                        "changed_pose_count", 0
+                    )
+                    or 0
+                ),
+            }
+        )
+    optimization_stages.append(
+        {
+            "stage": "batch_optimization",
+            "pose_count": len(dataset.observations),
+            "success": bool(optimization.get("success")),
+            "status": int(optimization.get("status", 0)),
+            "nfev": int(optimization.get("nfev", 0)),
+            "loss": str(optimization.get("optimization_loss")),
+            "f_scale": float(optimization.get("optimization_f_scale", 0.0)),
+            "final_rms_px": float(final_rms_px),
+        }
+    )
+    optimization_stages.append(
+        {
+            "stage": "leave_one_out",
+            "pose_count": len(dataset.observations),
+            "status": None if leave_one_out is None else leave_one_out.get("status"),
+            "trial_count": (
+                None
+                if leave_one_out is None
+                else int(leave_one_out.get("trial_count", 0))
+            ),
+            "distinct_solution_count": (
+                None
+                if leave_one_out is None
+                else int(leave_one_out.get("distinct_solution_count", 0))
+            ),
+            "holdout_rms_p95_px": (
+                None
+                if leave_one_out is None
+                else (leave_one_out.get("holdout_rms_summary") or {}).get("p95")
+            ),
+        }
+    )
+
     optimization_report = {
         "initial_guess": initial_guess_summary,
+        "stages": optimization_stages,
         "optimization": optimization,
         "jacobian_uncertainty": jacobian_uncertainty,
         "raw_config": copy.deepcopy(raw_config),

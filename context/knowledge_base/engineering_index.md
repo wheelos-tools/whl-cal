@@ -8,8 +8,8 @@ This file is the compact index for the current engineering surfaces in the repo.
 | --- | --- | --- | --- |
 | `lidar2lidar` | `record_utils.py`, `scan2map_dataset.py`, `auto_calib.py` extraction paths | `auto_calib.py`, `scan2map_calib.py`, `temporal_calib.py` | `metrics.yaml`, `diagnostics/*.yaml` |
 | `lidar2imu` | `record_converter.py` | `pipeline.py`, `algorithms.py` | `metrics.py`, `diagnostics/*.yaml` |
-| `camera` | interactive image capture in `camera/intrinsic.py` | chessboard intrinsic solve | YAML result written directly by the script |
-| `camera2lidar` | raw image / PCD pair loading inside scripts | `reference_based.py`, `learning_based.py` | script-local metrics only, no repo-wide stable artifact yet |
+| `camera` | interactive/headless checkerboard sample collection in `camera/intrinsic.py` | chessboard intrinsic solve | calibration YAML + `*_diagnostics/` acceptance/data_quality/visualization artifacts |
+| `lidar2camera` | raw image / PCD pair loading + extraction gating in `reference_pipeline.py` | `reference_pipeline.py`, `learning_based.py` | `metrics.yaml`, `diagnostics/*.yaml`, CSVs, heatmap/scatter/overlay review surfaces |
 
 ## Main commands
 
@@ -27,11 +27,10 @@ This file is the compact index for the current engineering surfaces in the repo.
 - `lidar2imu-convert-record`
 - `lidar2imu-tune-record`
 
-### camera / camera2lidar
+### camera / lidar2camera
 
 - `python camera/intrinsic.py`
-- `python camera2lidar/reference_based.py`
-- `python camera2lidar/learning_based.py`
+- `lidar2camera-calibrate`
 
 ## Environment note
 
@@ -62,11 +61,26 @@ This file is the compact index for the current engineering surfaces in the repo.
 - `calibration/diagnostics/evaluation.yaml`
 - `calibration/diagnostics/observability.yaml`
 
-### camera / camera2lidar
+### camera / lidar2camera
 
-- currently script-local outputs only
-- no repo-wide `metrics.yaml` / `diagnostics/` convention yet
-- this is the next structural gap to close
+- camera intrinsic:
+  - `calibration_*.yaml`
+  - `calibration_*_diagnostics/acceptance_report.yaml`
+  - `calibration_*_diagnostics/data_quality.yaml`
+  - `calibration_*_diagnostics/per_view_reprojection.csv`
+  - `calibration_*_diagnostics/image_coverage_heatmap.png`
+- lidar2camera:
+  - `calibrated_tf.yaml`
+  - `metrics.yaml`
+  - `diagnostics/extraction.yaml`
+  - `diagnostics/optimization.yaml`
+  - `diagnostics/evaluation.yaml`
+  - `diagnostics/extraction_entries.csv`
+  - `diagnostics/per_pose_reprojection.csv`
+  - `diagnostics/leave_one_out_trials.csv`
+  - `diagnostics/geometry_resolution.csv`
+  - `diagnostics/image_coverage_heatmap.png`
+  - `diagnostics/pose_diversity_plot.png`
 
 ## Current indexing design
 

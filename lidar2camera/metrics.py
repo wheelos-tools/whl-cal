@@ -297,6 +297,43 @@ def _board_geometry_status(
     return "pass"
 
 
+def _geometry_resolution_metrics(
+    extraction_report: dict[str, Any]
+) -> dict[str, Any] | None:
+    resolution = extraction_report.get("geometry_resolution") or {}
+    if not resolution:
+        return None
+    iterations = list(resolution.get("iterations", []) or [])
+    final_iteration = iterations[-1] if iterations else {}
+    final_rows = list(final_iteration.get("selected", []) or [])
+    unresolved_rows = [
+        row
+        for row in final_rows
+        if str(row.get("status", "unknown")).strip().lower() != "resolved"
+    ]
+    changed_pose_count = int(final_iteration.get("changed_pose_count", 0) or 0)
+    return {
+        "candidate_pose_count": int(resolution.get("candidate_pose_count", 0) or 0),
+        "iteration_count": int(len(iterations)),
+        "final_changed_pose_count": changed_pose_count,
+        "final_unresolved_pose_count": int(len(unresolved_rows)),
+        "final_unresolved_pose_ids": [
+            str(row.get("pose_id")) for row in unresolved_rows
+        ],
+        "per_iteration_changed_pose_count": [
+            int(iteration.get("changed_pose_count", 0) or 0) for iteration in iterations
+        ],
+    }
+
+
+def _geometry_resolution_status(geometry_resolution: dict[str, Any] | None) -> str:
+    if geometry_resolution is None:
+        return "pass"
+    if int(geometry_resolution.get("final_unresolved_pose_count", 0)) > 0:
+        return "warning"
+    return "pass"
+
+
 def _build_final_acceptance(
     *,
     pose_count: int,
@@ -411,6 +448,18 @@ def _build_final_acceptance(
             ),
             "action": "Do not release runs where LiDAR board support looks like a wall or an under-constrained plane patch.",
         },
+        {
+            "name": "geometry_resolution",
+            "status": statuses["geometry_resolution"],
+            "severity": "required",
+            "evidence": (
+                "geometry_resolution_unresolved_pose_count="
+                f"{coarse_metrics['geometry_resolution_unresolved_pose_count']}, "
+                "geometry_resolution_iteration_count="
+                f"{coarse_metrics['geometry_resolution_iteration_count']}"
+            ),
+            "action": "Do not release runs where multi-hypothesis board geometry resolution still leaves unresolved poses.",
+        },
     ]
     return build_final_acceptance(
         module="lidar2camera",
@@ -441,6 +490,7 @@ def build_metrics_output(
     coverage = _image_coverage_metrics(dataset)
     pose_diversity = _pose_diversity_metrics(final_transform, dataset)
     board_geometry = _board_geometry_metrics(dataset)
+    geometry_resolution = _geometry_resolution_metrics(extraction_report)
     leave_one_out_status = "unknown"
     holdout_rms_p95 = None
     paired_count = int(
@@ -491,6 +541,7 @@ def build_metrics_output(
         "image_coverage": _image_coverage_status(coverage, config),
         "pose_diversity": _pose_diversity_status(pose_diversity, config),
         "board_geometry": _board_geometry_status(board_geometry, config),
+        "geometry_resolution": _geometry_resolution_status(geometry_resolution),
     }
 
     if (
@@ -504,6 +555,7 @@ def build_metrics_output(
                 "image_coverage",
                 "pose_diversity",
                 "board_geometry",
+                "geometry_resolution",
             )
         )
         and leave_one_out_status == "pass"
@@ -516,6 +568,7 @@ def build_metrics_output(
         or statuses["image_coverage"] == "warning"
         or statuses["pose_diversity"] == "warning"
         or statuses["board_geometry"] == "warning"
+        or statuses["geometry_resolution"] == "warning"
     ):
         recommendation = "recollect_data"
     elif (
@@ -574,6 +627,16 @@ def build_metrics_output(
             or board_geometry.get("board_extent_ratio_y") is None
             else float(board_geometry["board_extent_ratio_y"]["p95"])
         ),
+        "geometry_resolution_iteration_count": (
+            None
+            if geometry_resolution is None
+            else int(geometry_resolution["iteration_count"])
+        ),
+        "geometry_resolution_unresolved_pose_count": (
+            None
+            if geometry_resolution is None
+            else int(geometry_resolution["final_unresolved_pose_count"])
+        ),
         "statuses": statuses,
     }
     assessment = {
@@ -590,6 +653,7 @@ def build_metrics_output(
         "image_coverage": coverage,
         "pose_diversity": pose_diversity,
         "board_geometry": board_geometry,
+        "geometry_resolution": geometry_resolution,
     }
     final_acceptance = _build_final_acceptance(
         pose_count=pose_count,
