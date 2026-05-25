@@ -6,12 +6,28 @@ from typing import Any
 import numpy as np
 import yaml
 
+from calibration_common.evaluation import (
+    write_acceptance_artifacts,
+    write_paradigm_artifacts,
+)
 from lidar2camera.models import ReferenceCalibrationDataset, ReferencePoseObservation
 from lidar2lidar.extrinsic_io import (
     build_extrinsics_payload,
     extrinsics_filename,
     save_extrinsics_yaml,
 )
+
+
+def _sanitize_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_payload(item)
+            for key, item in value.items()
+            if not str(key).startswith("_")
+        }
+    if isinstance(value, list):
+        return [_sanitize_payload(item) for item in value]
+    return value
 
 
 def _observation_to_payload(observation: ReferencePoseObservation) -> dict[str, Any]:
@@ -25,7 +41,7 @@ def _observation_to_payload(observation: ReferencePoseObservation) -> dict[str, 
         },
         "image_points": np.asarray(observation.image_points, dtype=float).tolist(),
         "object_points": np.asarray(observation.object_points, dtype=float).tolist(),
-        "metadata": dict(observation.metadata),
+        "metadata": _sanitize_payload(dict(observation.metadata)),
     }
 
 
@@ -42,7 +58,7 @@ def dataset_to_payload(dataset: ReferenceCalibrationDataset) -> dict[str, Any]:
             if dataset.initial_transform is None
             else np.asarray(dataset.initial_transform, dtype=float).tolist()
         ),
-        "metadata": dict(dataset.metadata),
+        "metadata": _sanitize_payload(dict(dataset.metadata)),
         "observations": [
             _observation_to_payload(observation) for observation in dataset.observations
         ],
@@ -57,6 +73,11 @@ def prepare_output_layout(output_dir: Path) -> tuple[Path, Path, Path]:
         output_dir / "calibrated_tf.yaml",
         output_dir / "metrics.yaml",
         diagnostics_dir / "manifest.yaml",
+        diagnostics_dir / "acceptance_report.yaml",
+        diagnostics_dir / "status_summary.csv",
+        diagnostics_dir / "standardized_data.yaml",
+        diagnostics_dir / "data_quality.yaml",
+        diagnostics_dir / "visualization_index.yaml",
         diagnostics_dir / "reference_dataset.yaml",
         diagnostics_dir / "extraction.yaml",
         diagnostics_dir / "optimization.yaml",
@@ -123,8 +144,6 @@ def write_outputs(
     }
     with (output_dir / "calibrated_tf.yaml").open("w", encoding="utf-8") as file:
         yaml.safe_dump(tf_payload, file, sort_keys=False)
-    with (output_dir / "metrics.yaml").open("w", encoding="utf-8") as file:
-        yaml.safe_dump(metrics_output, file, sort_keys=False)
     with (diagnostics_dir / "reference_dataset.yaml").open(
         "w", encoding="utf-8"
     ) as file:
@@ -135,6 +154,98 @@ def write_outputs(
         yaml.safe_dump(optimization_report, file, sort_keys=False)
     with (diagnostics_dir / "evaluation.yaml").open("w", encoding="utf-8") as file:
         yaml.safe_dump(evaluation_report, file, sort_keys=False)
+
+    acceptance_artifacts = write_acceptance_artifacts(
+        diagnostics_dir, metrics_output["final_acceptance"]
+    )
+    standardized_data = {
+        "schema_version": 1,
+        "module": "lidar2camera",
+        "representation": "reference_checkerboard_image_pcd_pairs",
+        "frames": {
+            "parent_frame": dataset.parent_frame,
+            "child_frame": dataset.child_frame,
+        },
+        "sample_counts": {
+            "accepted_pose_observations": len(dataset.observations),
+            "paired_candidates": int(
+                (extraction_report.get("pairing_summary", {}) or {}).get(
+                    "paired_count", 0
+                )
+            ),
+            "rejected_pose_observations": int(
+                extraction_report.get("rejected_pose_count", 0)
+            ),
+            "accepted_pair_ratio": float(
+                extraction_report.get("accepted_pair_ratio", 0.0)
+            ),
+        },
+        "metadata": _sanitize_payload(dict(dataset.metadata)),
+        "camera": {
+            "intrinsics": np.asarray(dataset.camera_matrix, dtype=float).tolist(),
+            "distortion": np.asarray(dataset.camera_distortion, dtype=float).tolist(),
+        },
+    }
+    data_quality = {
+        "schema_version": 1,
+        "module": "lidar2camera",
+        "status": metrics_output["final_acceptance"]["status"],
+        "release_ready": metrics_output["final_acceptance"]["release_ready"],
+        "quality_gates": metrics_output["final_acceptance"]["gates"],
+        "coarse_statuses": metrics_output["coarse_metrics"]["statuses"],
+        "pairing_summary": extraction_report.get("pairing_summary", {}),
+        "accepted_pair_ratio": extraction_report.get("accepted_pair_ratio"),
+        "skip_reason_counts": extraction_report.get("skip_reason_counts", {}),
+        "recommendation": metrics_output["final_acceptance"]["recommendation"],
+    }
+    visual_review = [
+        str(output_dir / "metrics.yaml"),
+        str(diagnostics_dir / "reference_dataset.yaml"),
+        str(diagnostics_dir / "extraction.yaml"),
+        str(diagnostics_dir / "optimization.yaml"),
+        str(diagnostics_dir / "evaluation.yaml"),
+    ]
+    if overlay_artifact is not None:
+        visual_review.append(overlay_artifact)
+    else:
+        visual_review.append(
+            "No overlay artifact was generated; keep this run review-only until visual evidence is available."
+        )
+    visualization_index = {
+        "schema_version": 1,
+        "module": "lidar2camera",
+        "layers": {
+            "conclusion": [
+                acceptance_artifacts["acceptance_report"],
+                acceptance_artifacts["status_summary_csv"],
+            ],
+            "detail_metrics": [
+                str(output_dir / "metrics.yaml"),
+                str(diagnostics_dir / "reference_dataset.yaml"),
+                str(diagnostics_dir / "extraction.yaml"),
+                str(diagnostics_dir / "optimization.yaml"),
+                str(diagnostics_dir / "evaluation.yaml"),
+            ],
+            "visual_review": visual_review,
+        },
+        "manual_review": [
+            "Read diagnostics/standardized_data.yaml to confirm accepted/rejected sample counts and capture assumptions.",
+            "Read diagnostics/data_quality.yaml to inspect extraction_yield, image_coverage, pose_diversity, and board_geometry gates.",
+            "Inspect the checkerboard corner coverage and extraction skip reasons before promoting a run.",
+            "Inspect the overlay for board-edge alignment and depth consistency, not only aggregate RMS.",
+            "Treat missing holdout or repeatability evidence as review-only, not release-ready.",
+        ],
+    }
+    paradigm_artifacts = write_paradigm_artifacts(
+        diagnostics_dir,
+        standardized_data=standardized_data,
+        data_quality=data_quality,
+        visualization_index=visualization_index,
+    )
+    metrics_output["fine_metrics"]["artifacts"].update(acceptance_artifacts)
+    metrics_output["fine_metrics"]["artifacts"].update(paradigm_artifacts)
+    with (output_dir / "metrics.yaml").open("w", encoding="utf-8") as file:
+        yaml.safe_dump(metrics_output, file, sort_keys=False)
 
     manifest = {
         "parent_frame": dataset.parent_frame,
@@ -152,6 +263,11 @@ def write_outputs(
                 "extraction": str(diagnostics_dir / "extraction.yaml"),
                 "optimization": str(diagnostics_dir / "optimization.yaml"),
                 "evaluation": str(diagnostics_dir / "evaluation.yaml"),
+                "acceptance_report": acceptance_artifacts["acceptance_report"],
+                "status_summary_csv": acceptance_artifacts["status_summary_csv"],
+                "standardized_data": paradigm_artifacts["standardized_data"],
+                "data_quality": paradigm_artifacts["data_quality"],
+                "visualization_index": paradigm_artifacts["visualization_index"],
                 "overlay": overlay_artifact,
             },
         },

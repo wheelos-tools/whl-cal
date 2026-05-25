@@ -27,13 +27,20 @@ P26-04-27
 1. 配对：按文件 stem 匹配 image (*.png/*.jpg...) 与 *.pcd，生成 pose 列表。
 2. 图像角点检测：cv2.findChessboardCorners + cornerSubPix（flags 包含 ADAPTIVE_THRESH 与 FAST_CHECK）。
 3. LiDAR 侧板面提取：使用 Open3D 的 pcd.segment_plane(distance_threshold=config.plane_distance_threshold_m, ransac_n=3, num_iterations=1000)。
-4. 板位坐标构建：通过板模板(_build_board_template)映射到分割平面 centroid 与投影 x/y 轴（以 gravity 投影作为 in-plane 方向假设）。
-5. 提取诊断：记录 plane_inlier_count、plane_residual_rmse_m、skip_reason（如 plane_segmentation_failed、insufficient_plane_points、image_corners_not_found 等）。
+4. 板位坐标构建：不再只依赖单一 gravity 投影轴。当前会从分割平面生成多组候选：
+   - gravity-projected in-plane axes
+   - PCA-derived in-plane axes
+   - axis swap / sign flip 组合
+   每个候选先做单帧 cv2.solvePnP(..., SOLVEPNP_IPPE) 打分，再通过跨 pose 的全局 seed transform 做一致性解析，选出更稳定的 object_points。
+5. 提取诊断：记录 plane_inlier_count、plane_residual_rmse_m、board_extent_ratio_xy、candidate_summaries、selected_candidate、sample_quality、skip_reason（如 plane_segmentation_failed、insufficient_plane_points、image_corners_not_found、image_board_too_close_to_edge、image_board_too_small 等）。
+6. 弱样本前置门控：在进入优化前，按图像 edge margin、board bbox area、plane residual、board geometry warnings 剔除明显不可靠 pose，并统计 accepted_pair_ratio。
+7. 几何解析汇总：`extraction.yaml.geometry_resolution` 会记录候选 pose 数、每轮变更数、每个 pose 最终选择的 source / swap / sign 组合，以及迭代后的 seed transform。
 
 三、初始变换选择
 
 - 优先使用 config.initial_transform（若提供）。
 - 否则对每个 pose 运行 cv2.solvePnP(..., flags=cv2.SOLVEPNP_IPPE) 生成单帧候选解，选取使全局 reprojection RMS 最小的候选解作为初猜。
+- 若存在板几何候选解析，则先基于 candidate resolution 得到一版跨 pose 一致的 object_points，再进入全局初猜与优化。
 
 四、优化器（Algorithm）
 
@@ -55,7 +62,8 @@ P26-04-27
 输出结构（关键字段）
 
 - summary: final_translation_m、final_euler_deg、initial_rms_px、final_rms_px、pose_count、delta_to_initial
-- coarse_metrics: pose_count、initial_rms_px、final_rms_px、pose_reprojection_rms_p95_px、holdout_reprojection_rms_p95_px、statuses
+- coarse_metrics: pose_count、accepted_pair_ratio、initial_rms_px、final_rms_px、pose_reprojection_rms_p95_px、holdout_reprojection_rms_p95_px、image_coverage、pose_diversity、board_geometry、statuses
+- final_acceptance: release/review/reject 门控与 recommendation
 - camera_calibration_assessment: recommendation（accepted_reference_candidate / repeatability_review / reference_quality_review / recollect_data）、各项 statuses、leave_one_out_details
 - fine_metrics: per_pose_reprojection、leave_one_out_repeatability、uncertainty_summary、extraction、optimization、artifacts
 
@@ -67,12 +75,24 @@ P26-04-27
   - pose_reprojection: pass if per-pose p95 <= metrics_warning_pose_rms_p95_px
   - holdout_pose: pass/unknown/warning 根据 L1O 的 holdout p95 与 metrics_warning_holdout_rms_px
   - pose_repeatability: 由 L1O 返回的 status
+  - extraction_yield: accepted_pair_ratio 是否足够健康，避免大量样本在提取阶段被拒后仍误放行
+  - image_coverage: 要求 board 中心覆盖足够多的 3x3 图像分区，且横向/纵向 span 足够大
+  - pose_diversity: 要求 board 深度 span 与 tilt span 足够大，避免全是单一姿态族
+  - board_geometry: 要求 LiDAR 平面残差与板面 extent ratio 合理，避免把整面墙误当成板
 
 - recommendation:
-  - 若 pose_count、reprojection、pose_reprojection 均为 pass，且 L1O 状态为 pass 或 unknown → accepted_reference_candidate
+  - 若 pose_count、extraction_yield、reprojection、pose_reprojection、image_coverage、pose_diversity、board_geometry 均为 pass，且 L1O 状态为 pass → accepted_reference_candidate
   - 若 pose_count 告警 → recollect_data
+  - 若 extraction_yield / image_coverage / pose_diversity / board_geometry 告警，或 holdout / repeatability 仍是 unknown → recollect_data
   - 若 L1O 为 warning → repeatability_review
   - 否则 → reference_quality_review
+
+- final_acceptance:
+  - `paired_pose_count`、`accepted_pose_count`、`optimization_success`、`final_reprojection`
+    、`accepted_pair_ratio`、`per_pose_reprojection`、`holdout_reprojection`、`pose_repeatability`
+    、`image_coverage`、`pose_diversity`、`board_geometry`
+    共同决定 `metrics.yaml.summary.final_acceptance_status`
+  - 量产放行应看 `final_acceptance.release_ready`，而不是只看优化是否收敛
 
 七、配置项（config.yaml）及默认值（来自 reference_pipeline.default_reference_config_payload）
 
@@ -84,6 +104,10 @@ P26-04-27
 - checkerboard.square_size: 方格边长（单位：米）
 - point_cloud.plane_dist_thresh: 平面分割距离阈值（米，默认 0.02）
 - point_cloud.min_plane_points: 平面内点最小数量（默认 500）
+- extraction.min_bbox_area_ratio: 图像中棋盘最小 bbox 面积占比（默认 0.0008）
+- extraction.min_edge_margin_px: 图像边界最小安全 margin（默认 8 px）
+- extraction.max_plane_residual_rmse_m: LiDAR 板平面残差硬阈值（默认 0.02 m）
+- extraction.reject_board_geometry_warnings: 若 LiDAR 板 geometry 已告警，是否直接剔除该 pose（默认 true）
 - frames.parent / frames.child: 坐标系命名
 - data_directory: 同步 image/.pcd 对的目录（默认 "calibration_data"）
 - optimization.min_poses: 最少 accepted pose 数（默认 5）
@@ -95,20 +119,39 @@ P26-04-27
 - metrics.warning_holdout_rms_px: L1O holdout p95 警告阈值（默认 1.5）
 - metrics.warning_repeatability_translation_m: 重复性 translation 警告阈值（默认 0.05 m）
 - metrics.warning_repeatability_rotation_deg: 重复性 rotation 警告阈值（默认 1.0 deg）
+- metrics.warning_image_coverage_min_cells: checkerboard 中心至少覆盖多少个 3x3 图像格（默认 4）
+- metrics.warning_image_horizontal_span_ratio: board 中心横向 span 下限（默认 0.35）
+- metrics.warning_image_vertical_span_ratio: board 中心纵向 span 下限（默认 0.35）
+- metrics.warning_depth_span_m: board 深度 span 下限（默认 0.3 m）
+- metrics.warning_tilt_span_deg: board tilt span 下限（默认 8 deg）
+- metrics.warning_plane_residual_rmse_m: LiDAR 平面残差 RMSE 上限（默认 0.02 m）
+- metrics.warning_board_extent_ratio_min / max: 板面 extent 相对模板尺寸的合理范围（默认 0.5 / 4.0）
+- metrics.warning_accepted_pair_ratio: accepted/paired 采样产出率下限（默认 0.5）
 - output.directory: 输出目录（默认 "calibration_output"）
+- 额外稳定输出：
+  - `diagnostics/acceptance_report.yaml`
+  - `diagnostics/status_summary.csv`
+  - `diagnostics/standardized_data.yaml`
+  - `diagnostics/data_quality.yaml`
+  - `diagnostics/visualization_index.yaml`
 
 八、可调参数与工程建议
 
 - plane_dist_thresh：若分割不到板，适当放宽（增大）阈值；若误分割周围结构，收紧阈值。
 - min_plane_points：在远距离或稀疏点云时降低该值，但会降低板位几何可靠性。
+- extraction.*：这是前置硬门控。优先通过改善采样质量来满足，不建议轻易放宽到把边缘裁切棋盘或弱平面样本也送进优化器。
 - optimization.loss / f_scale：对异常值敏感时使用 huber 或 cauchy，并调小 f_scale 以提高鲁棒性。
 - metrics.* 阈值：作为工程门控，建议按相机分辨率、像素尺度与项目容忍度调整。
+- image coverage / pose diversity：优先通过重采数据提升，不建议只靠放宽阈值掩盖观测不足。
+- board extent ratio：若经常偏大，优先改进 LiDAR 板提取，而不是继续相信平面启发式结果。
+- geometry_resolution：若 extraction.yaml 中多轮迭代仍频繁 changed 或 candidate_resolution_failed，优先检查板面点云是否混入背景、棋盘尺寸配置是否错误、以及采样姿态是否过于单一。
 
 九、扩展点与注意事项
 
 - 支持其他 target（ChArUco / AprilTag-grid）可提升角点稳定性与 pose 身份标识，建议作为后续演进。
 - 若数据包含可信 in-record TF（例如车载 TF），在提取阶段优先使用可信 TF 做 extraction geometry。
 - 对 targetless 方案（lidar2camera.learning_based）保留为实验路径，不应直接用于生产发布，直到经过重复性与不确定度评估。
+- 当前 LiDAR 板位虽然仍基于平面支持，但已经从“单一 gravity heuristic”升级为“gravity/PCA 多候选 + IPPE + 跨 pose 一致性解析”。剩余限制主要在物理 target 可观测性，而不再是代码里固定单轴假设。
 
 十、测试与验收
 
@@ -119,5 +162,3 @@ P26-04-27
 - 代码入口： lidar2camera/reference_pipeline.py::run_reference_calibration_from_config
 - 指标： lidar2camera/metrics.py::build_metrics_output
 - IO： lidar2camera/io.py::write_outputs
-
-
