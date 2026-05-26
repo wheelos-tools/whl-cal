@@ -46,7 +46,7 @@ There are now **two clearly different lidar2camera surfaces** in the repo:
 2. **experimental benchmark path**
    - `lidar2camera-nuscenes-benchmark`
    - nuScenes GT-perturbation evaluation
-   - compares `identity`, `edge_refine`, and `oracle_gt`
+   - compares `identity`, `edge_refine`, `silhouette_refine`, and `oracle_gt`
    - this is for controlled recovery benchmarking, **not** for replacing the
      production checkerboard release contract
 
@@ -199,6 +199,12 @@ The reference pipeline now writes:
 - `diagnostics/geometry_resolution.csv`
 - `diagnostics/image_coverage_heatmap.png`
 - `diagnostics/pose_diversity_plot.png`
+- `diagnostics/checkerboard_alignment_previews/*.png`
+
+The checkerboard writer must sanitize NumPy-heavy diagnostic internals before
+YAML output. This is important because extraction/metrics reports may carry
+private candidate arrays used for board-geometry resolution, while public
+diagnostic YAMLs should stay reviewable and serializable.
 
 Review order:
 
@@ -259,6 +265,15 @@ Use this review order:
 
 If the image evidence disagrees with the scalar metrics, trust the conflict and
 investigate; do not promote blindly.
+
+Single-checkerboard note:
+
+- one physical checkerboard is fine
+- one pose is **not** enough for release confidence
+- with one pose, `checkerboard_alignment_previews` + `reference_overlay` can show
+  that the board was found and that this pose aligns
+- but only multiple poses can really support repeatability, image coverage, and
+  pose diversity claims
 
 ## 7. Visual evidence to inspect
 
@@ -366,6 +381,23 @@ How to read it:
 - good runs remain close to the primary solution
 - bad runs split into noticeably different translation / rotation families
 
+### G. `diagnostics/checkerboard_alignment_previews/*.png`
+
+What it is:
+
+- per-pose preview images showing:
+  - detected checkerboard corners
+  - initial-transform projected board corners
+  - final-transform projected board corners
+
+How to read it:
+
+- this is the most direct answer to "did we actually find the checkerboard?" and
+  "did the solved board align on this pose?"
+- good runs show final projected corners collapsing onto detected corners
+- bad runs show systematic bias, corner ordering mistakes, or only marginal
+  improvement from the initial projection
+
 ## 8. How to judge the experimental nuScenes benchmark
 
 For `lidar2camera-nuscenes-benchmark`, the judgment logic is different from the
@@ -374,24 +406,132 @@ checkerboard production run.
 Use this order:
 
 1. `oracle_gt` must be essentially perfect
-2. compare `edge_refine` against `identity`
+2. compare `silhouette_refine` or `edge_refine` against `identity`
 3. inspect `perturbation_summary.csv`
 4. inspect `success_curves.yaml`
-5. inspect overlays
+5. inspect `*_comparison.png` depth-colored point-cloud projection panels
+6. inspect overlays and `*_debug.png` edge panels
 
 Interpretation:
 
 - if `oracle_gt` is not perfect, the benchmark wiring is wrong
-- if `edge_refine < identity`, the experimental method is helping
-- if `edge_refine == identity`, guard rails prevented a risky update
-- if `edge_refine > identity`, the current objective is not yet strong enough
+- if the targetless candidate is better than `identity`, it is helping
+- if it matches `identity`, guard rails prevented a risky update or the objective
+  was not informative enough
+- if it is worse than `identity`, the current objective is not yet strong enough
+
+Important current benchmark contract:
+
+- default reference mode is now `rigid_sensor`, derived from
+  `inv(cam2ego) @ lidar2ego`
+- camera/LiDAR timestamp skew is tracked as `time_delta_ms`
+- targetless runs record initial/final/GT projected point counts and projected
+  point ratios, depth p50/p95, and projection bbox area to catch invalid
+  projection or field-of-view regressions
+- targetless runs emit `*_comparison.png` panels showing initial/final/GT
+  dense depth-colored point clouds projected onto the image
+- targetless runs emit `*_debug.png` panels showing image edges plus
+  initial/final projected LiDAR structure edges
+- targetless visualization uses a separate dense point set from the optimization
+  point set, so review overlays are not hidden by high-intensity sparsification
+- dense overlays should show thousands of projected points on nuScenes
+  front-camera frames; a camera-only-looking panel indicates a visualization or
+  point-filtering regression, even if the scalar projection code returns success
+- `acceptance_report.yaml` has a `projection_visibility` gate; current smoke
+  passes with min_projected_points=2963 and min_projected_ratio=0.0854
+
+For visual review, prefer the `*_comparison.png` panel first. It shows whether
+the final projection moved toward nuScenes GT and whether depth layering looks
+coherent. Then use `*_debug.png` to understand whether the targetless edge or
+silhouette objective had meaningful image evidence.
 
 Today the honest status is:
 
 - the benchmark is valid and reproducible
-- the in-repo `edge_refine` baseline is still experimental
+- the in-repo `edge_refine` / `silhouette_refine` baselines are still experimental
 - it should not be described as SOTA unless a stronger cross-dataset comparison
   actually proves that
+- a new `batch_hybrid_refine` multi-frame method now exists and uses:
+  - multistart coarse hypotheses
+  - coordinate-consensus refinement
+  - projected-point-retention guard rails
+- it now produces bounded updates and no longer returns the wrong large update
+  that appeared in the first unconstrained batch attempt
+
+Initial-value precision conclusion from the 2026-05-26 nuScenes CAM_FRONT audits:
+
+- tested axis-aligned perturbations:
+  - translations: x/y/z at 1 cm, 2 cm, 5 cm, and 10 cm
+  - rotations: roll/pitch/yaw at 0.1 deg, 0.3 deg, 0.5 deg, 1.0 deg, and 2.0 deg
+- final multi-scene audit:
+  - path: `outputs/lidar2camera/targetless_precision_audit_final/diagnostics/`
+  - 4 CAM_FRONT scenes, 27 axis-aligned perturbation cases, 108 rows
+  - `edge_refine`: GT correction scored better in 48/108 cases = 44.4%
+  - `silhouette_refine`: GT correction scored better in 36/108 cases = 33.3%
+  - both edge and silhouette agreed in only 32/108 cases = 29.6%
+- high-risk axes:
+  - pitch >= 0.3 deg had 0% edge+silhouette agreement
+  - roll/yaw >= 1.0 deg had 0% edge+silhouette agreement
+- actual `silhouette_refine` optimizer did not safely recover the smallest
+  1 cm / 0.1 deg perturbations; all 6 optimizer smoke cases were rejected by the
+  guard and fell back to the initial guess
+- relaxing the guard is not a valid fix: the optimizer proposed large ~2.3-2.4
+  deg and ~7-8 cm updates for 1 cm cases, so the guard correctly prevents
+  false-positive calibration updates
+
+Practical conclusion: with the current single-frame targetless objective, the
+initial value must already be treated as the calibration result. The benchmark
+can verify and visualize centimeter/sub-degree perturbations, but the in-repo
+targetless optimizer cannot yet be trusted to pull normal measurement errors
+back automatically. If automatic recovery from several centimeters or >=0.5 deg
+roll/pitch/yaw is required, the algorithm must move to a stronger multi-frame
+objective with semantic/depth-boundary evidence and external baseline
+comparison.
+
+Batch-hybrid iteration result:
+
+- implementation:
+  - multi-frame shared-extrinsic search over same-camera contexts
+  - multistart seed proposals
+  - coordinate-consensus refinement
+  - projected-point-retention guard
+- practical speed:
+  - default benchmark downscale is now `2.0`
+  - current `CAM_FRONT` 4-sample / 3-bucket smoke runs in about `1m15s`
+- final benchmark path:
+  `outputs/lidar2camera/targetless_batch_multistart_eval_final/diagnostics/`
+- result on 4 `CAM_FRONT` samples and 3 perturbation buckets:
+  - mean rotation error:
+    - `identity`: `1.1667 deg`
+    - `batch_hybrid_refine`: `1.1406 deg`
+  - mean translation error:
+    - `identity`: `0.0567 m`
+    - `batch_hybrid_refine`: `0.0587 m`
+  - loose success:
+    - `identity`: `8.3%`
+    - `batch_hybrid_refine`: `16.7%`
+  - accepted update rate: `16.7%`
+  - `(2.0 deg, 0.10 m)` perturbations were not recovered
+- practical interpretation:
+  - `batch_hybrid_refine` is now a **safe warm-start refiner**
+  - it can help some `0.5-1.0 deg / 0.02-0.05 m` cases
+  - it is **not** yet a production-grade fully automatic targetless calibrator
+
+Projection visualization comparison against common targetless practice:
+
+- current artifacts now match the core review surfaces used by targetless
+  lidar-camera work: depth-colored point projection, initial/final/GT
+  comparison, image-edge vs projected-LiDAR-structure debug panels, and
+  projection coverage statistics
+- multi-view projection smoke:
+  - `outputs/lidar2camera/targetless_multiview_projection_review/`
+  - CAM_FRONT: min GT projected points=2975, mean=2995.3, mean bbox area=0.8057
+  - CAM_FRONT_RIGHT: min GT projected points=3504, mean=3510.7, mean bbox area=0.8781
+  - `outputs/lidar2camera/targetless_front_left_projection_review/`
+  - CAM_FRONT_LEFT with 50 ms sync threshold: min GT projected points=3590,
+    mean=3600.0, mean bbox area=0.8598
+- projection visualization is now adequate for review; remaining blocker is
+  optimization reliability, not whether the point cloud is visible on images
 
 ## 9. Current practical limitation
 

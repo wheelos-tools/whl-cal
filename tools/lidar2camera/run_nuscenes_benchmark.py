@@ -5,11 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 
-from lidar2camera.nuscenes_benchmark import (
-    EdgeRefinementConfig,
-    NuScenesBenchmarkConfig,
-    run_nuscenes_benchmark,
-)
+from lidar2camera.nuscenes_benchmark import (EdgeRefinementConfig,
+                                             NuScenesBenchmarkConfig,
+                                             run_nuscenes_benchmark)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -65,8 +63,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--methods",
-        default="identity,edge_refine,oracle_gt",
+        default="identity,edge_refine,silhouette_refine,batch_hybrid_refine,oracle_gt",
         help="Comma-separated benchmark methods.",
+    )
+    parser.add_argument(
+        "--reference-transform-mode",
+        default="rigid_sensor",
+        help="Reference transform mode: rigid_sensor or sample_pair.",
+    )
+    parser.add_argument(
+        "--max-sensor-time-delta-ms",
+        type=float,
+        default=40.0,
+        help="Maximum allowed camera/lidar timestamp delta in milliseconds.",
     )
     parser.add_argument(
         "--rotation-perturb-deg",
@@ -98,8 +107,38 @@ def main() -> None:
     parser.add_argument(
         "--image-downscale",
         type=float,
-        default=1.0,
+        default=2.0,
         help="Optional image downscale factor for faster refinement.",
+    )
+    parser.add_argument(
+        "--intensity-percentile",
+        type=float,
+        default=75.0,
+        help="LiDAR intensity percentile used by the optimization objective.",
+    )
+    parser.add_argument(
+        "--max-points",
+        type=int,
+        default=12000,
+        help="Maximum LiDAR points used by the optimization objective.",
+    )
+    parser.add_argument(
+        "--visualization-max-range-m",
+        type=float,
+        default=80.0,
+        help="Maximum XY range for dense visual point-cloud projection overlays.",
+    )
+    parser.add_argument(
+        "--visualization-max-points",
+        type=int,
+        default=60000,
+        help="Maximum LiDAR points used by visual projection overlays.",
+    )
+    parser.add_argument(
+        "--overlay-point-radius-px",
+        type=int,
+        default=4,
+        help="Point radius for depth-colored projection overlays.",
     )
     parser.add_argument(
         "--search-rotation-deg",
@@ -133,6 +172,8 @@ def main() -> None:
         camera_names=_parse_csv_strings(args.camera_names),
         sample_limit=args.sample_limit,
         sample_tokens=_parse_csv_strings(args.sample_tokens),
+        reference_transform_mode=args.reference_transform_mode,
+        max_sensor_time_delta_ms=args.max_sensor_time_delta_ms,
         methods=_parse_csv_strings(args.methods),
         rotation_perturb_deg=_parse_csv_floats(args.rotation_perturb_deg),
         translation_perturb_m=_parse_csv_floats(args.translation_perturb_m),
@@ -142,6 +183,11 @@ def main() -> None:
         max_overlay_artifacts=args.max_overlay_artifacts,
         edge_refinement=EdgeRefinementConfig(
             image_downscale=args.image_downscale,
+            intensity_percentile=args.intensity_percentile,
+            max_points=args.max_points,
+            visualization_max_point_xy_range_m=args.visualization_max_range_m,
+            visualization_max_points=args.visualization_max_points,
+            overlay_point_radius_px=args.overlay_point_radius_px,
             search_rotation_deg=args.search_rotation_deg,
             search_translation_m=args.search_translation_m,
             optimizer_maxiter=args.optimizer_maxiter,
