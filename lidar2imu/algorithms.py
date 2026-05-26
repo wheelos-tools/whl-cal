@@ -163,6 +163,8 @@ def scan_periodic_scalar_cost(
             float(max_cost / best_cost) if best_cost > 1e-12 else float("inf")
         ),
         "within_5pct_span_deg": circular_span_deg(within_best),
+        "angles_deg": [float(value) for value in angles_deg.tolist()],
+        "cost_values": [float(value) for value in costs.tolist()],
     }
 
 

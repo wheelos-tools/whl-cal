@@ -38,6 +38,7 @@ from lidar2imu.models import (
     GroundSample,
     MotionSample,
 )
+from lidar2imu.visualization import build_visualization_artifacts
 from lidar2lidar.extrinsic_io import (
     build_extrinsics_payload,
     extrinsics_filename,
@@ -318,6 +319,29 @@ def write_outputs(
             evaluation_report.get("holdout_motion_per_sample", []),
         ),
     }
+    visualization_artifacts = build_visualization_artifacts(
+        diagnostics_dir,
+        dataset=dataset,
+        final_transform=final_transform,
+        summary=metrics_output.get("summary", {}),
+        final_acceptance=metrics_output["final_acceptance"],
+        motion_assessment=metrics_output.get("vehicle_motion_assessment", {}),
+        ground_rows=evaluation_report.get("ground_per_sample", []),
+        motion_rows=evaluation_report.get("motion_per_sample", []),
+        holdout_motion_rows=evaluation_report.get("holdout_motion_per_sample", []),
+        observability=evaluation_report.get("observability", {}),
+        artifact_links={
+            "acceptance_report": acceptance_artifacts["acceptance_report"],
+            "metrics": str(output_dir / "metrics.yaml"),
+            "data_quality": str(diagnostics_dir / "data_quality.yaml"),
+            "observability": str(diagnostics_dir / "observability.yaml"),
+            "ground_residuals_csv": table_artifacts["ground_residuals_csv"],
+            "motion_residuals_csv": table_artifacts["motion_residuals_csv"],
+            "holdout_motion_residuals_csv": table_artifacts[
+                "holdout_motion_residuals_csv"
+            ],
+        },
+    )
     standardized_data = {
         "schema_version": 1,
         "module": "lidar2imu",
@@ -362,10 +386,73 @@ def write_outputs(
                 table_artifacts["motion_residuals_csv"],
                 table_artifacts["holdout_motion_residuals_csv"],
             ],
+            "visual_artifacts": [
+                visualization_artifacts["review_report"],
+                visualization_artifacts["ground_residuals_plot"],
+                visualization_artifacts["ground_height_residuals_plot"],
+                visualization_artifacts["motion_rotation_residuals_plot"],
+                visualization_artifacts["motion_residuals_plot"],
+                visualization_artifacts["motion_registration_fitness_plot"],
+                *(
+                    [visualization_artifacts["trajectory_overlay_plot"]]
+                    if "trajectory_overlay_plot" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["trajectory_position_gap_plot"]]
+                    if "trajectory_position_gap_plot" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["holdout_motion_residuals_plot"]]
+                    if "holdout_motion_residuals_plot" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["imu_trajectory_cloud"]]
+                    if "imu_trajectory_cloud" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["lidar_trajectory_cloud"]]
+                    if "lidar_trajectory_cloud" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["trajectory_overlay_cloud"]]
+                    if "trajectory_overlay_cloud" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["yaw_cost_scan"]]
+                    if "yaw_cost_scan" in visualization_artifacts
+                    else []
+                ),
+            ],
             "visual_review": [
-                "Plot ground_residuals.csv normal_angle_deg / height_residual_m.",
-                "Plot motion_residuals.csv rotation_residual_deg / translation_residual_m.",
-                "Inspect yaw cost scan in diagnostics/observability.yaml.",
+                (
+                    "Open diagnostics/review_report.html in a browser for the "
+                    "quickest visual triage."
+                ),
+                "Inspect ground_residuals_plot.svg for ground-plane angle stability.",
+                (
+                    "Inspect motion_residuals_plot.svg for translation residuals "
+                    "and motion quality."
+                ),
+                (
+                    "Inspect trajectory_overlay.svg and "
+                    "trajectory_position_gap_plot.svg to compare IMU and LiDAR "
+                    "odometry consistency."
+                ),
+                (
+                    "Open trajectory_overlay_cloud.ply in CloudCompare/Open3D to "
+                    "inspect stitched keyframe geometry when the raw record is "
+                    "still available."
+                ),
+                (
+                    "Inspect yaw_cost_scan.svg for a sharp, well-supported yaw "
+                    "optimum when present."
+                ),
             ],
         },
     }
@@ -377,6 +464,7 @@ def write_outputs(
     )
     metrics_output["fine_metrics"]["artifacts"].update(acceptance_artifacts)
     metrics_output["fine_metrics"]["artifacts"].update(table_artifacts)
+    metrics_output["fine_metrics"]["artifacts"].update(visualization_artifacts)
     metrics_output["fine_metrics"]["artifacts"].update(paradigm_artifacts)
     with open(output_dir / "metrics.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(metrics_output, file, sort_keys=False)
@@ -407,6 +495,41 @@ def write_outputs(
                 "holdout_motion_residuals_csv": table_artifacts[
                     "holdout_motion_residuals_csv"
                 ],
+                "ground_residuals_plot": visualization_artifacts[
+                    "ground_residuals_plot"
+                ],
+                "ground_height_residuals_plot": visualization_artifacts[
+                    "ground_height_residuals_plot"
+                ],
+                "motion_rotation_residuals_plot": visualization_artifacts[
+                    "motion_rotation_residuals_plot"
+                ],
+                "motion_residuals_plot": visualization_artifacts[
+                    "motion_residuals_plot"
+                ],
+                "motion_registration_fitness_plot": visualization_artifacts[
+                    "motion_registration_fitness_plot"
+                ],
+                "trajectory_overlay_plot": visualization_artifacts.get(
+                    "trajectory_overlay_plot"
+                ),
+                "trajectory_position_gap_plot": visualization_artifacts.get(
+                    "trajectory_position_gap_plot"
+                ),
+                "imu_trajectory_cloud": visualization_artifacts.get(
+                    "imu_trajectory_cloud"
+                ),
+                "lidar_trajectory_cloud": visualization_artifacts.get(
+                    "lidar_trajectory_cloud"
+                ),
+                "trajectory_overlay_cloud": visualization_artifacts.get(
+                    "trajectory_overlay_cloud"
+                ),
+                "holdout_motion_residuals_plot": visualization_artifacts.get(
+                    "holdout_motion_residuals_plot"
+                ),
+                "yaw_cost_scan": visualization_artifacts.get("yaw_cost_scan"),
+                "review_report": visualization_artifacts["review_report"],
             },
         },
     }

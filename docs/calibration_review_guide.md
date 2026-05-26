@@ -112,8 +112,9 @@ Read in this order:
 3. `calibration/diagnostics/data_quality.yaml`
 4. `calibration/metrics.yaml`
 5. `calibration/diagnostics/acceptance_report.yaml`
-6. `calibration/diagnostics/observability.yaml`
-7. residual CSV files
+6. `calibration/diagnostics/review_report.html`
+7. `calibration/diagnostics/observability.yaml`
+8. residual CSV files and SVG plots
 
 Primary signals:
 
@@ -142,7 +143,7 @@ These are review baselines, not a substitute for project-specific release gates.
 | `camera` | `comparison_view.png`, `image_coverage_heatmap.png` | undistortion sanity and board coverage |
 | `lidar2camera` | `image_coverage_heatmap.png`, `pose_diversity_plot.png`, any overlay artifact listed in diagnostics | target coverage and whether the optimized extrinsic makes geometric sense |
 | `lidar2lidar` | `merged_cloud_baseline_colored.ply`, `merged_cloud_loop_closure_colored.ply`, `visual_evaluation.yaml` | wall thickness, corner spread, ghosting, sensor misalignment after loop closure |
-| `lidar2imu` | `ground_residuals.csv`, `motion_residuals.csv`, `holdout_motion_residuals.csv`, `observability.yaml` | outliers, weak motion diversity, flat yaw cost surface |
+| `lidar2imu` | `review_report.html`, `ground_residuals_plot.svg`, `ground_height_residuals_plot.svg`, `motion_rotation_residuals_plot.svg`, `motion_residuals_plot.svg`, `motion_registration_fitness_plot.svg`, `trajectory_overlay.svg`, `trajectory_position_gap_plot.svg`, `imu_trajectory_cloud.ply`, `lidar_trajectory_cloud.ply`, `trajectory_overlay_cloud.ply`, `holdout_motion_residuals_plot.svg`, `yaw_cost_scan.svg`, plus the residual CSV/YAML files | browser-friendly visual triage for ground support, motion quality, IMU-vs-LiDAR trajectory consistency, stitched-keyframe geometry, holdout behavior, and yaw support |
 
 Recommended tools:
 
@@ -150,6 +151,7 @@ Recommended tools:
 - CSV: spreadsheet, pandas, or Jupyter
 - YAML: plain text viewer or your editor
 - PNG: any image viewer
+- HTML / SVG: any browser
 
 ## 6. Quick commands to surface the conclusion
 

@@ -77,6 +77,14 @@ lidar2lidar-topics /path/to/record_dir_or_record_file
 --initial-transform path/to/imu_lidar_extrinsics.yaml
 ```
 
+如果 bag 自带 `lidar -> parent` TF，但你要**按新的几何重新导出样本**，额外提供：
+
+```bash
+--extraction-transform path/to/imu_lidar_extrinsics.yaml
+```
+
+这会保留 bag 内 TF 作为 `reference_transform`，同时把你提供的外参用于地面提取、局部地图构造和运动因子重建。`--auto-reextract-if-needed` 的第二轮会自动走这条路径。
+
 如果只是探索数据可用性，也可以临时使用：
 
 ```bash
@@ -116,6 +124,7 @@ lidar2imu-convert-record \
   --lidar-topic /apollo/sensor/your_lidar/PointCloud2 \
   --pose-topic /apollo/localization/pose \
   --imu-topic /apollo/sensor/gnss/imu \
+  --initial-transform path/to/imu_lidar_extrinsics.yaml \
   --min-registration-fitness 0.55 \
   --planar-motion-policy auto \
   --calibrate

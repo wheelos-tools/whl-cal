@@ -854,6 +854,7 @@ def convert_record_to_standardized_samples(
     parent_frame: str,
     child_frame: str | None,
     initial_transform_path: str | None,
+    extraction_transform_path: str | None,
     identity_initial_transform: bool,
     gravity_source: str,
     ground_pose_sync_threshold_ms: float,
@@ -936,21 +937,28 @@ def convert_record_to_standardized_samples(
     record_reference_transform = lookup_transform(tf_graph, lidar_frame, parent_frame)
     reference_transform_source = "/tf_static or merged tf graph"
     initial_transform_source = reference_transform_source
-    if initial_transform_path is not None:
-        initial_transform, file_parent_frame, file_child_frame, _, _ = (
-            load_extrinsics_file(initial_transform_path)
+
+    def _load_override_transform(path: str, *, kind: str) -> tuple[np.ndarray, str]:
+        transform, file_parent_frame, file_child_frame, _, _ = load_extrinsics_file(
+            path
         )
         if file_parent_frame and file_parent_frame != parent_frame:
             raise RuntimeError(
-                f"Initial transform parent frame {file_parent_frame} does not match "
-                f"requested parent frame {parent_frame}."
+                f"{kind} parent frame {file_parent_frame} does not match requested "
+                f"parent frame {parent_frame}."
             )
         if file_child_frame and file_child_frame != lidar_frame:
             raise RuntimeError(
-                f"Initial transform child frame {file_child_frame} does not match "
-                f"LiDAR frame {lidar_frame}."
+                f"{kind} child frame {file_child_frame} does not match LiDAR frame "
+                f"{lidar_frame}."
             )
-        initial_transform_source = str(Path(initial_transform_path).resolve())
+        return np.asarray(transform, dtype=float), str(Path(path).resolve())
+
+    if initial_transform_path is not None:
+        initial_transform, initial_transform_source = _load_override_transform(
+            initial_transform_path,
+            kind="Initial transform",
+        )
     else:
         initial_transform = record_reference_transform
         if initial_transform is None:
@@ -963,19 +971,17 @@ def convert_record_to_standardized_samples(
             initial_transform = np.eye(4, dtype=float)
             initial_transform_source = "identity_fallback"
             reference_transform_source = None
-    extraction_transform = np.asarray(
-        (
-            record_reference_transform
-            if record_reference_transform is not None
-            else initial_transform
-        ),
-        dtype=float,
-    )
-    extraction_transform_source = (
-        reference_transform_source
-        if record_reference_transform is not None
-        else initial_transform_source
-    )
+    if extraction_transform_path is not None:
+        extraction_transform, extraction_transform_source = _load_override_transform(
+            extraction_transform_path,
+            kind="Extraction transform",
+        )
+    elif record_reference_transform is not None:
+        extraction_transform = np.asarray(record_reference_transform, dtype=float)
+        extraction_transform_source = reference_transform_source
+    else:
+        extraction_transform = np.asarray(initial_transform, dtype=float)
+        extraction_transform_source = initial_transform_source
 
     localization_to_imu = lookup_transform(tf_graph, parent_frame, "localization")
     if localization_to_imu is None:
@@ -1870,6 +1876,7 @@ def _run_conversion_and_calibration(
     args: argparse.Namespace,
     output_dir: Path,
     initial_transform_path: str | None,
+    extraction_transform_path: str | None,
     identity_initial_transform: bool,
 ) -> dict:
     sample_path, diagnostics = convert_record_to_standardized_samples(
@@ -1881,6 +1888,7 @@ def _run_conversion_and_calibration(
         parent_frame=args.parent_frame,
         child_frame=args.child_frame,
         initial_transform_path=initial_transform_path,
+        extraction_transform_path=extraction_transform_path,
         identity_initial_transform=identity_initial_transform,
         gravity_source=args.gravity_source,
         ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
@@ -2003,6 +2011,15 @@ def main() -> None:
         "--initial-transform",
         default=None,
         help="Optional extrinsics YAML/JSON used when the bag does not contain lidar->parent TF.",
+    )
+    parser.add_argument(
+        "--extraction-transform",
+        default=None,
+        help=(
+            "Optional extrinsics YAML/JSON used for record-side geometry "
+            "construction. Use this for intentional re-extraction while keeping "
+            "the in-record TF as the trusted reference."
+        ),
     )
     parser.add_argument(
         "--identity-initial-transform",
@@ -2176,6 +2193,7 @@ def main() -> None:
             parent_frame=args.parent_frame,
             child_frame=args.child_frame,
             initial_transform_path=args.initial_transform,
+            extraction_transform_path=args.extraction_transform,
             identity_initial_transform=args.identity_initial_transform,
             gravity_source=args.gravity_source,
             ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
@@ -2215,6 +2233,7 @@ def main() -> None:
         args=args,
         output_dir=output_dir,
         initial_transform_path=args.initial_transform,
+        extraction_transform_path=args.extraction_transform,
         identity_initial_transform=args.identity_initial_transform,
     )
 
@@ -2253,27 +2272,36 @@ def main() -> None:
         first_pass_extrinsics = first_pass["manifest"]["artifacts"][
             "calibrated_extrinsics"
         ]
-        second_pass = _run_conversion_and_calibration(
-            args=args,
-            output_dir=pass2_dir,
-            initial_transform_path=first_pass_extrinsics,
-            identity_initial_transform=False,
-        )
-        pass_summaries.append(
-            _build_reextract_pass_summary(
-                pass_name="pass2",
-                pass_dir=pass2_dir,
-                sample_path=Path(second_pass["sample_path"]),
-                diagnostics=second_pass["diagnostics"],
-                result=second_pass["result"],
-                manifest=second_pass["manifest"],
+        try:
+            second_pass = _run_conversion_and_calibration(
+                args=args,
+                output_dir=pass2_dir,
+                initial_transform_path=first_pass_extrinsics,
+                extraction_transform_path=first_pass_extrinsics,
+                identity_initial_transform=False,
             )
-        )
-        chosen_pass = _select_reextract_pass(pass_summaries)
-        reextract_summary["chosen_pass"] = chosen_pass["pass_name"]
-        if chosen_pass["pass_name"] == "pass2":
-            _copy_output_artifacts(pass2_dir, output_dir)
-            _refresh_calibration_manifest_paths(output_dir / "calibration")
+        except Exception as exc:
+            reextract_summary["pass2_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning(
+                "Auto re-extraction pass2 failed; keeping pass1 outputs. %s",
+                reextract_summary["pass2_error"],
+            )
+        else:
+            pass_summaries.append(
+                _build_reextract_pass_summary(
+                    pass_name="pass2",
+                    pass_dir=pass2_dir,
+                    sample_path=Path(second_pass["sample_path"]),
+                    diagnostics=second_pass["diagnostics"],
+                    result=second_pass["result"],
+                    manifest=second_pass["manifest"],
+                )
+            )
+            chosen_pass = _select_reextract_pass(pass_summaries)
+            reextract_summary["chosen_pass"] = chosen_pass["pass_name"]
+            if chosen_pass["pass_name"] == "pass2":
+                _copy_output_artifacts(pass2_dir, output_dir)
+                _refresh_calibration_manifest_paths(output_dir / "calibration")
     reextract_summary_path = output_dir / "reextract_summary.yaml"
     with open(reextract_summary_path, "w", encoding="utf-8") as file:
         yaml.safe_dump(reextract_summary, file, sort_keys=False)
