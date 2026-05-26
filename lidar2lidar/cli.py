@@ -17,29 +17,38 @@
 # Created Date: 2026-02-09
 # Author: daohu527
 
+from __future__ import annotations
+
 import argparse
 import copy
 import json
 import logging
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import numpy as np
 import open3d as o3d
 import yaml
 
+
 try:
     from lidar2lidar import lidar2lidar as lc
-    from lidar2lidar.extrinsic_io import build_extrinsics_payload, load_extrinsics_file
+    from lidar2lidar.extrinsic_io import (build_extrinsics_payload,
+                                          load_extrinsics_file)
 except ImportError:
-    import lidar2lidar as lc
     from extrinsic_io import build_extrinsics_payload, load_extrinsics_file
 
+    import lidar2lidar as lc
+
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 
-def load_point_clouds(source_path: str, target_path: str) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud]:
+def load_point_clouds(
+    source_path: str, target_path: str
+) -> tuple[o3d.geometry.PointCloud, o3d.geometry.PointCloud]:
     """Load point clouds from specified file paths.
 
     Args:
@@ -84,7 +93,9 @@ def detect_transform_format(path: str) -> str:
     if suffix in {".yaml", ".yml"}:
         return "yaml"
 
-    logging.error("Unsupported transform file format for %s. Use .json, .yaml, or .yml.", path)
+    logging.error(
+        "Unsupported transform file format for %s. Use .json, .yaml, or .yml.", path
+    )
     sys.exit(1)
 
 
@@ -109,11 +120,13 @@ def load_initial_transform(path: str) -> np.ndarray:
     return transform
 
 
-def build_yaml_result_payload(transformation: np.ndarray,
-                              fitness: float,
-                              inlier_rmse: float,
-                              source_frame: str,
-                              target_frame: str) -> dict:
+def build_yaml_result_payload(
+    transformation: np.ndarray,
+    fitness: float,
+    inlier_rmse: float,
+    source_frame: str,
+    target_frame: str,
+) -> dict:
     """Build a YAML payload using the standardized extrinsics schema."""
     return build_extrinsics_payload(
         parent_frame=target_frame,
@@ -126,12 +139,14 @@ def build_yaml_result_payload(transformation: np.ndarray,
     )
 
 
-def save_transform_result(path: str,
-                          transformation: np.ndarray,
-                          fitness: float,
-                          inlier_rmse: float,
-                          source_frame: str,
-                          target_frame: str) -> None:
+def save_transform_result(
+    path: str,
+    transformation: np.ndarray,
+    fitness: float,
+    inlier_rmse: float,
+    source_frame: str,
+    target_frame: str,
+) -> None:
     """Save calibration results to JSON or YAML based on file extension."""
     transform_format = detect_transform_format(path)
 
@@ -156,10 +171,12 @@ def save_transform_result(path: str,
         yaml.safe_dump(payload, file, sort_keys=False)
 
 
-def save_registered_point_cloud(source_cloud: o3d.geometry.PointCloud,
-                                target_cloud: o3d.geometry.PointCloud,
-                                transformation: np.ndarray,
-                                output_path: str) -> None:
+def save_registered_point_cloud(
+    source_cloud: o3d.geometry.PointCloud,
+    target_cloud: o3d.geometry.PointCloud,
+    transformation: np.ndarray,
+    output_path: str,
+) -> None:
     """Save merged point cloud after applying the final transform to source."""
     transformed_source = copy.deepcopy(source_cloud)
     transformed_source.transform(transformation)
@@ -172,7 +189,9 @@ def save_registered_point_cloud(source_cloud: o3d.geometry.PointCloud,
 
 def main() -> None:
     """Command-line tool for LiDAR-to-LiDAR extrinsic calibration."""
-    parser = argparse.ArgumentParser(description="LiDAR to LiDAR Extrinsic Calibration Tool.")
+    parser = argparse.ArgumentParser(
+        description="LiDAR to LiDAR Extrinsic Calibration Tool."
+    )
     parser.add_argument(
         "--source-pcd",
         type=str,
@@ -191,7 +210,10 @@ def main() -> None:
         dest="output_transform",
         type=str,
         default=None,
-        help="Path to save the final extrinsic result. Supports .json, .yaml, and .yml.",
+        help=(
+            "Path to save the final extrinsic result. Supports .json, .yaml, "
+            "and .yml."
+        ),
     )
     output_group.add_argument(
         "--output-yaml",
@@ -211,7 +233,10 @@ def main() -> None:
         "--output-pcd",
         type=str,
         default="registered_merged.pcd",
-        help="Path to save the merged registered point cloud when visualization is disabled.",
+        help=(
+            "Path to save the merged registered point cloud when visualization "
+            "is disabled."
+        ),
     )
     parser.add_argument(
         "--visualize",
@@ -234,7 +259,10 @@ def main() -> None:
         "--method",
         type=int,
         default=1,
-        help="Method for registration (1: point_to_plane, 2: GICP, 3: point_to_point).",
+        help=(
+            "Method for registration (1: point_to_plane, 2: GICP, "
+            "3: point_to_point)."
+        ),
     )
     parser.add_argument(
         "--remove-ground",
@@ -252,21 +280,30 @@ def main() -> None:
         dest="initial_transform_path",
         type=str,
         default=None,
-        help="Path to an initial transform file. Supports JSON matrices and standardized YAML extrinsics files.",
+        help=(
+            "Path to an initial transform file. Supports JSON matrices and "
+            "standardized YAML extrinsics files."
+        ),
     )
     initial_group.add_argument(
         "--initial-transform-yaml",
         dest="initial_transform_path",
         type=str,
         default=None,
-        help="Path to an initial transform YAML file, preferably from lidar2lidar/conf/*.yaml.",
+        help=(
+            "Path to an initial transform YAML file, preferably from "
+            "lidar2lidar/conf/*.yaml."
+        ),
     )
     initial_group.add_argument(
         "--initial-transform",
         dest="initial_transform_path",
         type=str,
         default=None,
-        help="Path to an initial transform file. Prefer standardized YAML extrinsics files under lidar2lidar/conf/.",
+        help=(
+            "Path to an initial transform file. Prefer standardized YAML "
+            "extrinsics files under lidar2lidar/conf/."
+        ),
     )
     args = parser.parse_args()
 
@@ -277,18 +314,19 @@ def main() -> None:
     source_cloud, target_cloud = load_point_clouds(args.source_pcd, args.target_pcd)
     initial_transform = (
         load_initial_transform(args.initial_transform_path)
-        if args.initial_transform_path is not None else None
+        if args.initial_transform_path is not None
+        else None
     )
 
     # Modify the original parameters
     preprocessing_params = {
-        'voxel_size': args.voxel_size,
-        'nb_neighbors': 20,
-        'std_ratio': 2.0,
-        'plane_dist_thresh': 0.05,
-        'height_range': args.max_height,
-        'remove_ground': args.remove_ground,
-        'remove_walls': args.remove_walls
+        "voxel_size": args.voxel_size,
+        "nb_neighbors": 20,
+        "std_ratio": 2.0,
+        "plane_dist_thresh": 0.05,
+        "height_range": args.max_height,
+        "remove_ground": args.remove_ground,
+        "remove_walls": args.remove_walls,
     }
 
     # Load the method
@@ -296,8 +334,15 @@ def main() -> None:
 
     # Perform calibration
     logging.info("--- Starting LiDAR extrinsic calibration ---")
-    final_extrinsic_transform, coarse_transform, reg_result = lc.calibrate_lidar_extrinsic(
-        source_cloud, target_cloud, args.visualize, preprocessing_params, method, initial_transform
+    final_extrinsic_transform, coarse_transform, reg_result = (
+        lc.calibrate_lidar_extrinsic(
+            source_cloud,
+            target_cloud,
+            args.visualize,
+            preprocessing_params,
+            method,
+            initial_transform,
+        )
     )
 
     if final_extrinsic_transform is None:
@@ -306,7 +351,10 @@ def main() -> None:
 
     # Print results
     logging.info("\n--- Final calibration result ---")
-    logging.info("Computed final extrinsic matrix:\n%s", format_matrix_for_logging(final_extrinsic_transform))
+    logging.info(
+        "Computed final extrinsic matrix:\n%s",
+        format_matrix_for_logging(final_extrinsic_transform),
+    )
     logging.info("Fitness: %.6f", reg_result.fitness)
     logging.info("Inlier RMSE: %.6f", reg_result.inlier_rmse)
 

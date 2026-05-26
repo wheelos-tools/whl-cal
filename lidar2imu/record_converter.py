@@ -261,9 +261,13 @@ def _relative_motion(
     return np.linalg.inv(transform_world_end) @ transform_world_start
 
 
+def _rotation_from_matrix(matrix: np.ndarray) -> R:
+    return R.from_matrix(np.array(matrix, dtype=np.float64, copy=True))
+
+
 def _motion_excitation(delta_transform: np.ndarray) -> tuple[float, float]:
     rotation_deg = float(
-        np.degrees(np.linalg.norm(R.from_matrix(delta_transform[:3, :3]).as_rotvec()))
+        np.degrees(np.linalg.norm(_rotation_from_matrix(delta_transform[:3, :3]).as_rotvec()))
     )
     translation_m = float(np.linalg.norm(delta_transform[:3, 3]))
     return rotation_deg, translation_m
@@ -279,14 +283,14 @@ def _motion_translation_heading_deg(delta_transform: np.ndarray) -> float | None
 def _motion_signed_yaw_deg(delta_transform: np.ndarray) -> float:
     try:
         return float(
-            np.degrees(R.from_matrix(delta_transform[:3, :3]).as_euler("ZYX")[0])
+            np.degrees(_rotation_from_matrix(delta_transform[:3, :3]).as_euler("ZYX")[0])
         )
     except ValueError:
         return 0.0
 
 
 def _motion_rotation_axis_abs(delta_transform: np.ndarray) -> list[float]:
-    rotvec = R.from_matrix(delta_transform[:3, :3]).as_rotvec()
+    rotvec = _rotation_from_matrix(delta_transform[:3, :3]).as_rotvec()
     norm = float(np.linalg.norm(rotvec))
     if norm <= 1e-12:
         return [0.0, 0.0, 0.0]
@@ -1340,8 +1344,8 @@ def convert_record_to_standardized_samples(
 
             diagnostic["passed_registration_gate"] = True
             weight = max(registration_fitness, 1e-3)
-            imu_quat = R.from_matrix(imu_delta[:3, :3]).as_quat()
-            lidar_quat = R.from_matrix(lidar_delta[:3, :3]).as_quat()
+            imu_quat = _rotation_from_matrix(imu_delta[:3, :3]).as_quat()
+            lidar_quat = _rotation_from_matrix(lidar_delta[:3, :3]).as_quat()
             registered_candidate = {
                 **candidate,
                 "lidar_delta": lidar_delta,
@@ -1554,7 +1558,7 @@ def convert_record_to_standardized_samples(
                         key: float(value)
                         for key, value in zip(
                             ("x", "y", "z", "w"),
-                            R.from_matrix(initial_transform[:3, :3]).as_quat(),
+                            _rotation_from_matrix(initial_transform[:3, :3]).as_quat(),
                         )
                     }
                 },
@@ -1620,7 +1624,7 @@ def convert_record_to_standardized_samples(
                     key: float(value)
                     for key, value in zip(
                         ("x", "y", "z", "w"),
-                        R.from_matrix(extraction_transform[:3, :3]).as_quat(),
+                        _rotation_from_matrix(extraction_transform[:3, :3]).as_quat(),
                     )
                 }
             },
@@ -1645,7 +1649,9 @@ def convert_record_to_standardized_samples(
                         key: float(value)
                         for key, value in zip(
                             ("x", "y", "z", "w"),
-                            R.from_matrix(record_reference_transform[:3, :3]).as_quat(),
+                            _rotation_from_matrix(
+                                record_reference_transform[:3, :3]
+                            ).as_quat(),
                         )
                     }
                 },

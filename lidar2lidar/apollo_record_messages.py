@@ -112,6 +112,41 @@ def _build_pointcloud_file() -> descriptor_pb2.FileDescriptorProto:
     return file_proto
 
 
+def _build_image_file() -> descriptor_pb2.FileDescriptorProto:
+    file_proto = descriptor_pb2.FileDescriptorProto()
+    file_proto.name = "apollo/drivers/minimal_image.proto"
+    file_proto.package = "apollo.drivers"
+    file_proto.syntax = "proto2"
+    file_proto.dependency.append("apollo/common/minimal_common.proto")
+
+    image = file_proto.message_type.add()
+    image.name = "Image"
+    _add_field(image, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
+    _add_field(image, "frame_id", 2, _TYPE_STRING)
+    _add_field(image, "measurement_time", 3, _TYPE_DOUBLE)
+    _add_field(image, "height", 4, _TYPE_UINT32)
+    _add_field(image, "width", 5, _TYPE_UINT32)
+    _add_field(image, "encoding", 6, _TYPE_STRING)
+    _add_field(image, "step", 7, _TYPE_UINT32)
+    _add_field(image, "data", 8, descriptor_pb2.FieldDescriptorProto.TYPE_BYTES)
+
+    compressed_image = file_proto.message_type.add()
+    compressed_image.name = "CompressedImage"
+    _add_field(compressed_image, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
+    _add_field(compressed_image, "frame_id", 2, _TYPE_STRING)
+    _add_field(compressed_image, "format", 3, _TYPE_STRING)
+    _add_field(
+        compressed_image,
+        "data",
+        4,
+        descriptor_pb2.FieldDescriptorProto.TYPE_BYTES,
+    )
+    _add_field(compressed_image, "measurement_time", 5, _TYPE_DOUBLE)
+    _add_field(compressed_image, "frame_type", 6, _TYPE_UINT32)
+
+    return file_proto
+
+
 def _build_localization_file() -> descriptor_pb2.FileDescriptorProto:
     file_proto = descriptor_pb2.FileDescriptorProto()
     file_proto.name = "apollo/localization/minimal_localization.proto"
@@ -191,6 +226,7 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
     for file_proto in (
         _build_common_file(),
         _build_pointcloud_file(),
+        _build_image_file(),
         _build_localization_file(),
         _build_gnss_imu_file(),
         _build_transform_file(),
@@ -200,9 +236,21 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
 
 
 _POOL = _build_pool()
+
+
+def _resolve_message_class(type_name: str):
+    descriptor = _POOL.FindMessageTypeByName(type_name)
+    get_message_class = getattr(message_factory, "GetMessageClass", None)
+    if callable(get_message_class):
+        return get_message_class(descriptor)
+    return message_factory.MessageFactory(_POOL).GetPrototype(descriptor)
+
+
 _MESSAGE_TYPES = {
-    type_name: message_factory.GetMessageClass(_POOL.FindMessageTypeByName(type_name))
+    type_name: _resolve_message_class(type_name)
     for type_name in (
+        "apollo.drivers.Image",
+        "apollo.drivers.CompressedImage",
         "apollo.drivers.PointCloud",
         "apollo.localization.LocalizationEstimate",
         "apollo.localization.CorrectedImu",

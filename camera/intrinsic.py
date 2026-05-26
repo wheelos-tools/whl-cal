@@ -61,6 +61,8 @@ class CameraCalibrator:
         with open(cfg_path, "r") as f:
             self.cfg = yaml.safe_load(f)
 
+        self.cfg_path = str(Path(cfg_path).resolve())
+
         self.pattern_size = tuple(self.cfg["pattern_size"])
         self.square_size = self.cfg["square_size"]
         self.ac_cfg = self.cfg["auto_capture_settings"]
@@ -85,8 +87,23 @@ class CameraCalibrator:
         self.capture_runtime_info = None
         self.sample_records = []
         self.comparison_view_path = None
+        self._window_rect_logged = False
 
         self._reset_auto_capture_state()
+
+    def _camera_source(self):
+        source = self.cfg.get("camera_source", self.cfg.get("camera_index", 0))
+        if isinstance(source, str):
+            stripped = source.strip()
+            if stripped.isdigit():
+                return int(stripped)
+            return stripped
+        return int(source)
+
+    def _camera_source_label(self, source):
+        if isinstance(source, str):
+            return source
+        return f"index:{int(source)}"
 
     def _reset_auto_capture_state(self):
         ac = self.ac_cfg
@@ -124,6 +141,9 @@ class CameraCalibrator:
             "width": None if width in (None, "") else int(width),
             "height": None if height in (None, "") else int(height),
             "fourcc": capture_cfg.get("fourcc"),
+            "strict_resolution_match": bool(
+                capture_cfg.get("strict_resolution_match", False)
+            ),
         }
 
     def _apply_capture_settings(self, cap):
@@ -148,12 +168,80 @@ class CameraCalibrator:
                 "Using the camera's native/as-is output avoids accidental FOV crop."
             )
 
-    def _build_capture_runtime_info(self, cap, frame):
+    def _ensure_qt_fontdir(self):
+        if os.environ.get("QT_QPA_FONTDIR"):
+            return
+        for candidate in (
+            "/usr/share/fonts/truetype/dejavu",
+            "/usr/share/fonts",
+        ):
+            if os.path.isdir(candidate):
+                os.environ["QT_QPA_FONTDIR"] = candidate
+                return
+
+    def _frame_stats(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return float(np.mean(gray)), float(np.std(gray))
+
+    def _select_startup_frame(self, cap, *, warmup_frames=5, sample_frames=20):
+        means = []
+        stds = []
+        best_frame = None
+        best_mean = 0.0
+        best_std = -1.0
+
+        for index in range(max(warmup_frames + sample_frames, 1)):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            mean_val, std_val = self._frame_stats(frame)
+            if index < warmup_frames:
+                continue
+            means.append(mean_val)
+            stds.append(std_val)
+            if mean_val < 8.0 and std_val < 5.0:
+                continue
+            if std_val > best_std:
+                best_frame = frame.copy()
+                best_mean = mean_val
+                best_std = std_val
+
+        summary = {
+            "sampled_frame_count": int(len(stds)),
+            "non_black_frame_count": int(
+                sum(1 for mean_val, std_val in zip(means, stds) if not (mean_val < 8.0 and std_val < 5.0))
+            ),
+            "mean_avg": None if not means else float(np.mean(np.asarray(means))),
+            "std_avg": None if not stds else float(np.mean(np.asarray(stds))),
+            "std_p95": None
+            if not stds
+            else float(np.percentile(np.asarray(stds), 95)),
+            "selected_mean": None if best_frame is None else float(best_mean),
+            "selected_std": None if best_frame is None else float(best_std),
+        }
+        summary["constant_stream"] = bool(
+            summary["std_p95"] is not None and summary["std_p95"] < 1.0
+        )
+        return best_frame, summary
+
+    def _build_capture_runtime_info(
+        self, cap, frame, *, source, backend_name, startup_report
+    ):
         capture_cfg = self._capture_config()
         display_w, display_h = self._display_size()
         actual_h, actual_w = frame.shape[:2]
         reported_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         reported_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        capture_aspect = float(actual_w / max(actual_h, 1))
+        display_aspect = float(display_w / max(display_h, 1))
+        requested_resolution = (
+            None
+            if capture_cfg["width"] is None or capture_cfg["height"] is None
+            else {
+                "width": int(capture_cfg["width"]),
+                "height": int(capture_cfg["height"]),
+            }
+        )
         warnings = []
         if capture_cfg["force_resolution"]:
             warnings.append(
@@ -162,20 +250,33 @@ class CameraCalibrator:
             warnings.append(
                 "If the live grid looks clipped, disable capture.force_resolution or switch to a native mode such as 4:3."
             )
-        if abs((display_w / max(display_h, 1)) - (actual_w / max(actual_h, 1))) > 0.05:
+        preview_geometry = "matched"
+        if abs(display_aspect - capture_aspect) > 0.05:
+            preview_geometry = "letterboxed"
             warnings.append(
                 "Display window aspect differs from capture; the app letterboxes for display, but that is not sensor crop."
             )
+        resolution_match = None
+        if requested_resolution is not None:
+            resolution_match = bool(
+                actual_w == int(requested_resolution["width"])
+                and actual_h == int(requested_resolution["height"])
+            )
+            if not resolution_match:
+                warnings.append(
+                    "Actual capture resolution does not match requested resolution."
+                )
+        if bool((startup_report or {}).get("constant_stream")):
+            warnings.append(
+                "Startup stream appears nearly constant; camera source may be incorrect."
+            )
         return {
-            "camera_index": int(self.cfg["camera_index"]),
-            "requested_capture_resolution": (
-                None
-                if capture_cfg["width"] is None or capture_cfg["height"] is None
-                else {
-                    "width": int(capture_cfg["width"]),
-                    "height": int(capture_cfg["height"]),
-                }
-            ),
+            "camera_source": self._camera_source_label(source),
+            "capture_backend": str(backend_name),
+            "requested_capture_resolution": requested_resolution,
+            "strict_resolution_match": bool(capture_cfg["strict_resolution_match"]),
+            "resolution_match": resolution_match,
+            "preview_geometry": preview_geometry,
             "force_capture_resolution": bool(capture_cfg["force_resolution"]),
             "fourcc": capture_cfg.get("fourcc"),
             "actual_capture_resolution": {
@@ -190,13 +291,20 @@ class CameraCalibrator:
                 "width": int(display_w),
                 "height": int(display_h),
             },
+            "startup_frame_quality": startup_report,
             "warnings": warnings,
         }
 
     def _log_capture_runtime_info(self, runtime_info):
+        source = runtime_info.get("camera_source")
+        backend = runtime_info.get("capture_backend")
         actual = runtime_info["actual_capture_resolution"]
         display = runtime_info["display_resolution"]
         requested = runtime_info.get("requested_capture_resolution")
+        if source is not None:
+            print("[INFO] Capture source:", source)
+        if backend is not None:
+            print(f"[INFO] Capture source opened via backend={backend}")
         print(
             "[INFO] Live capture resolution:",
             f"{actual['width']}x{actual['height']}",
@@ -207,6 +315,23 @@ class CameraCalibrator:
             print(
                 "[INFO] Requested capture resolution:",
                 f"{requested['width']}x{requested['height']}",
+            )
+            resolution_match = runtime_info.get("resolution_match")
+            strict_match = runtime_info.get("strict_resolution_match")
+            if resolution_match is not None:
+                print(
+                    "[INFO] Capture resolution match:",
+                    f"{'PASS' if resolution_match else 'FAIL'}",
+                    f"(strict={'ON' if strict_match else 'OFF'})",
+                )
+        preview_geometry = runtime_info.get("preview_geometry")
+        if preview_geometry == "matched":
+            print(
+                "[INFO] Preview geometry: full-frame scaled display, no crop; calibration still uses raw frames."
+            )
+        elif preview_geometry == "letterboxed":
+            print(
+                "[INFO] Preview geometry: letterboxed display, no crop; calibration still uses raw frames."
             )
         for warning in runtime_info.get("warnings", []):
             print("[WARN]", warning)
@@ -236,13 +361,18 @@ class CameraCalibrator:
                 "Requested capture "
                 f"{requested.get('width', 0)}x{requested.get('height', 0)}"
             )
+            resolution_match = runtime_info.get("resolution_match")
+            if resolution_match is not None:
+                lines.append(
+                    "Resolution match: " + ("PASS" if resolution_match else "FAIL")
+                )
         warnings = runtime_info.get("warnings", [])
         if warnings:
-            lines.extend(warnings[:2])
+            lines.extend(warnings[:1])
 
         start_y = max(30, image.shape[0] - 140)
         for index, line in enumerate(lines):
-            color = (0, 180, 255) if index >= 2 else (255, 255, 255)
+            color = (0, 180, 255) if index >= 3 else (255, 255, 255)
             self._draw_text(
                 image,
                 line,
@@ -267,8 +397,14 @@ class CameraCalibrator:
         bbox_max = np.max(corners, axis=0)
         center = np.mean(corners, axis=0)
         if grid_cell is None:
-            cell_x = min(2, max(0, int((center[0] / max(width, 1)) * 3.0)))
-            cell_y = min(2, max(0, int((center[1] / max(height, 1)) * 3.0)))
+            cell_x = min(
+                self.grid_shape[1] - 1,
+                max(0, int((center[0] / max(width, 1)) * self.grid_shape[1])),
+            )
+            cell_y = min(
+                self.grid_shape[0] - 1,
+                max(0, int((center[1] / max(height, 1)) * self.grid_shape[0])),
+            )
         else:
             cell_x = int(grid_cell[0])
             cell_y = int(grid_cell[1])
@@ -325,7 +461,9 @@ class CameraCalibrator:
     def _coverage_metrics(self):
         if not self.sample_records:
             return None
-        grid_counts = [[0, 0, 0] for _ in range(3)]
+        grid_counts = [
+            [0 for _ in range(self.grid_shape[1])] for _ in range(self.grid_shape[0])
+        ]
         center_x = []
         center_y = []
         margins = []
@@ -463,6 +601,10 @@ class CameraCalibrator:
     ):
         per_view_rms = [float(row["rms_px"]) for row in per_view_report]
         occupied_cell_target = max(4, min(6, int(self.min_total_samples)))
+        capture_runtime = self.capture_runtime_info or {}
+        requested_resolution = capture_runtime.get("requested_capture_resolution")
+        resolution_match = capture_runtime.get("resolution_match")
+        strict_resolution_match = bool(capture_runtime.get("strict_resolution_match"))
         gates = [
             {
                 "name": "sample_count",
@@ -475,7 +617,32 @@ class CameraCalibrator:
                 "evidence": f"samples={len(self.sample_records)}, required={self.min_total_samples}",
                 "action": "Collect more valid checkerboard views before trusting the intrinsic result.",
             },
-            {
+        ]
+        if requested_resolution is not None and resolution_match is not None:
+            gates.append(
+                {
+                    "name": "capture_resolution_match",
+                    "status": (
+                        "pass"
+                        if resolution_match
+                        else ("fail" if strict_resolution_match else "warning")
+                    ),
+                    "severity": "required",
+                    "evidence": (
+                        "requested="
+                        f"{requested_resolution['width']}x{requested_resolution['height']}, "
+                        "actual="
+                        f"{capture_runtime.get('actual_capture_resolution', {}).get('width')}"
+                        "x"
+                        f"{capture_runtime.get('actual_capture_resolution', {}).get('height')}, "
+                        f"strict={strict_resolution_match}"
+                    ),
+                    "action": "Use the intended camera mode before collecting intrinsic samples; do not mix resolutions.",
+                }
+            )
+        gates.extend(
+            [
+                {
                 "name": "image_coverage",
                 "status": (
                     "pass"
@@ -544,8 +711,9 @@ class CameraCalibrator:
                     f"{bool((self.capture_runtime_info or {}).get('force_capture_resolution'))}"
                 ),
                 "action": "Prefer native capture mode for intrinsic calibration to avoid hidden ISP crop before the 3x3 grid.",
-            },
-        ]
+                },
+            ]
+        )
         return build_final_acceptance(
             module="camera_intrinsic",
             gates=gates,
@@ -647,26 +815,149 @@ class CameraCalibrator:
             "image_coverage_heatmap": heatmap_path,
         }
 
+    def _headless_capture_probe(
+        self, cap, source, *, startup_frame=None, startup_report=None
+    ):
+        # In headless terminals we cannot create a GUI window; save one frame to verify capture.
+        print(
+            "[WARN] No GUI display detected. Switching to headless probe mode for camera source",
+            self._camera_source_label(source),
+        )
+        best_frame = startup_frame
+        report = startup_report or {}
+        if best_frame is None:
+            best_frame, report = self._select_startup_frame(cap)
+        if bool(report.get("constant_stream")):
+            print(
+                "[ERROR] Capture stream appears nearly constant; camera source may be incorrect."
+            )
+            return
+        if best_frame is None:
+            print("[ERROR] Camera opened but failed to read a valid non-black frame.")
+            return
+        output_dir = Path("outputs") / "camera"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = output_dir / f"headless_probe_{ts}.jpg"
+        cv2.imwrite(str(out_path), best_frame)
+        print(
+            f"[SAVED] Headless probe frame: {out_path} "
+            f"(mean={float(report.get('selected_mean', 0.0)):.1f}, "
+            f"std={float(report.get('selected_std', 0.0)):.1f})"
+        )
+
+    def _log_window_image_rect(self, render_frame):
+        if self._window_rect_logged:
+            return
+        try:
+            x, y, width, height = cv2.getWindowImageRect(self.window_name)
+        except cv2.error as exc:
+            print(f"[WARN] Could not query GUI image rect: {exc}")
+            self._window_rect_logged = True
+            return
+        print(
+            "[INFO] On-screen image rect:",
+            f"{width}x{height} at ({x},{y})",
+        )
+        expected_h, expected_w = render_frame.shape[:2]
+        if width != expected_w or height != expected_h:
+            print(
+                "[WARN] GUI backend is not honoring the requested preview size exactly; "
+                "raw-frame calibration is unaffected."
+            )
+        self._window_rect_logged = True
+
     def run(self):
         """Interactive GUI capture mode (existing behaviour)."""
         print("[INFO] Industrial Calibration Tool (Grid Overlay Stable Edition)")
-        cap = cv2.VideoCapture(self.cfg["camera_index"], cv2.CAP_V4L2)
+        print("[INFO] Config file:", self.cfg_path)
+        source = self._camera_source()
+        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
         if not cap.isOpened():
-            print("[ERROR] Cannot open camera index", self.cfg["camera_index"])
+            print("[ERROR] Cannot open camera source", self._camera_source_label(source))
             return
 
+        try:
+            backend_name = cap.getBackendName()
+        except cv2.error:
+            backend_name = "unknown"
+
         self._apply_capture_settings(cap)
+        startup_frame, startup_report = self._select_startup_frame(cap)
+        if startup_frame is None:
+            print("[ERROR] Failed to read startup frames from camera source.")
+            cap.release()
+            return
+        if bool(startup_report.get("constant_stream")):
+            print(
+                "[ERROR] Capture stream is nearly constant. "
+                "Please verify camera_source and device node mapping."
+            )
+            cap.release()
+            return
+        self.capture_runtime_info = self._build_capture_runtime_info(
+            cap,
+            startup_frame,
+            source=source,
+            backend_name=backend_name,
+            startup_report=startup_report,
+        )
+        self._log_capture_runtime_info(self.capture_runtime_info)
+        if (
+            bool(self.capture_runtime_info.get("strict_resolution_match"))
+            and self.capture_runtime_info.get("resolution_match") is False
+        ):
+            print(
+                "[ERROR] Strict resolution check failed; aborting to avoid invalid intrinsics."
+            )
+            cap.release()
+            return
+
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            self._headless_capture_probe(
+                cap,
+                source,
+                startup_frame=startup_frame,
+                startup_report=startup_report,
+            )
+            cap.release()
+            return
 
         # Force window size
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        self._ensure_qt_fontdir()
+        try:
+            cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
+        except cv2.error as exc:
+            print(f"[WARN] Failed to initialize GUI window: {exc}")
+            self._headless_capture_probe(
+                cap,
+                source,
+                startup_frame=startup_frame,
+                startup_report=startup_report,
+            )
+            cap.release()
+            return
         win_w, win_h = self._display_size()
-        cv2.resizeWindow(self.window_name, win_w, win_h)
+        try:
+            cv2.moveWindow(self.window_name, 40, 40)
+        except cv2.error:
+            pass
+        print(
+            "[INFO] Preview frame sent to GUI:",
+            f"{win_w}x{win_h}",
+        )
 
         h, w, grid_overlay = None, None, None
         frame_count = 0
+        pending_frame = startup_frame
 
         while True:
-            ret, frame = cap.read()
+            if pending_frame is not None:
+                ret = True
+                frame = pending_frame
+                pending_frame = None
+            else:
+                ret, frame = cap.read()
             if not ret:
                 break
 
@@ -675,8 +966,6 @@ class CameraCalibrator:
 
             if h is None:
                 h, w = frame.shape[:2]
-                self.capture_runtime_info = self._build_capture_runtime_info(cap, frame)
-                self._log_capture_runtime_info(self.capture_runtime_info)
                 grid_overlay = self._generate_grid_overlay(w, h)
 
             display = frame.copy()
@@ -706,14 +995,21 @@ class CameraCalibrator:
             elif self.state == "VALIDATING":
                 if self.mtx is not None:
                     undist, preview_info = self._undistort_for_preview(frame)
-                    undist = self._draw_valid_roi(undist, preview_info)
-                    display = np.hstack((frame, undist))
+                    display = self._draw_valid_roi(undist, preview_info)
                     self._draw_text(
                         display,
-                        f"Left: Distorted | Right: Undistorted alpha={preview_info['alpha']:.2f} (green ROI = valid crop)",
+                        f"Undistorted preview alpha={preview_info['alpha']:.2f}",
                         (50, 50),
                         (0, 255, 0),
                     )
+                    if self.comparison_view_path is not None:
+                        self._draw_text(
+                            display,
+                            f"Side-by-side comparison saved to {self.comparison_view_path}",
+                            (50, 95),
+                            (0, 255, 0),
+                            scale=0.8,
+                        )
 
             if h is not None:
                 self._draw_text(
@@ -736,6 +1032,7 @@ class CameraCalibrator:
                 render_frame = canvas
 
             cv2.imshow(self.window_name, render_frame)
+            self._log_window_image_rect(render_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
@@ -776,10 +1073,20 @@ class CameraCalibrator:
         print(f"[INFO] Found {len(img_paths)} images; processing...")
         processed = 0
         h = w = None
+        expected_size = None
         for ip in img_paths:
             img = cv2.imread(ip)
             if img is None:
                 print(f"[WARN] Could not read image {ip}, skipping")
+                continue
+            current_size = (int(img.shape[1]), int(img.shape[0]))
+            if expected_size is None:
+                expected_size = current_size
+            elif current_size != expected_size:
+                print(
+                    f"[WARN] Skipping {ip}: image size {current_size[0]}x{current_size[1]} "
+                    f"does not match expected {expected_size[0]}x{expected_size[1]}"
+                )
                 continue
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             # direct detection (no resizing) for headless runs
@@ -982,8 +1289,14 @@ class CameraCalibrator:
         width = int(gray.shape[1])
         height = int(gray.shape[0])
         grid_cell = (
-            min(2, max(0, int((center[0] / max(width, 1)) * 3.0))),
-            min(2, max(0, int((center[1] / max(height, 1)) * 3.0))),
+            min(
+                self.grid_shape[1] - 1,
+                max(0, int((center[0] / max(width, 1)) * self.grid_shape[1])),
+            ),
+            min(
+                self.grid_shape[0] - 1,
+                max(0, int((center[1] / max(height, 1)) * self.grid_shape[0])),
+            ),
         )
         self._append_sample(
             refined,
@@ -998,9 +1311,10 @@ class CameraCalibrator:
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
             self.objpoints, self.imgpoints, (w, h), None, None
         )
-        if not ret:
+        if mtx is None or dist is None:
             print("[ERROR] Calibration failed.")
             return
+        print(f"[INFO] Calibration RMS: {float(ret):.6f}")
         self.mtx, self.dist = mtx, dist
         per_view_report = self._per_view_reprojection_report(rvecs, tvecs)
         err = self._reprojection_error(rvecs, tvecs)
@@ -1015,15 +1329,20 @@ class CameraCalibrator:
         self.state = "SHOWING_RESULT"
 
     def _reprojection_error(self, rvecs, tvecs):
-        total_err = 0
+        total_squared_error = 0.0
+        total_point_count = 0
         for i in range(len(self.objpoints)):
             imgpts2, _ = cv2.projectPoints(
                 self.objpoints[i], rvecs[i], tvecs[i], self.mtx, self.dist
             )
-            total_err += cv2.norm(self.imgpoints[i], imgpts2, cv2.NORM_L2) / len(
-                imgpts2
-            )
-        return total_err / len(self.objpoints)
+            observed = np.asarray(self.imgpoints[i], dtype=float).reshape(-1, 2)
+            predicted = np.asarray(imgpts2, dtype=float).reshape(-1, 2)
+            residuals = predicted - observed
+            total_squared_error += float(np.sum(residuals**2))
+            total_point_count += int(residuals.shape[0])
+        if total_point_count <= 0:
+            return 0.0
+        return float(np.sqrt(total_squared_error / total_point_count))
 
     def _build_result_canv(self, w, h):
         print("[INFO] Generating Distortion Comparison View...")
@@ -1053,7 +1372,23 @@ class CameraCalibrator:
         self.comparison_view_path = "comparison_view.png"
         cv2.imwrite(self.comparison_view_path, canvas)
         print(f"[SAVED] {self.comparison_view_path}")
-        self.result_canvas = canvas
+        preview = dist_img.copy()
+        self._draw_text(preview, "Calibration complete; showing original full-frame preview", (50, 50), (180, 255, 180), scale=0.8)
+        self._draw_text(
+            preview,
+            f"Side-by-side comparison saved to {self.comparison_view_path}",
+            (50, 95),
+            (180, 255, 180),
+            scale=0.8,
+        )
+        self._draw_text(
+            preview,
+            "Press V for undistorted validation view, R to restart, ESC to exit",
+            (50, 140),
+            (180, 255, 180),
+            scale=0.8,
+        )
+        self.result_canvas = preview
 
     def _draw_text(
         self,
@@ -1135,7 +1470,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if not os.path.exists(args.config):
+    config_exists = os.path.exists(args.config)
+    if not config_exists and args.config != "config.yaml":
+        print(f"[ERROR] Config file not found: {args.config}")
+        print(
+            "[HINT] Provide a valid config path. Run without --config once if you need a template config.yaml."
+        )
+        raise SystemExit(1)
+
+    if not config_exists:
         default_cfg = dict(
             camera_index=0,
             window_name="Industrial Calibration Tool",
@@ -1146,6 +1489,7 @@ if __name__ == "__main__":
                 "width": None,
                 "height": None,
                 "fourcc": None,
+                "strict_resolution_match": False,
             },
             distortion_model="plumb_bob",
             pattern_size=[11, 8],
