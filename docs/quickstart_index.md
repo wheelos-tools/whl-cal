@@ -28,6 +28,8 @@ Use this page as the navigation hub for the repo's calibration workflows.
   [docs/camera_quickstart.md](camera_quickstart.md)
 - LiDAR↔Camera (target-based baseline):
   [docs/lidar2camera_quickstart.md](lidar2camera_quickstart.md)
+- LiDAR↔Camera customer/operator guide:
+  [docs/lidar2camera_customer_guide.md](lidar2camera_customer_guide.md)
 - LiDAR↔Camera (nuScenes GT-perturbation benchmark):
   [docs/lidar2camera_nuscenes_benchmark.md](lidar2camera_nuscenes_benchmark.md)
 
@@ -39,6 +41,7 @@ Use this page as the navigation hub for the repo's calibration workflows.
 | I have an Apollo bag and need LiDAR↔IMU extrinsics | `docs/lidar2imu_quickstart.md` |
 | I need camera intrinsic calibration from live capture or exported images | `docs/camera_quickstart.md` |
 | I need LiDAR↔Camera extrinsics from paired image / PCD files | `docs/lidar2camera_quickstart.md` |
+| I need a customer-facing LiDAR↔Camera runbook and result-interpretation guide | `docs/lidar2camera_customer_guide.md` |
 | I need to benchmark experimental targetless lidar↔camera calibration on nuScenes | `docs/lidar2camera_nuscenes_benchmark.md` |
 
 ## Common output artifacts

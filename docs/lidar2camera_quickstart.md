@@ -137,6 +137,7 @@ Production-style review artifacts:
 - `diagnostics/geometry_resolution.csv`
 - `diagnostics/image_coverage_heatmap.png`
 - `diagnostics/pose_diversity_plot.png`
+- `diagnostics/checkerboard_alignment_previews/*.png`
 
 ## How to judge a result
 
@@ -148,6 +149,8 @@ Acceptance heuristics:
 - accepted pair ratio stays healthy
 - image coverage, pose diversity, and board geometry all pass
 - geometry resolution completes cleanly
+- per-pose checkerboard alignment previews confirm that detected image corners and
+  final projected board corners agree
 
 Recommended review order:
 
@@ -163,3 +166,31 @@ Recommended review order:
 
 If geometry resolution, image coverage, or pose diversity fails, keep the run
 review-only even when the optimizer converges.
+
+## Single checkerboard practical note
+
+Using only **one physical checkerboard** is acceptable, but one pose is not
+enough evidence for production promotion.
+
+What one board can prove:
+
+- the image-side checkerboard was found
+- the LiDAR-side plane support was plausible
+- the final projection aligns on that pose
+
+What one board pose cannot prove well:
+
+- repeatability
+- pose-family independence
+- broad image coverage
+- broad depth / tilt observability
+
+When reviewing a one-board run, open:
+
+1. `diagnostics/checkerboard_alignment_previews/*.png`
+2. `diagnostics/reference_overlay.png`
+3. `diagnostics/per_pose_reprojection.csv`
+4. `diagnostics/leave_one_out_trials.csv` when available
+
+If only one pose looks good, treat the result as **alignment evidence**, not as
+full release evidence.
