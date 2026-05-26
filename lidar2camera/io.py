@@ -27,7 +27,11 @@ def _sanitize_payload(value: Any) -> Any:
             for key, item in value.items()
             if not str(key).startswith("_")
         }
-    if isinstance(value, list):
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, (list, tuple)):
         return [_sanitize_payload(item) for item in value]
     return value
 
@@ -223,6 +227,80 @@ def _build_pose_diversity_artifact(
     return str(output_path)
 
 
+def _build_checkerboard_alignment_previews(
+    diagnostics_dir: Path,
+    dataset: ReferenceCalibrationDataset,
+    initial_transform: np.ndarray,
+    final_transform: np.ndarray,
+) -> list[dict[str, str]]:
+    preview_dir = diagnostics_dir / "checkerboard_alignment_previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    initial_rvec, _ = cv2.Rodrigues(np.asarray(initial_transform[:3, :3], dtype=float))
+    initial_tvec = np.asarray(initial_transform[:3, 3], dtype=float).reshape(3, 1)
+    final_rvec, _ = cv2.Rodrigues(np.asarray(final_transform[:3, :3], dtype=float))
+    final_tvec = np.asarray(final_transform[:3, 3], dtype=float).reshape(3, 1)
+    previews: list[dict[str, str]] = []
+    for observation in dataset.observations:
+        image = cv2.imread(observation.image_path)
+        if image is None:
+            continue
+        image_points = np.asarray(observation.image_points, dtype=float)
+        object_points = np.asarray(observation.object_points, dtype=float)
+        initial_projected, _ = cv2.projectPoints(
+            object_points,
+            initial_rvec,
+            initial_tvec,
+            dataset.camera_matrix,
+            dataset.camera_distortion,
+        )
+        final_projected, _ = cv2.projectPoints(
+            object_points,
+            final_rvec,
+            final_tvec,
+            dataset.camera_matrix,
+            dataset.camera_distortion,
+        )
+        overlay = image.copy()
+        for u, v in np.round(image_points).astype(np.int32):
+            cv2.circle(overlay, (int(u), int(v)), 5, (0, 255, 0), thickness=-1)
+        for u, v in np.round(initial_projected.reshape(-1, 2)).astype(np.int32):
+            cv2.circle(overlay, (int(u), int(v)), 3, (0, 215, 255), thickness=-1)
+        for u, v in np.round(final_projected.reshape(-1, 2)).astype(np.int32):
+            cv2.circle(overlay, (int(u), int(v)), 2, (0, 0, 255), thickness=-1)
+        legend = [
+            ("detected corners", (0, 255, 0)),
+            ("initial projection", (0, 215, 255)),
+            ("final projection", (0, 0, 255)),
+        ]
+        for index, (label, color) in enumerate(legend):
+            y = 30 + index * 24
+            cv2.circle(overlay, (24, y - 5), 6, color, thickness=-1)
+            cv2.putText(
+                overlay,
+                label,
+                (40, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                overlay,
+                label,
+                (40, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (30, 30, 30),
+                1,
+                cv2.LINE_AA,
+            )
+        output_path = preview_dir / f"{observation.pose_id}.png"
+        cv2.imwrite(str(output_path), overlay)
+        previews.append({"pose_id": observation.pose_id, "path": str(output_path)})
+    return previews
+
+
 def prepare_output_layout(output_dir: Path) -> tuple[Path, Path, Path]:
     diagnostics_dir = output_dir / "diagnostics"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -307,11 +385,11 @@ def write_outputs(
     ) as file:
         yaml.safe_dump(dataset_to_payload(dataset), file, sort_keys=False)
     with (diagnostics_dir / "extraction.yaml").open("w", encoding="utf-8") as file:
-        yaml.safe_dump(extraction_report, file, sort_keys=False)
+        yaml.safe_dump(_sanitize_payload(extraction_report), file, sort_keys=False)
     with (diagnostics_dir / "optimization.yaml").open("w", encoding="utf-8") as file:
-        yaml.safe_dump(optimization_report, file, sort_keys=False)
+        yaml.safe_dump(_sanitize_payload(optimization_report), file, sort_keys=False)
     with (diagnostics_dir / "evaluation.yaml").open("w", encoding="utf-8") as file:
-        yaml.safe_dump(evaluation_report, file, sort_keys=False)
+        yaml.safe_dump(_sanitize_payload(evaluation_report), file, sort_keys=False)
 
     extraction_entries_csv = write_table_csv(
         diagnostics_dir / "extraction_entries.csv",
@@ -363,10 +441,15 @@ def write_outputs(
         diagnostics_dir / "pose_diversity_plot.png",
         list(pose_diversity.get("per_pose", []) or []),
     )
-
-    acceptance_artifacts = write_acceptance_artifacts(
-        diagnostics_dir, metrics_output["final_acceptance"]
+    checkerboard_alignment_previews = _build_checkerboard_alignment_previews(
+        diagnostics_dir,
+        dataset,
+        initial_transform,
+        final_transform,
     )
+
+    final_acceptance = _sanitize_payload(metrics_output["final_acceptance"])
+    acceptance_artifacts = write_acceptance_artifacts(diagnostics_dir, final_acceptance)
     standardized_data = {
         "schema_version": 1,
         "module": "lidar2camera",
@@ -398,16 +481,24 @@ def write_outputs(
     data_quality = {
         "schema_version": 1,
         "module": "lidar2camera",
-        "status": metrics_output["final_acceptance"]["status"],
-        "release_ready": metrics_output["final_acceptance"]["release_ready"],
-        "quality_gates": metrics_output["final_acceptance"]["gates"],
-        "coarse_statuses": metrics_output["coarse_metrics"]["statuses"],
-        "pairing_summary": extraction_report.get("pairing_summary", {}),
-        "accepted_pair_ratio": extraction_report.get("accepted_pair_ratio"),
-        "skip_reason_counts": extraction_report.get("skip_reason_counts", {}),
-        "geometry_resolution": geometry_resolution,
-        "optimization_stages": optimization_report.get("stages", []),
-        "recommendation": metrics_output["final_acceptance"]["recommendation"],
+        "status": final_acceptance["status"],
+        "release_ready": final_acceptance["release_ready"],
+        "quality_gates": final_acceptance["gates"],
+        "coarse_statuses": _sanitize_payload(
+            metrics_output["coarse_metrics"]["statuses"]
+        ),
+        "pairing_summary": _sanitize_payload(
+            extraction_report.get("pairing_summary", {})
+        ),
+        "accepted_pair_ratio": _sanitize_payload(
+            extraction_report.get("accepted_pair_ratio")
+        ),
+        "skip_reason_counts": _sanitize_payload(
+            extraction_report.get("skip_reason_counts", {})
+        ),
+        "geometry_resolution": _sanitize_payload(geometry_resolution),
+        "optimization_stages": _sanitize_payload(optimization_report.get("stages", [])),
+        "recommendation": final_acceptance["recommendation"],
     }
     visual_review = [
         str(output_dir / "metrics.yaml"),
@@ -424,8 +515,15 @@ def write_outputs(
         visual_review.append(overlay_artifact)
     else:
         visual_review.append(
-            "No overlay artifact was generated; keep this run review-only until visual evidence is available."
+            "No overlay artifact was generated; keep this run review-only until "
+            "visual evidence is available."
         )
+    visual_review.extend(
+        preview["path"]
+        for preview in checkerboard_alignment_previews[
+            : min(6, len(checkerboard_alignment_previews))
+        ]
+    )
     detail_metrics = [
         str(output_dir / "metrics.yaml"),
         str(diagnostics_dir / "reference_dataset.yaml"),
@@ -449,12 +547,35 @@ def write_outputs(
             "visual_review": [item for item in visual_review if item is not None],
         },
         "manual_review": [
-            "Read diagnostics/standardized_data.yaml to confirm accepted/rejected sample counts and capture assumptions.",
-            "Read diagnostics/data_quality.yaml to inspect extraction_yield, image_coverage, pose_diversity, and board_geometry gates.",
-            "Read diagnostics/optimization.yaml stages plus diagnostics/geometry_resolution.csv before trusting a candidate that required multiple board-geometry resolution rounds.",
-            "Inspect the checkerboard corner coverage and extraction skip reasons before promoting a run.",
-            "Inspect the overlay for board-edge alignment and depth consistency, not only aggregate RMS.",
-            "Treat missing holdout or repeatability evidence as review-only, not release-ready.",
+            (
+                "Read diagnostics/standardized_data.yaml to confirm "
+                "accepted/rejected sample counts and capture assumptions."
+            ),
+            (
+                "Read diagnostics/data_quality.yaml to inspect extraction_yield, "
+                "image_coverage, pose_diversity, and board_geometry gates."
+            ),
+            (
+                "Read diagnostics/optimization.yaml stages plus "
+                "diagnostics/geometry_resolution.csv before trusting a "
+                "candidate that required multiple board-geometry resolution rounds."
+            ),
+            (
+                "Inspect the checkerboard corner coverage and extraction skip "
+                "reasons before promoting a run."
+            ),
+            (
+                "Inspect checkerboard_alignment_previews to confirm detected "
+                "corners and final projected board corners agree pose by pose."
+            ),
+            (
+                "Inspect the overlay for board-edge alignment and depth "
+                "consistency, not only aggregate RMS."
+            ),
+            (
+                "Treat missing holdout or repeatability evidence as review-only, "
+                "not release-ready."
+            ),
         ],
     }
     paradigm_artifacts = write_paradigm_artifacts(
@@ -466,7 +587,7 @@ def write_outputs(
     metrics_output["fine_metrics"]["artifacts"].update(acceptance_artifacts)
     metrics_output["fine_metrics"]["artifacts"].update(paradigm_artifacts)
     with (output_dir / "metrics.yaml").open("w", encoding="utf-8") as file:
-        yaml.safe_dump(metrics_output, file, sort_keys=False)
+        yaml.safe_dump(_sanitize_payload(metrics_output), file, sort_keys=False)
 
     manifest = {
         "parent_frame": dataset.parent_frame,
@@ -495,6 +616,7 @@ def write_outputs(
                 "geometry_resolution_csv": geometry_resolution_csv,
                 "image_coverage_heatmap": image_coverage_heatmap,
                 "pose_diversity_plot": pose_diversity_plot,
+                "checkerboard_alignment_previews": checkerboard_alignment_previews,
                 "overlay": overlay_artifact,
             },
         },
