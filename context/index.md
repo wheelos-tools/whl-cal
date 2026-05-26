@@ -24,6 +24,7 @@ The organizing rule is:
 6. `calibration_target_requirements.md`
 7. module detail notes:
    - `lidar2imu_context.md`
+   - `lidar2imu_customer_runbook.md`
    - `prepared_rig_dataset_context.md`
    - `lidar2lidar_advanced_strategy.md`
    - `calibration_dataset_2026_05_06.md`
@@ -73,6 +74,9 @@ The organizing rule is:
   - detailed lidar2imu iteration history
   - bag-by-bag findings
   - current weak-planar strategy
+- `lidar2imu_customer_runbook.md`
+  - customer-facing lidar2imu runbook
+  - automatic workflow, result viewing, and good-vs-bad visualization examples
 - `prepared_rig_dataset_context.md`
   - raw-LiDAR-only reusable extraction surface
   - run-eight bag findings for shared lidar2imu/lidar2lidar preprocessing

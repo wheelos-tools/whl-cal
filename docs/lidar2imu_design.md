@@ -213,8 +213,9 @@ This keeps the production review order stable:
 2. `data_quality.yaml` confirms whether the samples are eligible for full
    optimization.
 3. `metrics.yaml` and `acceptance_report.yaml` state the final conclusion.
-4. `visualization_index.yaml` points to residual CSVs and observability outputs
-   that should be plotted or inspected.
+4. `visualization_index.yaml` points to residual CSVs, IMU-vs-LiDAR trajectory
+   overlays, stitched-keyframe point clouds, and observability outputs that
+   should be plotted or inspected.
 
 ### Observability semantics
 
@@ -281,6 +282,12 @@ Current default topic mapping:
 If a bag has no LiDAR-to-parent TF at all, the converter can also run with
 `--identity-initial-transform`, but that mode is exploratory only and should not
 be treated as a production prior.
+
+When a bag **does** provide a trusted TF, `--initial-transform` stays solver-only.
+If you need to intentionally rebuild record-side geometry from a different seed
+(for example, pass-2 of `--auto-reextract-if-needed`), use
+`--extraction-transform` so `reference_transform` and `extraction_transform`
+remain explicitly separated.
 
 ### Why motion selection was changed
 

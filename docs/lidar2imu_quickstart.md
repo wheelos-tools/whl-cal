@@ -68,6 +68,16 @@ Core outputs:
 - `diagnostics/ground_residuals.csv`
 - `diagnostics/motion_residuals.csv`
 - `diagnostics/holdout_motion_residuals.csv`
+- `diagnostics/review_report.html`
+- `diagnostics/ground_residuals_plot.svg`
+- `diagnostics/motion_residuals_plot.svg`
+- `diagnostics/trajectory_overlay.svg`
+- `diagnostics/trajectory_position_gap_plot.svg`
+- `diagnostics/imu_trajectory_cloud.ply`
+- `diagnostics/lidar_trajectory_cloud.ply`
+- `diagnostics/trajectory_overlay_cloud.ply`
+- `diagnostics/holdout_motion_residuals_plot.svg`
+- `diagnostics/yaw_cost_scan.svg`
 
 ## Recommended Apollo bag contents
 
@@ -162,11 +172,23 @@ Finally inspect visual-review tables:
 cat outputs/lidar2imu/rig_left_front/calibration/diagnostics/visualization_index.yaml
 ```
 
+For the fastest visual review, open:
+
+```bash
+xdg-open outputs/lidar2imu/rig_left_front/calibration/diagnostics/review_report.html
+```
+
 Plot or review:
 
 - `ground_residuals.csv`: `normal_angle_deg`, `height_residual_m`
 - `motion_residuals.csv`: `rotation_residual_deg`, `translation_residual_m`,
   `registration_fitness`, `sync_dt_ms`
+- `trajectory_overlay.svg`: relative IMU vs LiDAR odometry overlay from the
+  selected motion factors
+- `trajectory_position_gap_plot.svg`: cumulative position disagreement between
+  the IMU motion chain and the LiDAR motion chain
+- `trajectory_overlay_cloud.ply`: stitched selected keyframes using both
+  trajectories; open in CloudCompare or Open3D for 3D geometry review
 - `observability.yaml`: yaw cost-scan flatness and plateau width
 
 For production full-6DoF release, require:
