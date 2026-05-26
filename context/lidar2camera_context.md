@@ -1,7 +1,7 @@
 ---
 audience: dev
 stability: stable
-last_tested: 2026-05-25
+last_tested: 2026-05-26
 ---
 
 # lidar2camera current context
@@ -33,6 +33,27 @@ Current release-oriented path:
 
 `learning_based.py` remains experimental and should not be treated as the first
 production release path.
+
+There are now **two clearly different lidar2camera surfaces** in the repo:
+
+1. **production / release path**
+   - `lidar2camera-calibrate`
+   - checkerboard-based
+   - paired `image + .pcd`
+   - this is the path to use when the question is:
+     - "what is the current official lidar2camera method?"
+     - "can this run be promoted?"
+2. **experimental benchmark path**
+   - `lidar2camera-nuscenes-benchmark`
+   - nuScenes GT-perturbation evaluation
+   - compares `identity`, `edge_refine`, and `oracle_gt`
+   - this is for controlled recovery benchmarking, **not** for replacing the
+     production checkerboard release contract
+
+So when someone asks "目前 lidar2camera 的方案是什么", the correct short answer is:
+
+- **production:** checkerboard reference-board calibration
+- **experimental:** separate targetless-style nuScenes benchmark for evidence-based comparison
 
 ## 2. Camera intrinsic live-capture rule
 
@@ -189,7 +210,190 @@ Review order:
 6. `diagnostics/acceptance_report.yaml`
 7. heatmap / pose-diversity / overlay evidence
 
-## 6. Current practical limitation
+## 6. How to judge good vs bad
+
+The repo intentionally does **not** judge a run by a single number.
+
+The current practical rule is:
+
+- a run is good only when **metrics, sample yield, repeatability, and visual
+  evidence are mutually consistent**
+
+### A. What "good" looks like
+
+For the production checkerboard path, a healthy result usually means:
+
+1. `final_acceptance.release_ready == true`
+2. `accepted_pair_ratio` stays healthy instead of surviving on a tiny subset
+3. `final_rms_px`, per-pose reprojection p95, and holdout p95 are all within thresholds
+4. leave-one-out repeatability does not show multiple conflicting solution families
+5. image coverage is broad enough across the image plane
+6. pose diversity is broad enough across depth and tilt
+7. board geometry and geometry resolution do not show unresolved ambiguity
+8. the overlay visually agrees with the metrics
+
+### B. What "bad" looks like
+
+A run should stay review-only or be recollected when any of these happens:
+
+1. optimizer converges but `accepted_pair_ratio` is low
+2. RMS is low but board centers are all near the image center
+3. RMS is low but poses all come from nearly the same depth / tilt family
+4. holdout error or leave-one-out repeatability is unstable
+5. geometry resolution needed many rounds or left unresolved poses
+6. overlay shows board-edge misalignment, depth layering errors, or obvious drift
+
+### C. What to trust most
+
+Use this review order:
+
+1. `diagnostics/standardized_data.yaml`
+2. `diagnostics/data_quality.yaml`
+3. `diagnostics/extraction.yaml`
+4. `diagnostics/geometry_resolution.csv`
+5. `metrics.yaml`
+6. `diagnostics/acceptance_report.yaml`
+7. `diagnostics/image_coverage_heatmap.png`
+8. `diagnostics/pose_diversity_plot.png`
+9. `diagnostics/reference_overlay.png`
+
+If the image evidence disagrees with the scalar metrics, trust the conflict and
+investigate; do not promote blindly.
+
+## 7. Visual evidence to inspect
+
+Besides scalar metrics, the current pipeline already writes several artifacts
+that should be treated as first-class review evidence.
+
+### A. `diagnostics/reference_overlay.png`
+
+What it is:
+
+- a representative image with projected LiDAR points blended onto the camera image
+- points are colored by depth
+
+How to read it:
+
+- board edges and nearby structure should align with visible image structure
+- depth-colored points should form a coherent layered projection instead of a
+  smeared cloud
+- if the board is aligned but nearby scene structure is obviously offset, the
+  transform is still suspicious
+
+Typical good example:
+
+- board boundary aligns
+- nearby edges such as cabinet / wall / pole contours are also consistent
+- no obvious global left-right or up-down shift
+
+Typical bad example:
+
+- a low RMS run still shows a clear systematic offset on one side of the board
+- points cross image edges that should be empty
+- depth layering looks inconsistent, indicating a plausible but wrong local minimum
+
+### B. `diagnostics/image_coverage_heatmap.png`
+
+What it is:
+
+- a 3x3 image-grid heatmap counting where checkerboard centers appeared
+
+How to read it:
+
+- good runs occupy multiple cells
+- horizontal and vertical span should both be healthy
+- center-only collection is a warning sign even if reprojection looks good
+
+Good example:
+
+- observations cover left/center/right and upper/middle/lower regions
+
+Bad example:
+
+- almost all counts live in the center cell or only a narrow horizontal strip
+
+### C. `diagnostics/pose_diversity_plot.png`
+
+What it is:
+
+- a scatter plot of board depth vs board tilt for accepted poses
+
+How to read it:
+
+- good runs spread across both depth and tilt
+- narrow clusters mean the calibration is weakly conditioned and may not generalize
+
+Good example:
+
+- points span multiple depths and multiple tilt angles
+
+Bad example:
+
+- nearly all points stack into a small cluster, meaning the run depends on one
+  pose family
+
+### D. `diagnostics/geometry_resolution.csv`
+
+What it is:
+
+- a table describing which board-geometry candidate was selected per pose across
+  resolution iterations
+
+How to read it:
+
+- good runs settle quickly with few or no changes after early rounds
+- bad runs keep changing source / swap / sign decisions or leave unresolved poses
+
+### E. `diagnostics/per_pose_reprojection.csv`
+
+What it is:
+
+- per-pose reprojection error table
+
+How to read it:
+
+- good runs do not rely on hiding a few catastrophic poses inside a good mean
+- inspect p95 / max-like tails, not only the average
+
+### F. `diagnostics/leave_one_out_trials.csv`
+
+What it is:
+
+- repeated solve results when each pose is held out once
+
+How to read it:
+
+- good runs remain close to the primary solution
+- bad runs split into noticeably different translation / rotation families
+
+## 8. How to judge the experimental nuScenes benchmark
+
+For `lidar2camera-nuscenes-benchmark`, the judgment logic is different from the
+checkerboard production run.
+
+Use this order:
+
+1. `oracle_gt` must be essentially perfect
+2. compare `edge_refine` against `identity`
+3. inspect `perturbation_summary.csv`
+4. inspect `success_curves.yaml`
+5. inspect overlays
+
+Interpretation:
+
+- if `oracle_gt` is not perfect, the benchmark wiring is wrong
+- if `edge_refine < identity`, the experimental method is helping
+- if `edge_refine == identity`, guard rails prevented a risky update
+- if `edge_refine > identity`, the current objective is not yet strong enough
+
+Today the honest status is:
+
+- the benchmark is valid and reproducible
+- the in-repo `edge_refine` baseline is still experimental
+- it should not be described as SOTA unless a stronger cross-dataset comparison
+  actually proves that
+
+## 9. Current practical limitation
 
 The biggest remaining risk is no longer a single hard-coded LiDAR in-plane axis.
 The current residual limitation is now narrower:
@@ -210,7 +414,7 @@ prioritize one of:
 2. reflective target support
 3. ChArUco / AprilTag-grid style target upgrade
 
-## 7. Current judgment
+## 10. Current judgment
 
 Current status is best described as:
 

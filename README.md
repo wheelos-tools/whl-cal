@@ -91,6 +91,8 @@ lidar2lidar-topics "$RECORD_DIR"
   [docs/camera_quickstart.md](docs/camera_quickstart.md)
 - LiDAR↔Camera:
   [docs/lidar2camera_quickstart.md](docs/lidar2camera_quickstart.md)
+- LiDAR↔Camera nuScenes benchmark:
+  [docs/lidar2camera_nuscenes_benchmark.md](docs/lidar2camera_nuscenes_benchmark.md)
 
 ### 4. Review results in the same order every time
 
@@ -163,6 +165,15 @@ lidar2imu-convert-record \
 ```bash
 lidar2camera-calibrate --write-default-config --config config.yaml
 lidar2camera-calibrate --config config.yaml
+```
+
+### LiDAR↔Camera nuScenes benchmark
+
+```bash
+lidar2camera-nuscenes-benchmark \
+  --info-path /mnt/synology/nuScenes/OpenDataLab___nuScenes/raw/Trainval/train/nuscenes_infos_val.pkl \
+  --camera-names CAM_FRONT \
+  --sample-limit 8
 ```
 
 ### Camera intrinsic
