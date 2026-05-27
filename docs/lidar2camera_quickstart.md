@@ -21,7 +21,7 @@ Before running this tool:
 
 | Item | Required | Notes |
 | --- | --- | --- |
-| paired images and `.pcd` files | yes | current tool input is a prepared directory, not a raw Apollo bag |
+| paired images and `.pcd` files | yes | either a prepared directory or a raw Apollo `.record` configured through `record_input` |
 | camera intrinsics | yes | 3x3 intrinsics matrix |
 | camera distortion | yes | 5-parameter distortion vector |
 | checkerboard pattern size | yes | inner-corner count |
@@ -44,10 +44,16 @@ Capture guidance:
 - change image region, distance, and tilt across poses
 - avoid motion blur, severe clipping, or partial board occlusion
 
-Current limitation: the repo does **not** yet provide a direct
-`.record -> lidar2camera dataset` exporter. After recording in Apollo, export
-synchronized image / point-cloud pairs with your existing dataset-preparation
-flow.
+The repo now supports two ingestion modes:
+
+1. **Prepared dataset mode**: point `data_directory` at paired image + `.pcd` files.
+2. **Apollo record mode**: set `record_input.enabled: true`, then provide
+   `record_path`, `image_topic`, and `lidar_topic`. The pipeline will export
+   synchronized pairs under the run output directory before calibration.
+
+If you already have a measured or manually-tuned seed extrinsic, set
+`initial_transform_path` to a YAML/JSON extrinsics file. The calibration run
+will load it automatically and use it as the optimizer seed.
 
 ## Install
 
@@ -62,6 +68,18 @@ pip install -e .
 ```bash
 lidar2camera-calibrate --write-default-config --config config.yaml
 lidar2camera-calibrate --config config.yaml
+```
+
+If you prefer to pre-export the record yourself, the standalone exporter is still
+available:
+
+```bash
+lidar2camera-extract-record \
+  --record-path "$RECORD_PATH" \
+  --image-topic /apollo/sensor/camera/front/image/compressed \
+  --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
+  --output-dir outputs/lidar2camera/export_run \
+  --initial-extrinsics lidar2camera_seed.yaml
 ```
 
 ## Recommended minimal config shape
@@ -81,6 +99,16 @@ extraction:
   min_edge_margin_px: 8.0
   max_plane_residual_rmse_m: 0.02
   reject_board_geometry_warnings: true
+record_input:
+  enabled: false
+  record_path: ""
+  image_topic: ""
+  lidar_topic: ""
+  sync_threshold_ms: 80.0
+  frame_stride: 1
+  max_pairs: 0
+  image_format: png
+initial_transform_path: null
 optimization:
   min_poses: 5
   loss: huber
