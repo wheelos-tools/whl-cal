@@ -19,30 +19,25 @@
 
 from __future__ import annotations
 
+import os
 from typing import Iterable, Iterator
 
 from lidar2lidar.apollo_flatbuffer_messages import get_flat_message_decoder
 from lidar2lidar.apollo_record_messages import get_message_class
 
-try:
-    from cyber_record.record import Record as CyberRecordReader
-except ImportError:
-    CyberRecordReader = None
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 try:
-    from pycyber.record import RecordReader as PycyberRecordReader
-except ImportError:
-    PycyberRecordReader = None
+    from cyber_record.record import Record as CyberRecordReader
+except (
+    Exception
+):  # noqa: BLE001 - surface backend availability in ensure_record_available
+    CyberRecordReader = None
 
 
 def ensure_record_available() -> None:
-    if CyberRecordReader is None and PycyberRecordReader is None:
-        raise RuntimeError(
-            (
-                "No record backend is available. "
-                "Install `cyber-record` (preferred) or `pycyber`."
-            )
-        )
+    if CyberRecordReader is None:
+        raise RuntimeError("No record backend is available. Install `cyber-record`.")
 
 
 def _normalize_topics(topics: Iterable[str] | None) -> set[str] | None:
@@ -76,17 +71,10 @@ def decode_message(payload: bytes, type_name: str | bytes):
 class Record:
     def __init__(self, file_name: str):
         ensure_record_available()
-        self._backend = ""
-        self._reader = None
+        self._backend = "cyber_record"
+        self._reader = CyberRecordReader(file_name)
         self._channel_type_by_topic: dict[str, str] = {}
-
-        if CyberRecordReader is not None:
-            self._backend = "cyber_record"
-            self._reader = CyberRecordReader(file_name)
-            self._channel_type_by_topic = self._extract_cyber_channel_types()
-        elif PycyberRecordReader is not None:
-            self._backend = "pycyber"
-            self._reader = PycyberRecordReader(file_name)
+        self._channel_type_by_topic = self._extract_cyber_channel_types()
 
     def __enter__(self) -> "Record":
         return self
@@ -110,65 +98,49 @@ class Record:
                     mapping[str(topic)] = str(type_name)
         return mapping
 
-    def read_raw_messages(
-        self, topics: Iterable[str] | None = None
+    def _iter_cyber_raw_entries(
+        self,
+        topics: Iterable[str] | None = None,
     ) -> Iterator[tuple[str, bytes, str, int]]:
         topic_filter = _normalize_topics(topics)
+        inner_reader = getattr(self._reader, "_reader", None)
+        if inner_reader is None:
+            return
 
-        if self._backend == "cyber_record":
-            for topic, message, timestamp_ns in self._reader.read_messages(
-                topics=tuple(topic_filter) if topic_filter is not None else None
-            ):
-                topic_name = str(topic)
+        for chunk_body_index in inner_reader._get_chunk_body_indexs(None, None):
+            proto_chunk_body = inner_reader.read_chunk_body(chunk_body_index.position)
+            if proto_chunk_body is None:
+                continue
+            inner_reader.chunk.swap(proto_chunk_body)
+
+            while not inner_reader.chunk.end():
+                single_message = inner_reader.chunk.next_message()
+                topic_name = str(single_message.channel_name)
                 if topic_filter is not None and topic_name not in topic_filter:
                     continue
 
-                if message is None:
-                    payload = b""
-                    type_name = self._channel_type_by_topic.get(topic_name, "")
-                else:
-                    serialize_fn = getattr(message, "SerializeToString", None)
-                    payload = (
-                        bytes(serialize_fn())
-                        if callable(serialize_fn)
-                        else bytes(message)
-                    )
-                    type_name = self._channel_type_by_topic.get(
-                        topic_name,
-                        getattr(getattr(message, "DESCRIPTOR", None), "full_name", ""),
-                    )
-
-                yield topic_name, payload, _normalize_type_name(type_name), int(
-                    timestamp_ns
+                yield (
+                    topic_name,
+                    bytes(single_message.content),
+                    _normalize_type_name(
+                        self._channel_type_by_topic.get(topic_name, "")
+                    ),
+                    int(single_message.time),
                 )
-            return
 
-        for bag_message in self._reader.read_messages():
-            topic = str(bag_message.topic)
-            if topic_filter is not None and topic not in topic_filter:
-                continue
-            yield (
-                topic,
-                bytes(bag_message.message),
-                _normalize_type_name(bag_message.data_type),
-                int(bag_message.timestamp),
-            )
+    def read_raw_messages(
+        self, topics: Iterable[str] | None = None
+    ) -> Iterator[tuple[str, bytes, str, int]]:
+        if self._backend == "cyber_record":
+            yield from self._iter_cyber_raw_entries(topics=topics)
+            return
 
     def read_messages(
         self, topics: Iterable[str] | None = None
     ) -> Iterator[tuple[str, object, int]]:
         if self._backend == "cyber_record":
-            topic_filter = _normalize_topics(topics)
-            for topic, message, timestamp_ns in self._reader.read_messages(
-                topics=tuple(topic_filter) if topic_filter is not None else None
+            for topic_name, payload, type_name, timestamp_ns in self.read_raw_messages(
+                topics=topics
             ):
-                topic_name = str(topic)
-                if topic_filter is not None and topic_name not in topic_filter:
-                    continue
-                yield topic_name, message, int(timestamp_ns)
+                yield topic_name, decode_message(payload, type_name), int(timestamp_ns)
             return
-
-        for topic, payload, type_name, timestamp_ns in self.read_raw_messages(
-            topics=topics
-        ):
-            yield topic, decode_message(payload, type_name), timestamp_ns

@@ -10,6 +10,7 @@ workflows.
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
 | `lidar2imu` | real-bag validated | keep `--profile baseline` as regression reference; use `--profile production` as the current map-side production candidate |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
+| `camera2camera` | target-based stereo baseline exists | use the checkerboard paired-image pipeline as the current production baseline; add ChArUco next |
 | `lidar2camera` | target-based industrial baseline exists | use the target-based pipeline as the current production baseline; keep targetless paths experimental |
 
 ## Recommended documentation path
@@ -30,6 +31,7 @@ If you are new to the repo, follow the docs in this order:
 | Module | Current tool input | Apollo-side raw data that should be recorded | Extra information you must know in advance |
 | --- | --- | --- | --- |
 | `camera` | live camera or exported image directory | camera image topic if you want to archive the session in Apollo; direct live capture is also supported | board pattern size, square size, fixed camera mode / exposure |
+| `camera2camera` | paired image directories | two camera image topics if you want Apollo traceability; the current tool itself consumes exported image pairs | parent / child intrinsics, board pattern size, square size, multi-pose board plan |
 | `lidar2camera` | paired `image + .pcd` files | camera image topic, LiDAR `PointCloud2`, `/tf_static`, optional `/tf` | camera intrinsics, distortion, checkerboard size, square size |
 | `lidar2lidar` | Apollo `.record` or prepared dataset | all raw LiDAR `PointCloud2` topics, `/tf_static`, optional `/tf` | sensor topic list, approximate TF tree / initial extrinsics, scene plan |
 | `lidar2imu` | Apollo `.record`, prepared dataset, or `standardized_samples.yaml` | one LiDAR topic, `/apollo/localization/pose`, IMU-related topics, `/tf_static`, optional `/tf` | LiDAR topic, pose topic, IMU topic, initial LiDAR↔IMU TF if bag lacks it |
@@ -89,6 +91,8 @@ lidar2lidar-topics "$RECORD_DIR"
   [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
 - Camera intrinsic:
   [docs/camera_quickstart.md](docs/camera_quickstart.md)
+- Camera-to-camera:
+  [docs/camera2camera_quickstart.md](docs/camera2camera_quickstart.md)
 - LiDAR↔Camera:
   [docs/lidar2camera_quickstart.md](docs/lidar2camera_quickstart.md)
 - LiDAR↔Camera nuScenes benchmark:
@@ -160,6 +164,13 @@ lidar2imu-convert-record \
   --calibrate
 ```
 
+### Camera-to-camera
+
+```bash
+camera2camera-calibrate --write-default-config --config camera2camera_config.yaml
+camera2camera-calibrate --config camera2camera_config.yaml
+```
+
 ### LiDAR↔Camera
 
 ```bash
@@ -218,6 +229,8 @@ Module docs:
 - LiDAR-to-LiDAR current design: [docs/lidar2lidar_design.md](docs/lidar2lidar_design.md)
 - LiDAR-to-IMU overview: [docs/lidar2imu.md](docs/lidar2imu.md)
 - LiDAR-to-IMU Quick Start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
+- Camera-to-camera Quick Start: [docs/camera2camera_quickstart.md](docs/camera2camera_quickstart.md)
+- Camera-to-camera design: [docs/camera2camera_design.md](docs/camera2camera_design.md)
 - LiDAR-to-IMU current design: [docs/lidar2imu_design.md](docs/lidar2imu_design.md)
 - Camera intrinsic quick start: [docs/camera_quickstart.md](docs/camera_quickstart.md)
 - LiDAR↔Camera Quick Start: [docs/lidar2camera_quickstart.md](docs/lidar2camera_quickstart.md)

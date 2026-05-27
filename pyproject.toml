@@ -23,7 +23,7 @@ dependencies = [
   "numpy",
   "opencv-python",
   "open3d",
-  "protobuf>=3.19,<6",
+  "protobuf>=3.20,<4",
   "scipy",
   "pyyaml"
 ]
@@ -51,6 +51,7 @@ lidar2imu-convert-record = "lidar2imu.record_converter:main"
 lidar2imu-tune-record = "tools.lidar2imu.tune_record:main"
 lidar2imu-review-runs = "tools.lidar2imu.review_runs:main"
 lidar2camera-calibrate = "lidar2camera.cli:main"
+camera2camera-calibrate = "camera2camera.cli:main"
 lidar2camera-extract-record = "lidar2camera.record_export:main"
 lidar2camera-nuscenes-benchmark = "tools.lidar2camera.run_nuscenes_benchmark:main"
 lidar2camera-nuscenes-precision-audit = "tools.lidar2camera.run_nuscenes_precision_audit:main"
