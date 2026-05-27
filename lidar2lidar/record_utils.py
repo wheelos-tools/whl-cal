@@ -30,9 +30,11 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 
-from lidar2lidar.extrinsic_io import (extrinsics_filename,
-                                      load_extrinsics_file,
-                                      save_extrinsics_yaml)
+from lidar2lidar.extrinsic_io import (
+    extrinsics_filename,
+    load_extrinsics_file,
+    save_extrinsics_yaml,
+)
 from lidar2lidar.record_adapter import Record, ensure_record_available
 
 
@@ -94,6 +96,12 @@ def topic_sensor_name(topic: str) -> str:
     return topic
 
 
+def resolve_topic_frame_id(topic: str, frame_id: str) -> str:
+    if frame_id:
+        return frame_id
+    return topic_sensor_name(topic)
+
+
 def get_topic_frame_ids(
     record_files: Iterable[str], topics: Iterable[str]
 ) -> dict[str, str]:
@@ -107,7 +115,10 @@ def get_topic_frame_ids(
         with Record(record_file) as record:
             for channel, msg, _ in record.read_messages(topics=tuple(pending)):
                 header = getattr(msg, "header", None)
-                frame_id = getattr(header, "frame_id", "")
+                frame_id = resolve_topic_frame_id(
+                    channel,
+                    getattr(header, "frame_id", ""),
+                )
                 if channel not in frame_ids:
                     frame_ids[channel] = frame_id
                     pending.discard(channel)
@@ -130,7 +141,10 @@ def collect_pointcloud_metadata(
         with Record(record_file) as record:
             for channel, msg, timestamp_ns in record.read_messages(topics=topic_set):
                 header = getattr(msg, "header", None)
-                frame_id = getattr(header, "frame_id", "")
+                frame_id = resolve_topic_frame_id(
+                    channel,
+                    getattr(header, "frame_id", ""),
+                )
                 metadata[channel].append(
                     PointCloudMeta(
                         topic=channel,

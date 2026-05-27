@@ -7,17 +7,15 @@ from typing import Any
 import cv2
 import numpy as np
 import open3d as o3d
-import yaml
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as R
 
+from lidar2camera.input_source import prepare_reference_config
 from lidar2camera.io import write_outputs
 from lidar2camera.metrics import build_metrics_output, transform_delta_metrics
-from lidar2camera.models import (
-    ReferenceCalibrationConfig,
-    ReferenceCalibrationDataset,
-    ReferencePoseObservation,
-)
+from lidar2camera.models import (ReferenceCalibrationConfig,
+                                 ReferenceCalibrationDataset,
+                                 ReferencePoseObservation)
 
 
 def default_reference_config_payload() -> dict[str, Any]:
@@ -49,6 +47,17 @@ def default_reference_config_payload() -> dict[str, Any]:
             "child": "lidar",
         },
         "data_directory": "calibration_data",
+        "record_input": {
+            "enabled": False,
+            "record_path": "",
+            "image_topic": "",
+            "lidar_topic": "",
+            "sync_threshold_ms": 80.0,
+            "frame_stride": 1,
+            "max_pairs": 0,
+            "image_format": "png",
+        },
+        "initial_transform_path": None,
         "optimization": {
             "min_poses": 5,
             "loss": "huber",
@@ -76,9 +85,20 @@ def default_reference_config_payload() -> dict[str, Any]:
     }
 
 
-def _load_config(config_path: str) -> tuple[dict[str, Any], ReferenceCalibrationConfig]:
-    with open(config_path, "r", encoding="utf-8") as file:
-        payload = yaml.safe_load(file) or {}
+def _load_config(
+    config_path: str,
+    *,
+    prepared_payload: dict[str, Any] | None = None,
+    output_dir_override: str | None = None,
+) -> tuple[dict[str, Any], ReferenceCalibrationConfig]:
+    if prepared_payload is None:
+        prepared = prepare_reference_config(
+            config_path,
+            output_dir_override=output_dir_override,
+        )
+        payload = prepared.payload
+    else:
+        payload = copy.deepcopy(prepared_payload)
 
     checkerboard = payload.get("checkerboard", {}) or {}
     point_cloud = payload.get("point_cloud", {}) or {}
@@ -668,8 +688,15 @@ def _assess_pose_sample_quality(
 
 def _load_reference_dataset(
     config_path: str,
+    *,
+    prepared_payload: dict[str, Any] | None = None,
+    output_dir_override: str | None = None,
 ) -> tuple[ReferenceCalibrationDataset, ReferenceCalibrationConfig, dict, dict]:
-    config_payload, config = _load_config(config_path)
+    config_payload, config = _load_config(
+        config_path,
+        prepared_payload=prepared_payload,
+        output_dir_override=output_dir_override,
+    )
     camera_payload = config_payload.get("camera", {}) or {}
     camera_matrix = np.asarray(camera_payload.get("intrinsics"), dtype=float)
     camera_distortion = np.asarray(
@@ -773,6 +800,9 @@ def _load_reference_dataset(
             "config_path": str(Path(config_path).expanduser().resolve()),
             "data_directory": str(data_directory),
             "extractor": "checkerboard_reference_based",
+            "input_preparation": copy.deepcopy(
+                config_payload.get("_input_preparation")
+            ),
             "orientation_assumption": "candidate_resolved_plane_axes",
             "board_geometry_strategy": "gravity_pca_hypotheses_plus_ippe_consistency",
             "board_template_extent_xy_m": {
@@ -1336,9 +1366,17 @@ def run_reference_calibration_from_config(
     *,
     output_dir_override: str | None = None,
 ) -> dict:
-    dataset, config, raw_config, extraction_report = _load_reference_dataset(
-        config_path
+    prepared = prepare_reference_config(
+        config_path,
+        output_dir_override=output_dir_override,
     )
+    dataset, config, raw_config, extraction_report = _load_reference_dataset(
+        config_path,
+        prepared_payload=prepared.payload,
+        output_dir_override=output_dir_override,
+    )
+    raw_config["_input_preparation"] = copy.deepcopy(prepared.report)
+    dataset.metadata["input_preparation"] = copy.deepcopy(prepared.report)
     dataset, geometry_resolution = _resolve_board_geometry_candidates(dataset, config)
     if geometry_resolution is not None:
         extraction_report["geometry_resolution"] = geometry_resolution
