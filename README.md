@@ -190,7 +190,7 @@ lidar2camera-nuscenes-benchmark \
 ### Camera intrinsic
 
 ```bash
-python camera/intrinsic.py --config camera_config.yaml
+camera-intrinsic-calibrate --config camera_config.yaml
 ```
 
 ## Common output artifacts
@@ -209,7 +209,9 @@ module, look for:
 - `calibrated/*.yaml`
 
 For `camera`, the equivalent outputs live under
-`calibration_YYYYmmdd_HHMMSS_diagnostics/`.
+`outputs/camera_intrinsic/runs/<session>/calibration_diagnostics/`, while live
+accepted samples are archived under
+`outputs/camera_intrinsic/captures/<session>/accepted/`.
 
 ## Knowledge base and deeper docs
 

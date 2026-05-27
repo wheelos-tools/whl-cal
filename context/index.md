@@ -29,6 +29,7 @@ The organizing rule is:
    - `lidar2lidar_advanced_strategy.md`
    - `calibration_dataset_2026_05_06.md`
    - `calibration_algorithm_review_2026_05_17.md`
+  - `camera_intrinsic_round01_review_2026_05_27.md`
    - `timing_sync_context.md`
    - `timing_topic_table.md`
    - `scan2map_context.md`
@@ -87,6 +88,9 @@ The organizing rule is:
   - metadata, topic inventory, and calibration implications for `/mnt/synology/REDACTED/2026-5-6-标定/`
 - `calibration_algorithm_review_2026_05_17.md`
   - lidar2lidar/lidar2imu algorithm review, shared acceptance contract, and target-bag validation
+- `camera_intrinsic_round01_review_2026_05_27.md`
+  - AprilGrid intrinsic round01 failure analysis
+  - weak-view pruning experiments and round02 recollection checklist
 - `timing_sync_context.md`
   - clock-source and timestamp-chain analysis for Vanjee / Huace / MSF
   - bag-level timing measurements and synchronization recommendations

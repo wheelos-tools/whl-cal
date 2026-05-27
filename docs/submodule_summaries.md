@@ -15,10 +15,10 @@ This document preserves concise, user-facing snippets that were previously locat
 - Purpose: Intrinsic camera calibration using a chessboard.
 - Quick start:
   - Install: `pip install opencv-python numpy pyyaml`
-  - Run: `python camera/intrinsic.py`
+  - Run: `camera-intrinsic-calibrate --config camera_config.yaml`
   - Controls: `S` save frame, `C` run calibration (>=20 frames), `Q` quit.
-- Output: `calibration_results.yaml` (camera_matrix, distortion_coefficients, reprojection_error).
-- Note: `camera/intrinsic.py` is intrinsic-only. Use `lidar2camera` for LiDAR↔Camera extrinsics and full evaluation (`lidar2camera-calibrate --config config.yaml`).
+- Output: `outputs/camera_intrinsic/runs/<session>/calibration.yaml` plus diagnostics and comparison views.
+- Note: `camera/intrinsic.py` now acts as a compatibility shim to `camera.cli`; use `lidar2camera` for LiDAR↔Camera extrinsics and full evaluation (`lidar2camera-calibrate --config config.yaml`).
 
 ## tools
 
