@@ -42,9 +42,8 @@ def matrix_to_quaternion_and_translation(matrix: np.ndarray):
         AssertionError: If matrix shape is not (4, 4).
     """
     assert matrix.shape == (4, 4), "Matrix must be 4x4"
-    # SciPy may reject read-only views coming from some backends.
-    rotation_matrix = np.array(matrix[:3, :3], dtype=np.float64, copy=True)
-    translation = np.array(matrix[:3, 3], dtype=np.float64, copy=True)
+    rotation_matrix = matrix[:3, :3]
+    translation = matrix[:3, 3]
     quat = R.from_matrix(rotation_matrix).as_quat()  # (x, y, z, w)
     quat_wxyz = [quat[3], quat[0], quat[1], quat[2]]
     return quat_wxyz, translation

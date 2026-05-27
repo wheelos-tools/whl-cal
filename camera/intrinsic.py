@@ -25,7 +25,6 @@ calibration without any GUI. This enables CI and smoke tests.
 """
 
 import glob
-from pathlib import Path
 import cv2
 import numpy as np
 import yaml
@@ -33,50 +32,87 @@ import time
 import os
 from datetime import datetime
 
-from calibration_common.evaluation import (
-    build_final_acceptance,
-    write_acceptance_artifacts,
-    write_paradigm_artifacts,
-    write_table_csv,
+from camera.intrinsic_capture import (
+    apply_capture_settings,
+    build_capture_runtime_info,
+    capture_config,
+    display_size,
+    is_visually_empty_frame,
+    log_capture_runtime_info,
+    open_managed_capture,
+    resolve_capture_source,
 )
+from camera.intrinsic_evaluation import (
+    coverage_metrics,
+    distortion_monotonicity_report,
+    float_list_summary,
+    per_view_reprojection_report,
+    write_review_artifacts,
+)
+from camera.intrinsic_sampling import IntrinsicSamplingState
+from camera.intrinsic_solver import (
+    build_undistortion_model,
+    calibrate_camera,
+    mean_reprojection_error,
+    undistort_for_preview,
+)
+from camera.intrinsic_targets import CalibrationTargetDetector
+from camera.intrinsic_visualization import (
+    build_comparison_canvas,
+    draw_aprilgrid_debug,
+    draw_capture_runtime_info,
+    draw_dynamic_ui,
+    draw_text,
+    draw_valid_roi,
+    generate_grid_overlay,
+    render_preserving_aspect_ratio,
+)
+from camera.intrinsic_workspace import IntrinsicWorkspace
 
 
 def _float_list_summary(values):
-    if not values:
-        return None
-    series = np.asarray(values, dtype=float)
-    return {
-        "mean": float(np.mean(series)),
-        "std": float(np.std(series)),
-        "min": float(np.min(series)),
-        "p50": float(np.percentile(series, 50)),
-        "p95": float(np.percentile(series, 95)),
-        "max": float(np.max(series)),
-    }
+    return float_list_summary(values)
 
 
 class CameraCalibrator:
-    def __init__(self, cfg_path):
+    def __init__(self, cfg_path, session_name=None, capture_only=False):
         """Initialize and load configuration"""
         with open(cfg_path, "r") as f:
             self.cfg = yaml.safe_load(f)
 
-        self.cfg_path = str(Path(cfg_path).resolve())
-
-        self.pattern_size = tuple(self.cfg["pattern_size"])
-        self.square_size = self.cfg["square_size"]
         self.ac_cfg = self.cfg["auto_capture_settings"]
         self.window_name = self.cfg.get("window_name", "Camera Calibrator")
+        self.target_type = str(
+            self.cfg.get("target_type", self.cfg.get("pattern_type", "chessboard"))
+        ).lower()
+        self.pattern_size = None
+        self.square_size = None
+        if self.target_type == "chessboard":
+            pattern_size = self.cfg.get("pattern_size")
+            square_size = self.cfg.get("square_size")
+            if pattern_size is None or square_size is None:
+                raise ValueError(
+                    "Chessboard calibration requires pattern_size and square_size in the config."
+                )
+            self.pattern_size = tuple(pattern_size)
+            self.square_size = float(square_size)
+        self.capture_only = bool(capture_only)
+        self.require_release_ready = bool(self.cfg.get("require_release_ready", False))
+        self.last_release_ready = None
+        self.session_name = session_name
+        self.workspace = IntrinsicWorkspace(
+            self.cfg,
+            self.target_type,
+            session_name=session_name,
+        )
 
         # Camera calibration data container
-        self.objpoints, self.imgpoints = [], []
-        self.objp = np.zeros(
-            (self.pattern_size[0] * self.pattern_size[1], 3), np.float32
+        self.sampling = IntrinsicSamplingState(self.ac_cfg)
+        self.target_detector = CalibrationTargetDetector(
+            self.cfg,
+            self.pattern_size,
+            self.square_size,
         )
-        self.objp[:, :2] = np.mgrid[
-            0 : self.pattern_size[0], 0 : self.pattern_size[1]
-        ].T.reshape(-1, 2)
-        self.objp *= self.square_size
 
         # state
         self.state = "CAPTURING"
@@ -85,642 +121,328 @@ class CameraCalibrator:
         self.result_canvas = None
         self.last_raw_frame = None
         self.capture_runtime_info = None
-        self.sample_records = []
         self.comparison_view_path = None
-        self._window_rect_logged = False
+        self.capture_session = None
+        self.run_session = None
+        self.dataset_images_dir = None
+        self.live_capture_handle = None
+        self.preexisting_capture_sample_count = 0
+        self.last_detection_debug = None
+        self._last_aprilgrid_debug_signature = None
+        self.last_sampling_debug = None
+        self._last_sampling_debug_signature = None
+        self.last_sampling_progress = self.sampling.progress_snapshot()
+        self.capture_source, self.capture_source_meta = resolve_capture_source(self.cfg)
 
         self._reset_auto_capture_state()
 
-    def _camera_source(self):
-        source = self.cfg.get("camera_source", self.cfg.get("camera_index", 0))
-        if isinstance(source, str):
-            stripped = source.strip()
-            if stripped.isdigit():
-                return int(stripped)
-            return stripped
-        return int(source)
-
-    def _camera_source_label(self, source):
-        if isinstance(source, str):
-            return source
-        return f"index:{int(source)}"
-
     def _reset_auto_capture_state(self):
-        ac = self.ac_cfg
-        self.grid_shape = tuple(ac["grid_shape"])
-        self.samples_per_grid = ac["samples_per_grid"]
-        self.min_total_samples = (
-            self.grid_shape[0] * self.grid_shape[1] * self.samples_per_grid
-        )
-        self.grid_coverage = np.zeros(self.grid_shape, dtype=int)
-        self.stability_counter = 0
-        self.last_corners_center = None
-        self.last_capture_time = 0
-        self.objpoints, self.imgpoints = [], []
-        self.sample_records = []
+        self.sampling.reset()
         self.state = "CAPTURING"
+        self.last_detection_debug = None
+        self._last_aprilgrid_debug_signature = None
+        self.last_sampling_debug = None
+        self._last_sampling_debug_signature = None
+        self.last_sampling_progress = self.sampling.progress_snapshot()
+        self.preexisting_capture_sample_count = 0
         print("\n[INFO] Session reset and ready.")
 
-    def _display_size(self):
-        return (
-            int(self.cfg.get("window_width", 1280)),
-            int(self.cfg.get("window_height", 720)),
-        )
+    @property
+    def objpoints(self):
+        return self.sampling.objpoints
 
-    def _capture_config(self):
-        capture_cfg = self.cfg.get("capture", {}) or {}
-        width = capture_cfg.get("width", self.cfg.get("capture_width"))
-        height = capture_cfg.get("height", self.cfg.get("capture_height"))
-        return {
-            "force_resolution": bool(
-                capture_cfg.get(
-                    "force_resolution",
-                    self.cfg.get("force_capture_resolution", False),
-                )
-            ),
-            "width": None if width in (None, "") else int(width),
-            "height": None if height in (None, "") else int(height),
-            "fourcc": capture_cfg.get("fourcc"),
-            "strict_resolution_match": bool(
-                capture_cfg.get("strict_resolution_match", False)
-            ),
-        }
+    @property
+    def imgpoints(self):
+        return self.sampling.imgpoints
 
-    def _apply_capture_settings(self, cap):
-        capture_cfg = self._capture_config()
-        fourcc = capture_cfg.get("fourcc")
-        if isinstance(fourcc, str) and len(fourcc) == 4:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
-        if (
-            capture_cfg["force_resolution"]
-            and capture_cfg["width"] is not None
-            and capture_cfg["height"] is not None
-        ):
+    @property
+    def sample_records(self):
+        return self.sampling.sample_records
+
+    @property
+    def grid_shape(self):
+        return self.sampling.grid_shape
+
+    @property
+    def samples_per_grid(self):
+        return self.sampling.samples_per_grid
+
+    @property
+    def min_total_samples(self):
+        return self.sampling.min_total_samples
+
+    @property
+    def grid_coverage(self):
+        return self.sampling.grid_coverage
+
+    def _prepare_live_capture_session(self):
+        if self.capture_session is None:
+            self.capture_session = self.workspace.prepare_capture_session()
+            self.preexisting_capture_sample_count = int(
+                len(list(self.capture_session.accepted_dir.glob("sample_*.jpg")))
+            )
+            self.dataset_images_dir = str(self.capture_session.accepted_dir)
             print(
-                "[INFO] Requesting capture resolution "
-                f"{capture_cfg['width']}x{capture_cfg['height']}."
+                "[INFO] Live accepted samples directory:",
+                self.capture_session.accepted_dir,
             )
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, capture_cfg["width"])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, capture_cfg["height"])
-        else:
-            print(
-                "[INFO] Capture resolution is not forced. "
-                "Using the camera's native/as-is output avoids accidental FOV crop."
-            )
-
-    def _ensure_qt_fontdir(self):
-        if os.environ.get("QT_QPA_FONTDIR"):
-            return
-        for candidate in (
-            "/usr/share/fonts/truetype/dejavu",
-            "/usr/share/fonts",
-        ):
-            if os.path.isdir(candidate):
-                os.environ["QT_QPA_FONTDIR"] = candidate
-                return
-
-    def _frame_stats(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        return float(np.mean(gray)), float(np.std(gray))
-
-    def _select_startup_frame(self, cap, *, warmup_frames=5, sample_frames=20):
-        means = []
-        stds = []
-        best_frame = None
-        best_mean = 0.0
-        best_std = -1.0
-
-        for index in range(max(warmup_frames + sample_frames, 1)):
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                continue
-            mean_val, std_val = self._frame_stats(frame)
-            if index < warmup_frames:
-                continue
-            means.append(mean_val)
-            stds.append(std_val)
-            if mean_val < 8.0 and std_val < 5.0:
-                continue
-            if std_val > best_std:
-                best_frame = frame.copy()
-                best_mean = mean_val
-                best_std = std_val
-
-        summary = {
-            "sampled_frame_count": int(len(stds)),
-            "non_black_frame_count": int(
-                sum(1 for mean_val, std_val in zip(means, stds) if not (mean_val < 8.0 and std_val < 5.0))
-            ),
-            "mean_avg": None if not means else float(np.mean(np.asarray(means))),
-            "std_avg": None if not stds else float(np.mean(np.asarray(stds))),
-            "std_p95": None
-            if not stds
-            else float(np.percentile(np.asarray(stds), 95)),
-            "selected_mean": None if best_frame is None else float(best_mean),
-            "selected_std": None if best_frame is None else float(best_std),
-        }
-        summary["constant_stream"] = bool(
-            summary["std_p95"] is not None and summary["std_p95"] < 1.0
-        )
-        return best_frame, summary
-
-    def _build_capture_runtime_info(
-        self, cap, frame, *, source, backend_name, startup_report
-    ):
-        capture_cfg = self._capture_config()
-        display_w, display_h = self._display_size()
-        actual_h, actual_w = frame.shape[:2]
-        reported_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        reported_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        capture_aspect = float(actual_w / max(actual_h, 1))
-        display_aspect = float(display_w / max(display_h, 1))
-        requested_resolution = (
-            None
-            if capture_cfg["width"] is None or capture_cfg["height"] is None
-            else {
-                "width": int(capture_cfg["width"]),
-                "height": int(capture_cfg["height"]),
-            }
-        )
-        warnings = []
-        if capture_cfg["force_resolution"]:
-            warnings.append(
-                "Forced capture resolution can crop some sensors before the 3x3 grid is drawn."
-            )
-            warnings.append(
-                "If the live grid looks clipped, disable capture.force_resolution or switch to a native mode such as 4:3."
-            )
-        preview_geometry = "matched"
-        if abs(display_aspect - capture_aspect) > 0.05:
-            preview_geometry = "letterboxed"
-            warnings.append(
-                "Display window aspect differs from capture; the app letterboxes for display, but that is not sensor crop."
-            )
-        resolution_match = None
-        if requested_resolution is not None:
-            resolution_match = bool(
-                actual_w == int(requested_resolution["width"])
-                and actual_h == int(requested_resolution["height"])
-            )
-            if not resolution_match:
-                warnings.append(
-                    "Actual capture resolution does not match requested resolution."
+            if self.preexisting_capture_sample_count > 0:
+                print(
+                    "[WARN] Reusing a capture directory that already contains accepted samples:",
+                    f"existing_samples={self.preexisting_capture_sample_count}.",
+                    "Use a new --session-name or clear the directory if you want an isolated run.",
                 )
-        if bool((startup_report or {}).get("constant_stream")):
-            warnings.append(
-                "Startup stream appears nearly constant; camera source may be incorrect."
+            self._write_capture_session_manifest(status="collecting")
+        return self.capture_session
+
+    def _prepare_run_session(self, dataset_label=None):
+        if self.run_session is None:
+            self.run_session = self.workspace.prepare_run_session(dataset_label=dataset_label)
+            print(
+                "[INFO] Calibration artifacts directory:",
+                self.run_session.session_dir,
             )
-        return {
-            "camera_source": self._camera_source_label(source),
-            "capture_backend": str(backend_name),
-            "requested_capture_resolution": requested_resolution,
-            "strict_resolution_match": bool(capture_cfg["strict_resolution_match"]),
-            "resolution_match": resolution_match,
-            "preview_geometry": preview_geometry,
-            "force_capture_resolution": bool(capture_cfg["force_resolution"]),
-            "fourcc": capture_cfg.get("fourcc"),
-            "actual_capture_resolution": {
-                "width": int(actual_w),
-                "height": int(actual_h),
-            },
-            "reported_capture_resolution": {
-                "width": int(reported_w),
-                "height": int(reported_h),
-            },
+        return self.run_session
+
+    def _base_capture_runtime_snapshot(self):
+        display_w, display_h = display_size(self.cfg)
+        cap_cfg = capture_config(self.cfg, self.capture_source_meta)
+        snapshot = {
+            "capture_source": str(self.capture_source),
+            "capture_source_type": self.capture_source_meta.get("source_type"),
+            "selected_camera_index": self.capture_source_meta.get("selected_camera_index"),
+            "requested_capture_resolution": (
+                None
+                if cap_cfg["width"] is None or cap_cfg["height"] is None
+                else {
+                    "width": int(cap_cfg["width"]),
+                    "height": int(cap_cfg["height"]),
+                }
+            ),
+            "force_capture_resolution": bool(cap_cfg["force_resolution"]),
+            "fourcc": cap_cfg.get("fourcc"),
+            "fps": cap_cfg.get("fps"),
+            "codec": cap_cfg.get("codec"),
+            "requested_buffersize": cap_cfg.get("buffersize"),
             "display_resolution": {
                 "width": int(display_w),
                 "height": int(display_h),
             },
-            "startup_frame_quality": startup_report,
-            "warnings": warnings,
         }
+        if self.live_capture_handle is not None:
+            snapshot["reported_capture_resolution"] = {
+                "width": int(self.live_capture_handle.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                "height": int(self.live_capture_handle.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            }
+            if hasattr(self.live_capture_handle, "diagnostics"):
+                snapshot["stream_health"] = self.live_capture_handle.diagnostics()
+        return snapshot
 
-    def _log_capture_runtime_info(self, runtime_info):
-        source = runtime_info.get("camera_source")
-        backend = runtime_info.get("capture_backend")
-        actual = runtime_info["actual_capture_resolution"]
-        display = runtime_info["display_resolution"]
-        requested = runtime_info.get("requested_capture_resolution")
-        if source is not None:
-            print("[INFO] Capture source:", source)
-        if backend is not None:
-            print(f"[INFO] Capture source opened via backend={backend}")
-        print(
-            "[INFO] Live capture resolution:",
-            f"{actual['width']}x{actual['height']}",
-            "| display window:",
-            f"{display['width']}x{display['height']}",
+    def _capture_runtime_snapshot(self):
+        snapshot = (
+            dict(self.capture_runtime_info)
+            if self.capture_runtime_info is not None
+            else self._base_capture_runtime_snapshot()
         )
-        if requested is not None:
-            print(
-                "[INFO] Requested capture resolution:",
-                f"{requested['width']}x{requested['height']}",
-            )
-            resolution_match = runtime_info.get("resolution_match")
-            strict_match = runtime_info.get("strict_resolution_match")
-            if resolution_match is not None:
-                print(
-                    "[INFO] Capture resolution match:",
-                    f"{'PASS' if resolution_match else 'FAIL'}",
-                    f"(strict={'ON' if strict_match else 'OFF'})",
-                )
-        preview_geometry = runtime_info.get("preview_geometry")
-        if preview_geometry == "matched":
-            print(
-                "[INFO] Preview geometry: full-frame scaled display, no crop; calibration still uses raw frames."
-            )
-        elif preview_geometry == "letterboxed":
-            print(
-                "[INFO] Preview geometry: letterboxed display, no crop; calibration still uses raw frames."
-            )
-        for warning in runtime_info.get("warnings", []):
-            print("[WARN]", warning)
+        if self.live_capture_handle is not None and hasattr(self.live_capture_handle, "diagnostics"):
+            snapshot["stream_health"] = self.live_capture_handle.diagnostics()
+        return snapshot
+
+    def _freeze_capture_runtime_info(self):
+        self.capture_runtime_info = self._capture_runtime_snapshot()
+        return self.capture_runtime_info
 
     def _draw_capture_runtime_info(self, image):
-        runtime_info = self.capture_runtime_info or {}
-        actual = runtime_info.get("actual_capture_resolution", {})
-        display = runtime_info.get("display_resolution", {})
-        requested = runtime_info.get("requested_capture_resolution")
-        lines = [
-            (
-                "Capture "
-                f"{actual.get('width', 0)}x{actual.get('height', 0)}"
-                f" | Display {display.get('width', 0)}x{display.get('height', 0)}"
-            ),
-            (
-                "Forced capture: "
-                + (
-                    "ON"
-                    if runtime_info.get("force_capture_resolution")
-                    else "OFF (preferred for full FOV)"
-                )
-            ),
-        ]
-        if requested is not None:
-            lines.append(
-                "Requested capture "
-                f"{requested.get('width', 0)}x{requested.get('height', 0)}"
-            )
-            resolution_match = runtime_info.get("resolution_match")
-            if resolution_match is not None:
-                lines.append(
-                    "Resolution match: " + ("PASS" if resolution_match else "FAIL")
-                )
-        warnings = runtime_info.get("warnings", [])
-        if warnings:
-            lines.extend(warnings[:1])
+        draw_capture_runtime_info(image, self._capture_runtime_snapshot())
 
-        start_y = max(30, image.shape[0] - 140)
-        for index, line in enumerate(lines):
-            color = (0, 180, 255) if index >= 3 else (255, 255, 255)
-            self._draw_text(
-                image,
-                line,
-                (30, start_y + index * 30),
-                color=color,
-                scale=0.7,
-                thickness=2,
-            )
-
-    def _build_sample_record(
-        self,
-        refined,
-        image_size_wh,
-        *,
-        source,
-        source_path=None,
-        grid_cell=None,
-    ):
-        width, height = int(image_size_wh[0]), int(image_size_wh[1])
-        corners = np.asarray(refined, dtype=float).reshape(-1, 2)
-        bbox_min = np.min(corners, axis=0)
-        bbox_max = np.max(corners, axis=0)
-        center = np.mean(corners, axis=0)
-        if grid_cell is None:
-            cell_x = min(
-                self.grid_shape[1] - 1,
-                max(0, int((center[0] / max(width, 1)) * self.grid_shape[1])),
-            )
-            cell_y = min(
-                self.grid_shape[0] - 1,
-                max(0, int((center[1] / max(height, 1)) * self.grid_shape[0])),
-            )
-        else:
-            cell_x = int(grid_cell[0])
-            cell_y = int(grid_cell[1])
-        return {
-            "sample_id": len(self.sample_records) + 1,
-            "source": str(source),
-            "source_path": source_path,
-            "grid_cell": {"x": cell_x, "y": cell_y},
-            "image_size_wh": {"width": width, "height": height},
-            "image_bbox": {
-                "min_xy_px": {"x": float(bbox_min[0]), "y": float(bbox_min[1])},
-                "max_xy_px": {"x": float(bbox_max[0]), "y": float(bbox_max[1])},
-                "center_xy_normalized": {
-                    "x": float(center[0] / max(width, 1)),
-                    "y": float(center[1] / max(height, 1)),
-                },
-                "edge_margin_px": float(
-                    min(
-                        bbox_min[0],
-                        bbox_min[1],
-                        max(width - bbox_max[0], 0.0),
-                        max(height - bbox_max[1], 0.0),
-                    )
-                ),
-                "bbox_area_ratio": float(
-                    max((bbox_max[0] - bbox_min[0]), 0.0)
-                    * max((bbox_max[1] - bbox_min[1]), 0.0)
-                    / max(width * height, 1)
-                ),
-            },
+    def _write_capture_session_manifest(self, status):
+        if self.capture_session is None:
+            return
+        accepted_total = len(list(self.capture_session.accepted_dir.glob("sample_*.jpg")))
+        capture_runtime = self._capture_runtime_snapshot()
+        data = {
+            "schema_version": 1,
+            "status": str(status),
+            "capture_only": bool(self.capture_only),
+            "target_type": self.target_type,
+            "calibration_target": self.target_detector.target_config(),
+            "capture_source": str(self.capture_source),
+            "capture_runtime": capture_runtime,
+            "accepted_dir": str(self.capture_session.accepted_dir),
+            "accepted_sample_count": int(accepted_total),
+            "preexisting_accepted_sample_count": int(self.preexisting_capture_sample_count),
+            "accepted_sample_count_current_run": int(len(self.sample_records)),
+            "required_sample_count": int(self.min_total_samples),
+            "latest_detection_debug": self.last_detection_debug,
+            "latest_sampling_debug": self.last_sampling_debug,
+            "latest_sampling_progress": self.last_sampling_progress,
+            "sample_records": list(self.sample_records),
         }
+        with open(self.capture_session.manifest_path, "w") as f:
+            yaml.dump(data, f, indent=4)
 
-    def _append_sample(
-        self,
-        refined,
-        image_size_wh,
-        *,
-        source,
-        source_path=None,
-        grid_cell=None,
-    ):
-        self.objpoints.append(self.objp.copy())
-        self.imgpoints.append(np.asarray(refined, dtype=np.float32).copy())
-        self.sample_records.append(
-            self._build_sample_record(
-                refined,
-                image_size_wh,
-                source=source,
-                source_path=source_path,
-                grid_cell=grid_cell,
-            )
+    def _record_detection_debug(self, detection_result, frame_counter, source):
+        debug_info = dict(getattr(detection_result, "debug_info", None) or {})
+        if not debug_info:
+            return
+        debug_info["frame_counter"] = int(frame_counter)
+        debug_info["source"] = str(source)
+        self.last_detection_debug = debug_info
+        if self.target_type != "aprilgrid" or debug_info.get("skipped"):
+            return
+
+        signature = (
+            bool(debug_info.get("found")),
+            debug_info.get("failure_stage"),
+            int(debug_info.get("detected_marker_count", 0)),
+            int(debug_info.get("matched_point_count", 0)),
+            tuple(debug_info.get("selected_marker_ids", [])[:10]),
+            debug_info.get("selected_scale"),
         )
+        should_print = (
+            self._last_aprilgrid_debug_signature != signature
+            or frame_counter % 90 == 0
+        )
+        if should_print:
+            attempts = " ".join(
+                f"{float(item.get('scale', 0.0)):.2f}x:{int(item.get('detected_marker_count', 0))}"
+                for item in (debug_info.get("attempts") or [])[:6]
+            )
+            print(
+                "[DEBUG] AprilGrid:",
+                f"found={bool(debug_info.get('found'))}",
+                f"markers={int(debug_info.get('detected_marker_count', 0))}/{int(debug_info.get('min_tags_per_frame', 0))}",
+                f"points={int(debug_info.get('matched_point_count', 0))}",
+                f"scale={debug_info.get('selected_scale')}",
+                f"stage={debug_info.get('failure_stage') or 'ok'}",
+                f"ids={list(debug_info.get('selected_marker_ids') or [])[:10]}",
+                f"attempts={attempts}",
+            )
+            self._last_aprilgrid_debug_signature = signature
+
+    def _record_sampling_debug(self, sampling_debug, frame_counter, source):
+        sampling_debug = dict(sampling_debug or {})
+        if not sampling_debug:
+            return
+        self.last_sampling_progress = self.sampling.progress_snapshot()
+        sampling_debug.update(
+            {
+                "frame_counter": int(frame_counter),
+                "source": str(source),
+                "samples_collected": int(len(self.objpoints)),
+                "required_sample_count": int(self.min_total_samples),
+                "sampling_progress": dict(self.last_sampling_progress),
+            }
+        )
+        self.last_sampling_debug = sampling_debug
+        signature = (
+            int(sampling_debug.get("stability_counter", 0)),
+            None
+            if sampling_debug.get("motion_px") is None
+            else round(float(sampling_debug.get("motion_px")), 2),
+            round(float(sampling_debug.get("effective_threshold_px", 0.0)), 2),
+            int(len(self.objpoints)),
+            bool(sampling_debug.get("accept")) if "accept" in sampling_debug else None,
+            sampling_debug.get("capture_reason"),
+        )
+        should_print = (
+            self._last_sampling_debug_signature != signature
+            and sampling_debug.get("motion_px") is not None
+        )
+        if should_print and (
+            int(sampling_debug.get("stability_counter", 0)) > 0
+            or float(sampling_debug.get("motion_px") or 0.0)
+            > float(sampling_debug.get("effective_threshold_px") or 0.0)
+        ):
+            print(
+                "[DEBUG] Sampling:",
+                f"stable={int(sampling_debug.get('stability_counter', 0))}/{self.sampling.stability_frames}",
+                f"motion_px={sampling_debug.get('motion_px')}",
+                f"threshold_px={sampling_debug.get('effective_threshold_px')}",
+                f"bbox_diag_px={sampling_debug.get('bbox_diagonal_px')}",
+                f"accept={sampling_debug.get('accept')}",
+                f"reason={sampling_debug.get('capture_reason')}",
+                f"coverage_complete={sampling_debug.get('coverage_complete')}",
+                f"remaining={sampling_debug.get('remaining_required_samples')}",
+                f"closest_sample_id={sampling_debug.get('closest_sample_id')}",
+            )
+        self._last_sampling_debug_signature = signature
+
+    def _draw_target_detection(self, image, detection_result):
+        if detection_result is None or not detection_result.found:
+            return
+        if self.target_type == "aprilgrid":
+            if detection_result.marker_ids is not None:
+                cv2.aruco.drawDetectedMarkers(
+                    image,
+                    detection_result.marker_corners,
+                    detection_result.marker_ids,
+                )
+        elif self.target_type == "charuco":
+            if detection_result.image_points is not None:
+                cv2.aruco.drawDetectedCornersCharuco(
+                    image,
+                    detection_result.image_points,
+                    detection_result.feature_ids,
+                )
+            if detection_result.marker_ids is not None and detection_result.marker_corners:
+                cv2.aruco.drawDetectedMarkers(
+                    image,
+                    detection_result.marker_corners,
+                    detection_result.marker_ids,
+                )
+        else:
+            cv2.drawChessboardCorners(
+                image,
+                self.pattern_size,
+                detection_result.image_points,
+                True,
+            )
+
+    def _build_pose_rejection_feedback(self, capture_decision):
+        remaining_samples = int(capture_decision.get("remaining_required_samples") or 0)
+        guidance_parts = []
+        area_delta = capture_decision.get("closest_area_delta")
+        aspect_delta = capture_decision.get("closest_aspect_delta")
+        center_delta = capture_decision.get("closest_center_distance_ratio")
+        if area_delta is not None and float(area_delta) < float(self.sampling.pose_novelty_area_delta):
+            guidance_parts.append("move closer or farther")
+        if aspect_delta is not None and float(aspect_delta) < float(self.sampling.pose_novelty_aspect_delta):
+            guidance_parts.append("tilt the board more")
+        if center_delta is not None and float(center_delta) < float(self.sampling.pose_novelty_center_distance_ratio):
+            guidance_parts.append("shift the board center")
+        if not guidance_parts:
+            guidance_parts.append("make a clearly different pose")
+        if len(guidance_parts) == 1:
+            action_text = guidance_parts[0]
+        elif len(guidance_parts) == 2:
+            action_text = f"{guidance_parts[0]} and {guidance_parts[1]}"
+        else:
+            action_text = ", ".join(guidance_parts[:-1]) + f", and {guidance_parts[-1]}"
+        closest_sample_id = capture_decision.get("closest_sample_id")
+        if closest_sample_id:
+            return (
+                f"Too similar to sample #{int(closest_sample_id)}: {action_text} "
+                f"({remaining_samples} novel poses left)"
+            )
+        return f"Coverage done: {action_text} ({remaining_samples} novel poses left)"
 
     def _coverage_metrics(self):
-        if not self.sample_records:
-            return None
-        grid_counts = [
-            [0 for _ in range(self.grid_shape[1])] for _ in range(self.grid_shape[0])
-        ]
-        center_x = []
-        center_y = []
-        margins = []
-        areas = []
-        for record in self.sample_records:
-            grid_cell = record["grid_cell"]
-            grid_counts[int(grid_cell["y"])][int(grid_cell["x"])] += 1
-            bbox = record["image_bbox"]
-            center_x.append(float(bbox["center_xy_normalized"]["x"]))
-            center_y.append(float(bbox["center_xy_normalized"]["y"]))
-            margins.append(float(bbox["edge_margin_px"]))
-            areas.append(float(bbox["bbox_area_ratio"]))
-        occupied = sum(1 for row in grid_counts for count in row if int(count) > 0)
-        return {
-            "occupied_cell_count": int(occupied),
-            "grid_counts": grid_counts,
-            "horizontal_span_ratio": float(max(center_x) - min(center_x)),
-            "vertical_span_ratio": float(max(center_y) - min(center_y)),
-            "edge_margin_px": _float_list_summary(margins),
-            "bbox_area_ratio": _float_list_summary(areas),
-            "per_sample": list(self.sample_records),
-        }
+        return coverage_metrics(self.sample_records, grid_shape=self.grid_shape)
 
     def _per_view_reprojection_report(self, rvecs, tvecs):
-        rows = []
-        for index in range(len(self.objpoints)):
-            imgpts2, _ = cv2.projectPoints(
-                self.objpoints[index],
-                rvecs[index],
-                tvecs[index],
-                self.mtx,
-                self.dist,
-            )
-            observed = np.asarray(self.imgpoints[index], dtype=float).reshape(-1, 2)
-            predicted = np.asarray(imgpts2, dtype=float).reshape(-1, 2)
-            residuals = predicted - observed
-            point_errors = np.linalg.norm(residuals, axis=1)
-            record = (
-                self.sample_records[index] if index < len(self.sample_records) else {}
-            )
-            rows.append(
-                {
-                    "sample_id": int(record.get("sample_id", index + 1)),
-                    "source": record.get("source"),
-                    "source_path": record.get("source_path"),
-                    "grid_cell": record.get("grid_cell"),
-                    "rms_px": float(np.sqrt(np.mean(np.sum(residuals**2, axis=1)))),
-                    "p95_px": float(np.percentile(point_errors, 95)),
-                    "max_px": float(np.max(point_errors)),
-                }
-            )
-        return rows
+        return per_view_reprojection_report(
+            self.objpoints,
+            self.imgpoints,
+            self.mtx,
+            self.dist,
+            self.sample_records,
+            rvecs,
+            tvecs,
+        )
 
     def _distortion_monotonicity_report(self, image_size_wh):
-        coeffs = np.asarray(self.dist, dtype=float).reshape(-1)
-        k1 = float(coeffs[0]) if coeffs.size > 0 else 0.0
-        k2 = float(coeffs[1]) if coeffs.size > 1 else 0.0
-        k3 = float(coeffs[4]) if coeffs.size > 4 else 0.0
-        width, height = int(image_size_wh[0]), int(image_size_wh[1])
-        fx = float(self.mtx[0, 0]) if self.mtx is not None else 1.0
-        fy = float(self.mtx[1, 1]) if self.mtx is not None else 1.0
-        cx = float(self.mtx[0, 2]) if self.mtx is not None else width / 2.0
-        cy = float(self.mtx[1, 2]) if self.mtx is not None else height / 2.0
-        corner_radii = []
-        for px, py in ((0.0, 0.0), (width, 0.0), (0.0, height), (width, height)):
-            xn = (px - cx) / max(fx, 1e-6)
-            yn = (py - cy) / max(fy, 1e-6)
-            corner_radii.append(float(np.sqrt(xn**2 + yn**2)))
-        max_radius = max(max(corner_radii), 1.0)
-        sample_r = np.linspace(0.0, max_radius, 256)
-        derivative = (
-            1.0
-            + 3.0 * k1 * sample_r**2
-            + 5.0 * k2 * sample_r**4
-            + 7.0 * k3 * sample_r**6
-        )
-        min_derivative = float(np.min(derivative))
-        return {
-            "status": "pass" if min_derivative > 0.0 else "warning",
-            "max_normalized_radius": float(max_radius),
-            "min_radial_derivative": min_derivative,
-            "sample_count": int(sample_r.size),
-        }
-
-    def _build_heatmap_artifact(self, diagnostics_dir, coverage):
-        if not coverage:
-            return None
-        grid_counts = coverage.get("grid_counts", [])
-        if not grid_counts:
-            return None
-        rows = len(grid_counts)
-        cols = max((len(row) for row in grid_counts), default=0)
-        if rows <= 0 or cols <= 0:
-            return None
-        cell_size = 120
-        image = np.full(
-            (rows * cell_size + 120, cols * cell_size + 120, 3), 245, np.uint8
-        )
-        cv2.putText(
-            image,
-            "Intrinsic sample coverage",
-            (30, 45),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (30, 30, 30),
-            2,
-        )
-        max_count = max(max(int(v) for v in row) for row in grid_counts)
-        max_count = max(max_count, 1)
-        for row_index, row in enumerate(grid_counts):
-            for col_index, count in enumerate(row):
-                x0 = 70 + col_index * cell_size
-                y0 = 80 + row_index * cell_size
-                x1 = x0 + cell_size - 10
-                y1 = y0 + cell_size - 10
-                intensity = int(255 * float(count) / max_count)
-                color = (255 - intensity, 210 - intensity // 4, 80 + intensity // 2)
-                cv2.rectangle(image, (x0, y0), (x1, y1), color, -1)
-                cv2.rectangle(image, (x0, y0), (x1, y1), (50, 50, 50), 2)
-                cv2.putText(
-                    image,
-                    str(int(count)),
-                    (x0 + 40, y0 + 68),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (20, 20, 20),
-                    2,
-                )
-        artifact = diagnostics_dir / "image_coverage_heatmap.png"
-        cv2.imwrite(str(artifact), image)
-        return str(artifact)
-
-    def _build_intrinsic_acceptance(
-        self, avg_error, per_view_report, coverage, monotonicity_report
-    ):
-        per_view_rms = [float(row["rms_px"]) for row in per_view_report]
-        occupied_cell_target = max(4, min(6, int(self.min_total_samples)))
-        capture_runtime = self.capture_runtime_info or {}
-        requested_resolution = capture_runtime.get("requested_capture_resolution")
-        resolution_match = capture_runtime.get("resolution_match")
-        strict_resolution_match = bool(capture_runtime.get("strict_resolution_match"))
-        gates = [
-            {
-                "name": "sample_count",
-                "status": (
-                    "pass"
-                    if len(self.sample_records) >= int(self.min_total_samples)
-                    else "fail"
-                ),
-                "severity": "required",
-                "evidence": f"samples={len(self.sample_records)}, required={self.min_total_samples}",
-                "action": "Collect more valid checkerboard views before trusting the intrinsic result.",
-            },
-        ]
-        if requested_resolution is not None and resolution_match is not None:
-            gates.append(
-                {
-                    "name": "capture_resolution_match",
-                    "status": (
-                        "pass"
-                        if resolution_match
-                        else ("fail" if strict_resolution_match else "warning")
-                    ),
-                    "severity": "required",
-                    "evidence": (
-                        "requested="
-                        f"{requested_resolution['width']}x{requested_resolution['height']}, "
-                        "actual="
-                        f"{capture_runtime.get('actual_capture_resolution', {}).get('width')}"
-                        "x"
-                        f"{capture_runtime.get('actual_capture_resolution', {}).get('height')}, "
-                        f"strict={strict_resolution_match}"
-                    ),
-                    "action": "Use the intended camera mode before collecting intrinsic samples; do not mix resolutions.",
-                }
-            )
-        gates.extend(
-            [
-                {
-                "name": "image_coverage",
-                "status": (
-                    "pass"
-                    if coverage is not None
-                    and int(coverage["occupied_cell_count"]) >= occupied_cell_target
-                    and float(coverage["horizontal_span_ratio"]) >= 0.35
-                    and float(coverage["vertical_span_ratio"]) >= 0.35
-                    else "warning"
-                ),
-                "severity": "required",
-                "evidence": (
-                    "occupied_cells="
-                    f"{None if coverage is None else coverage['occupied_cell_count']}, "
-                    "horizontal_span_ratio="
-                    f"{None if coverage is None else coverage['horizontal_span_ratio']}, "
-                    "vertical_span_ratio="
-                    f"{None if coverage is None else coverage['vertical_span_ratio']}"
-                ),
-                "action": "Collect checkerboard views across more image regions instead of clustering near the center.",
-            },
-            {
-                "name": "avg_reprojection",
-                "status": "pass" if float(avg_error) <= 1.0 else "warning",
-                "severity": "required",
-                "evidence": f"avg_reprojection_error_px={float(avg_error)}",
-                "action": "Recheck board dimensions, image sharpness, and capture mode if average reprojection remains high.",
-            },
-            {
-                "name": "per_view_reprojection",
-                "status": (
-                    "pass"
-                    if per_view_rms
-                    and float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))
-                    <= 1.5
-                    else "warning"
-                ),
-                "severity": "required",
-                "evidence": (
-                    "per_view_rms_p95_px="
-                    f"{None if not per_view_rms else float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))}"
-                ),
-                "action": "Remove weak captures and recollect views with better corner sharpness and pose diversity.",
-            },
-            {
-                "name": "radial_monotonicity",
-                "status": monotonicity_report["status"],
-                "severity": "required",
-                "evidence": (
-                    "min_radial_derivative="
-                    f"{float(monotonicity_report['min_radial_derivative'])}"
-                ),
-                "action": "Treat non-monotonic radial distortion as calibration failure; verify capture mode and recollect broader views.",
-            },
-            {
-                "name": "capture_mode_review",
-                "status": (
-                    "pass"
-                    if not (self.capture_runtime_info or {}).get(
-                        "force_capture_resolution"
-                    )
-                    else "warning"
-                ),
-                "severity": "advisory",
-                "evidence": (
-                    "force_capture_resolution="
-                    f"{bool((self.capture_runtime_info or {}).get('force_capture_resolution'))}"
-                ),
-                "action": "Prefer native capture mode for intrinsic calibration to avoid hidden ISP crop before the 3x3 grid.",
-                },
-            ]
-        )
-        return build_final_acceptance(
-            module="camera_intrinsic",
-            gates=gates,
-            pass_recommendation="release_intrinsics",
-            review_recommendation="review_intrinsic_diagnostics",
-            fail_recommendation="reject_and_recollect_intrinsic_samples",
-        )
+        return distortion_monotonicity_report(self.mtx, self.dist, image_size_wh)
 
     def _write_review_artifacts(
         self,
@@ -731,261 +453,131 @@ class CameraCalibrator:
         coverage,
         monotonicity_report,
     ):
-        output_path = Path(output_yaml_path)
-        diagnostics_dir = output_path.with_name(f"{output_path.stem}_diagnostics")
-        diagnostics_dir.mkdir(parents=True, exist_ok=True)
-        per_view_csv = write_table_csv(
-            diagnostics_dir / "per_view_reprojection.csv", per_view_report
+        return write_review_artifacts(
+            output_yaml_path,
+            min_total_samples=self.min_total_samples,
+            sample_records=self.sample_records,
+            capture_runtime_info=self.capture_runtime_info,
+            calibration_target=self.target_detector.target_config(),
+            imgpoints=self.imgpoints,
+            comparison_view_path=self.comparison_view_path,
+            avg_error=avg_error,
+            per_view_report=per_view_report,
+            coverage=coverage,
+            monotonicity_report=monotonicity_report,
         )
-        sample_records_csv = write_table_csv(
-            diagnostics_dir / "sample_records.csv", self.sample_records
-        )
-        heatmap_path = self._build_heatmap_artifact(diagnostics_dir, coverage)
-        final_acceptance = self._build_intrinsic_acceptance(
-            avg_error, per_view_report, coverage, monotonicity_report
-        )
-        acceptance_artifacts = write_acceptance_artifacts(
-            diagnostics_dir, final_acceptance
-        )
-        standardized_data = {
-            "schema_version": 1,
-            "module": "camera_intrinsic",
-            "representation": "checkerboard_image_samples",
-            "sample_counts": {
-                "accepted_samples": int(len(self.sample_records)),
-                "required_samples": int(self.min_total_samples),
-            },
-            "capture_runtime": self.capture_runtime_info,
-            "sample_records": list(self.sample_records),
-        }
-        data_quality = {
-            "schema_version": 1,
-            "module": "camera_intrinsic",
-            "status": final_acceptance["status"],
-            "release_ready": final_acceptance["release_ready"],
-            "quality_gates": final_acceptance["gates"],
-            "avg_reprojection_error_px": float(avg_error),
-            "per_view_reprojection_summary": _float_list_summary(
-                [float(row["rms_px"]) for row in per_view_report]
-            ),
-            "image_coverage": coverage,
-            "radial_monotonicity": monotonicity_report,
-        }
-        visualization_index = {
-            "schema_version": 1,
-            "module": "camera_intrinsic",
-            "layers": {
-                "conclusion": [
-                    acceptance_artifacts["acceptance_report"],
-                    acceptance_artifacts["status_summary_csv"],
-                ],
-                "detail_metrics": [
-                    str(output_path),
-                    per_view_csv,
-                    sample_records_csv,
-                ],
-                "visual_review": [
-                    item
-                    for item in (
-                        self.comparison_view_path,
-                        heatmap_path,
-                    )
-                    if item is not None
-                ],
-            },
-            "manual_review": [
-                "Read diagnostics/data_quality.yaml before trusting average reprojection alone.",
-                "Inspect per_view_reprojection.csv for tail samples instead of only the mean.",
-                "Inspect image_coverage_heatmap.png to confirm the checkerboard covered multiple image regions.",
-                "Treat radial_monotonicity warnings as calibration failure, not a cosmetic issue.",
-            ],
-        }
-        paradigm_artifacts = write_paradigm_artifacts(
-            diagnostics_dir,
-            standardized_data=standardized_data,
-            data_quality=data_quality,
-            visualization_index=visualization_index,
-        )
-        return {
-            "diagnostics_dir": str(diagnostics_dir),
-            "acceptance": acceptance_artifacts,
-            "paradigm": paradigm_artifacts,
-            "per_view_reprojection_csv": per_view_csv,
-            "sample_records_csv": sample_records_csv,
-            "image_coverage_heatmap": heatmap_path,
-        }
-
-    def _headless_capture_probe(
-        self, cap, source, *, startup_frame=None, startup_report=None
-    ):
-        # In headless terminals we cannot create a GUI window; save one frame to verify capture.
-        print(
-            "[WARN] No GUI display detected. Switching to headless probe mode for camera source",
-            self._camera_source_label(source),
-        )
-        best_frame = startup_frame
-        report = startup_report or {}
-        if best_frame is None:
-            best_frame, report = self._select_startup_frame(cap)
-        if bool(report.get("constant_stream")):
-            print(
-                "[ERROR] Capture stream appears nearly constant; camera source may be incorrect."
-            )
-            return
-        if best_frame is None:
-            print("[ERROR] Camera opened but failed to read a valid non-black frame.")
-            return
-        output_dir = Path("outputs") / "camera"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = output_dir / f"headless_probe_{ts}.jpg"
-        cv2.imwrite(str(out_path), best_frame)
-        print(
-            f"[SAVED] Headless probe frame: {out_path} "
-            f"(mean={float(report.get('selected_mean', 0.0)):.1f}, "
-            f"std={float(report.get('selected_std', 0.0)):.1f})"
-        )
-
-    def _log_window_image_rect(self, render_frame):
-        if self._window_rect_logged:
-            return
-        try:
-            x, y, width, height = cv2.getWindowImageRect(self.window_name)
-        except cv2.error as exc:
-            print(f"[WARN] Could not query GUI image rect: {exc}")
-            self._window_rect_logged = True
-            return
-        print(
-            "[INFO] On-screen image rect:",
-            f"{width}x{height} at ({x},{y})",
-        )
-        expected_h, expected_w = render_frame.shape[:2]
-        if width != expected_w or height != expected_h:
-            print(
-                "[WARN] GUI backend is not honoring the requested preview size exactly; "
-                "raw-frame calibration is unaffected."
-            )
-        self._window_rect_logged = True
 
     def run(self):
         """Interactive GUI capture mode (existing behaviour)."""
         print("[INFO] Industrial Calibration Tool (Grid Overlay Stable Edition)")
-        print("[INFO] Config file:", self.cfg_path)
-        source = self._camera_source()
-        cap = cv2.VideoCapture(source, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            print("[ERROR] Cannot open camera source", self._camera_source_label(source))
-            return
-
-        try:
-            backend_name = cap.getBackendName()
-        except cv2.error:
-            backend_name = "unknown"
-
-        self._apply_capture_settings(cap)
-        startup_frame, startup_report = self._select_startup_frame(cap)
-        if startup_frame is None:
-            print("[ERROR] Failed to read startup frames from camera source.")
-            cap.release()
-            return
-        if bool(startup_report.get("constant_stream")):
-            print(
-                "[ERROR] Capture stream is nearly constant. "
-                "Please verify camera_source and device node mapping."
-            )
-            cap.release()
-            return
-        self.capture_runtime_info = self._build_capture_runtime_info(
-            cap,
-            startup_frame,
-            source=source,
-            backend_name=backend_name,
-            startup_report=startup_report,
+        print(f"[INFO] Capture source: {self.capture_source}")
+        self._prepare_live_capture_session()
+        cap, _backend_name = open_managed_capture(
+            self.capture_source,
+            self.cfg,
+            self.capture_source_meta,
         )
-        self._log_capture_runtime_info(self.capture_runtime_info)
-        if (
-            bool(self.capture_runtime_info.get("strict_resolution_match"))
-            and self.capture_runtime_info.get("resolution_match") is False
-        ):
-            print(
-                "[ERROR] Strict resolution check failed; aborting to avoid invalid intrinsics."
-            )
-            cap.release()
-            return
+        if cap is None:
+            print("[ERROR] Cannot open capture source", self.capture_source)
+            return 1
+        self.live_capture_handle = cap
 
-        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-            self._headless_capture_probe(
-                cap,
-                source,
-                startup_frame=startup_frame,
-                startup_report=startup_report,
-            )
-            cap.release()
-            return
+        apply_capture_settings(cap, self.cfg, self.capture_source_meta)
 
         # Force window size
-        self._ensure_qt_fontdir()
-        try:
-            cv2.namedWindow(self.window_name, cv2.WINDOW_AUTOSIZE)
-        except cv2.error as exc:
-            print(f"[WARN] Failed to initialize GUI window: {exc}")
-            self._headless_capture_probe(
-                cap,
-                source,
-                startup_frame=startup_frame,
-                startup_report=startup_report,
-            )
-            cap.release()
-            return
-        win_w, win_h = self._display_size()
-        try:
-            cv2.moveWindow(self.window_name, 40, 40)
-        except cv2.error:
-            pass
-        print(
-            "[INFO] Preview frame sent to GUI:",
-            f"{win_w}x{win_h}",
-        )
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        win_w, win_h = display_size(self.cfg)
+        cv2.resizeWindow(self.window_name, win_w, win_h)
 
         h, w, grid_overlay = None, None, None
         frame_count = 0
-        pending_frame = startup_frame
+        empty_frame_count = 0
 
         while True:
-            if pending_frame is not None:
-                ret = True
-                frame = pending_frame
-                pending_frame = None
-            else:
-                ret, frame = cap.read()
-            if not ret:
-                break
+            ret, frame = cap.read()
+            if not ret or frame is None or frame.size == 0:
+                if getattr(cap, "managed_capture", False) and hasattr(cap, "is_ready") and not cap.is_ready():
+                    if frame_count % 30 == 0:
+                        print("[WARN] Waiting for network stream recovery/warm-up...")
+                    frame_count += 1
+                    continue
+                empty_frame_count += 1
+                if empty_frame_count % 30 == 0:
+                    print("[WARN] Waiting for a fresh frame from capture source...")
+                if empty_frame_count > 240:
+                    print(
+                        "[ERROR] Too many empty frame waits from capture source. "
+                        "Check RTSP stability, codec settings, or camera connectivity."
+                    )
+                    break
+                frame_count += 1
+                continue
+            if is_visually_empty_frame(frame):
+                print(
+                    "[WARN] Received invalid image frame (blank or near-uniform, e.g. solid green); waiting for a valid frame."
+                )
+                frame_count += 1
+                if frame_count > 90:
+                    print(
+                        "[ERROR] Too many invalid frames from capture source. "
+                        "Check whether the selected /dev/video node is wrong, the camera is returning a bogus ISP stream, or you should switch to RTSP/camera_uri."
+                    )
+                    break
+                continue
+            empty_frame_count = 0
 
             # Capture the last frame of the original image for result comparison.
             self.last_raw_frame = frame.copy()
 
             if h is None:
                 h, w = frame.shape[:2]
-                grid_overlay = self._generate_grid_overlay(w, h)
+                self.capture_runtime_info = build_capture_runtime_info(
+                    self.cfg,
+                    self.capture_source,
+                    self.capture_source_meta,
+                    cap,
+                    frame,
+                )
+                log_capture_runtime_info(self.capture_runtime_info)
+                grid_overlay = generate_grid_overlay((w, h), self.grid_shape)
 
             display = frame.copy()
 
             if self.state == "CAPTURING":
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                found, corners = self._find_corners(gray, frame_count)
+                detection = self._find_target(gray, frame_count)
+                self._record_detection_debug(detection, frame_count, "interactive")
 
                 # 1. Overlay static blue grid
                 display = cv2.addWeighted(display, 1.0, grid_overlay, 0.8, 0)
 
                 # 2. Run corner detection and automatic data acquisition logic
-                if found:
-                    cv2.drawChessboardCorners(display, self.pattern_size, corners, True)
-                    self._run_auto_capture(gray, corners, w, h)
+                if detection.found:
+                    self._draw_target_detection(display, detection)
+                    capture_complete = self._run_auto_capture(
+                        gray,
+                        detection,
+                        w,
+                        h,
+                        frame_bgr=frame,
+                        source="interactive",
+                        frame_counter=frame_count,
+                    )
+                    if capture_complete and self.capture_only:
+                        print("[PASS] Capture-only session completed.")
+                        break
                 else:
                     self.feedback_text = "Searching..."
 
                 # 3. Design the dynamic UI (green completed grid and text).
-                self._draw_dynamic_ui(display, w, h)
+                draw_dynamic_ui(
+                    display,
+                    self.grid_coverage,
+                    self.grid_shape,
+                    self.feedback_text,
+                    self.sampling.progress_snapshot(),
+                )
+                draw_aprilgrid_debug(display, self.last_detection_debug)
                 self._draw_capture_runtime_info(display)
 
             elif self.state == "SHOWING_RESULT":
@@ -995,24 +587,17 @@ class CameraCalibrator:
             elif self.state == "VALIDATING":
                 if self.mtx is not None:
                     undist, preview_info = self._undistort_for_preview(frame)
-                    display = self._draw_valid_roi(undist, preview_info)
-                    self._draw_text(
+                    undist = draw_valid_roi(undist, preview_info)
+                    display = np.hstack((frame, undist))
+                    draw_text(
                         display,
-                        f"Undistorted preview alpha={preview_info['alpha']:.2f}",
+                        f"Left: Distorted | Right: Undistorted alpha={preview_info['alpha']:.2f} (green ROI = valid crop)",
                         (50, 50),
                         (0, 255, 0),
                     )
-                    if self.comparison_view_path is not None:
-                        self._draw_text(
-                            display,
-                            f"Side-by-side comparison saved to {self.comparison_view_path}",
-                            (50, 95),
-                            (0, 255, 0),
-                            scale=0.8,
-                        )
 
             if h is not None:
-                self._draw_text(
+                draw_text(
                     display, "R: Restart | V: Validate | ESC: Exit", (50, h - 40)
                 )
 
@@ -1022,17 +607,9 @@ class CameraCalibrator:
                 # fallback
                 render_frame = display
             else:
-                scale = min(win_w / src_w, win_h / src_h)
-                nw, nh = max(1, int(src_w * scale)), max(1, int(src_h * scale))
-                resized = cv2.resize(display, (nw, nh))
-                canvas = np.zeros((win_h, win_w, 3), dtype=np.uint8)
-                x0 = (win_w - nw) // 2
-                y0 = (win_h - nh) // 2
-                canvas[y0 : y0 + nh, x0 : x0 + nw] = resized
-                render_frame = canvas
+                render_frame = render_preserving_aspect_ratio(display, (win_w, win_h))
 
             cv2.imshow(self.window_name, render_frame)
-            self._log_window_image_rect(render_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:
@@ -1048,8 +625,190 @@ class CameraCalibrator:
 
             frame_count += 1
 
+        self._freeze_capture_runtime_info()
         cap.release()
+        self.live_capture_handle = None
         cv2.destroyAllWindows()
+        if self.capture_only:
+            if len(self.objpoints) >= self.min_total_samples:
+                self._write_capture_session_manifest(status="capture_complete")
+                return 0
+            self._write_capture_session_manifest(status="capture_incomplete")
+            print(
+                "[ERROR] Capture-only session did not finish.",
+                f"samples={len(self.objpoints)}/{self.min_total_samples}",
+            )
+            return 2
+        if self.mtx is not None and self.require_release_ready and not bool(
+            self.last_release_ready
+        ):
+            print("[FAIL] Calibration finished but quality gates are not release-ready.")
+            return 3
+        return 0
+
+    def run_live_headless(self, max_seconds=0):
+        """Live camera capture without GUI; safe on servers without DISPLAY."""
+        print("[INFO] Headless live mode: GUI disabled, running auto capture loop.")
+        print(f"[INFO] Capture source: {self.capture_source}")
+        self._prepare_live_capture_session()
+        cap, _backend_name = open_managed_capture(
+            self.capture_source,
+            self.cfg,
+            self.capture_source_meta,
+        )
+        if cap is None:
+            print("[ERROR] Cannot open capture source", self.capture_source)
+            return 1
+        self.live_capture_handle = cap
+
+        apply_capture_settings(cap, self.cfg, self.capture_source_meta)
+        start_ts = time.time()
+        h = w = None
+        frame_count = 0
+        empty_frame_count = 0
+        first_frame_saved = False
+
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None or frame.size == 0:
+                if getattr(cap, "managed_capture", False) and hasattr(cap, "is_ready") and not cap.is_ready():
+                    if frame_count % 30 == 0:
+                        print("[WARN] Waiting for network stream recovery/warm-up...")
+                    frame_count += 1
+                    continue
+                print("[WARN] Failed to read frame from camera; retrying...")
+                frame_count += 1
+                empty_frame_count += 1
+                if empty_frame_count > 90:
+                    print(
+                        "[ERROR] Too many empty frames. Check stream URI/codec/network and OpenCV ffmpeg support."
+                    )
+                    break
+                continue
+            if is_visually_empty_frame(frame):
+                empty_frame_count += 1
+                if empty_frame_count % 15 == 0:
+                    print(
+                        "[WARN] Received invalid image frames repeatedly (blank or near-uniform, e.g. solid green); "
+                        "continuing to wait for a valid decoded frame."
+                    )
+                if empty_frame_count > 120:
+                    print(
+                        "[ERROR] Too many invalid frames. Check whether the selected /dev/video node is wrong, "
+                        "the camera is returning a bogus ISP stream, or the RTSP/codec path is misconfigured."
+                    )
+                    break
+                continue
+            empty_frame_count = 0
+
+            self.last_raw_frame = frame.copy()
+
+            if h is None:
+                h, w = frame.shape[:2]
+                self.capture_runtime_info = build_capture_runtime_info(
+                    self.cfg,
+                    self.capture_source,
+                    self.capture_source_meta,
+                    cap,
+                    frame,
+                )
+                log_capture_runtime_info(self.capture_runtime_info)
+
+            if not first_frame_saved:
+                debug_frame_path = self.workspace.debug_image_path(
+                    self.capture_session,
+                    "headless_first_frame.jpg",
+                )
+                if cv2.imwrite(str(debug_frame_path), frame):
+                    print(f"[SAVED] First headless frame: {debug_frame_path}")
+                first_frame_saved = True
+
+            if self.state == "CAPTURING":
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                detection = self._find_target(gray, frame_count)
+                self._record_detection_debug(detection, frame_count, "headless_live")
+                if detection.found:
+                    capture_complete = self._run_auto_capture(
+                        gray,
+                        detection,
+                        w,
+                        h,
+                        frame_bgr=frame,
+                        source="headless_live",
+                        frame_counter=frame_count,
+                    )
+                    if capture_complete and self.capture_only:
+                        self._write_capture_session_manifest(status="capture_complete")
+                        print("[PASS] Headless capture-only session completed.")
+                        self._freeze_capture_runtime_info()
+                        cap.release()
+                        self.live_capture_handle = None
+                        return 0
+
+                if frame_count % 30 == 0:
+                    progress = self.sampling.progress_snapshot()
+                    print(
+                        "[INFO] Headless progress:",
+                        f"stage={progress['stage']}",
+                        f"samples={progress['sample_count']}/{progress['required_sample_count']}",
+                        f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
+                        f"remaining={progress['remaining_required_samples']}",
+                        f"next={progress.get('guidance_summary')}",
+                    )
+
+            if self.state == "SHOWING_RESULT" and self.mtx is not None:
+                if self.require_release_ready and not bool(self.last_release_ready):
+                    print(
+                        "[FAIL] Calibration finished but quality gates are not release-ready."
+                    )
+                    self._freeze_capture_runtime_info()
+                    cap.release()
+                    self.live_capture_handle = None
+                    return 3
+                print("[PASS] Headless live calibration completed.")
+                self._freeze_capture_runtime_info()
+                cap.release()
+                self.live_capture_handle = None
+                return 0
+
+            if max_seconds > 0 and (time.time() - start_ts) >= float(max_seconds):
+                progress = self.sampling.progress_snapshot()
+                print(
+                    "[WARN] Headless live mode timed out before collecting enough samples.",
+                    f"stage={progress['stage']}",
+                    f"samples={progress['sample_count']}/{progress['required_sample_count']}",
+                    f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
+                )
+                break
+
+            frame_count += 1
+
+        self._freeze_capture_runtime_info()
+        cap.release()
+        self.live_capture_handle = None
+        if self.capture_only:
+            self._write_capture_session_manifest(status="capture_incomplete")
+            progress = self.sampling.progress_snapshot()
+            print(
+                "[ERROR] Headless capture-only session did not finish.",
+                f"stage={progress['stage']}",
+                f"samples={progress['sample_count']}/{progress['required_sample_count']}",
+                f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
+            )
+            return 2
+        if self.mtx is not None:
+            if self.require_release_ready and not bool(self.last_release_ready):
+                print(
+                    "[FAIL] Calibration finished but quality gates are not release-ready."
+                )
+                return 3
+            print("[PASS] Headless live calibration completed.")
+            return 0
+        print(
+            "[ERROR] Headless live calibration did not finish.",
+            f"samples={len(self.objpoints)}/{self.min_total_samples}",
+        )
+        return 2
 
     def run_headless(
         self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")
@@ -1070,56 +829,60 @@ class CameraCalibrator:
             print(f"[ERROR] No images found in {images_dir} with patterns {patterns}")
             return 1
 
+        self.dataset_images_dir = os.path.abspath(images_dir)
+        dataset_label = self.workspace.dataset_label_from_images_dir(images_dir)
+        self._prepare_run_session(dataset_label=dataset_label)
+        matched_preview = ", ".join(
+            os.path.basename(path) for path in img_paths[: min(5, len(img_paths))]
+        )
         print(f"[INFO] Found {len(img_paths)} images; processing...")
+        if len(img_paths) < self.min_total_samples:
+            print(
+                "[WARN] images_dir contains fewer candidate images than the minimum sample target:",
+                f"images={len(img_paths)} required_samples={self.min_total_samples}",
+            )
+            print(
+                "[HINT] Point --images-dir to a folder of raw calibration captures from multiple poses,",
+                f"not a results folder. Matched files: {matched_preview}",
+            )
         processed = 0
         h = w = None
-        expected_size = None
-        for ip in img_paths:
+        for frame_index, ip in enumerate(img_paths):
             img = cv2.imread(ip)
             if img is None:
                 print(f"[WARN] Could not read image {ip}, skipping")
                 continue
-            current_size = (int(img.shape[1]), int(img.shape[0]))
-            if expected_size is None:
-                expected_size = current_size
-            elif current_size != expected_size:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            detection = self._find_target(gray, frame_index, detect_every_frame=True)
+            self._record_detection_debug(detection, frame_index, "headless_dataset")
+            if not detection.found:
+                continue
+            img_h, img_w = img.shape[:2]
+            if h is None:
+                h, w = img_h, img_w
+            elif (img_h, img_w) != (h, w):
                 print(
-                    f"[WARN] Skipping {ip}: image size {current_size[0]}x{current_size[1]} "
-                    f"does not match expected {expected_size[0]}x{expected_size[1]}"
+                    "[WARN] Skipping image with mismatched size:",
+                    f"{ip} -> got {img_w}x{img_h}, expected {w}x{h}",
                 )
                 continue
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            # direct detection (no resizing) for headless runs
-            found, corners = cv2.findChessboardCorners(
+            self.last_raw_frame = img.copy()
+            self._save_sample(
                 gray,
-                self.pattern_size,
-                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE,
-            )
-            if not found:
-                continue
-            refined = cv2.cornerSubPix(
-                gray,
-                corners,
-                (11, 11),
-                (-1, -1),
-                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
-            )
-            self._append_sample(
-                refined,
-                (int(img.shape[1]), int(img.shape[0])),
+                detection,
                 source="headless",
                 source_path=str(ip),
             )
             processed += 1
-            if h is None:
-                h, w = img.shape[:2]
             print(f"[OK] Captured sample #{processed} from {os.path.basename(ip)}")
-            if len(self.objpoints) >= self.min_total_samples:
-                break
 
         if len(self.objpoints) < self.min_total_samples:
             print(
                 f"[ERROR] Not enough valid samples ({len(self.objpoints)}/{self.min_total_samples})"
+            )
+            print(
+                "[HINT] The detector only uses frames where the full calibration target is recognized.",
+                f"Candidate images scanned={len(img_paths)}. Example matches: {matched_preview}",
             )
             return 2
 
@@ -1127,194 +890,169 @@ class CameraCalibrator:
         self._calibrate(w, h)
         # success if self.mtx set
         if self.mtx is not None:
+            if self.require_release_ready and not bool(self.last_release_ready):
+                print("[FAIL] Calibration finished but quality gates are not release-ready.")
+                return 3
             print("[PASS] Headless calibration completed.")
             return 0
         else:
             print("[FAIL] Headless calibration failed.")
             return 2
 
-    def _undistortion_preview_config(self):
-        return self.cfg.get("undistortion_preview", {}) or {}
-
     def _build_undistortion_model(self, image_size_wh, alpha=None):
         if self.mtx is None or self.dist is None:
             raise RuntimeError(
                 "Camera must be calibrated before building undistortion preview."
             )
-        preview_cfg = self._undistortion_preview_config()
-        preview_alpha = float(preview_cfg.get("alpha", 1.0) if alpha is None else alpha)
-        width, height = map(int, image_size_wh)
-        center_principal_point = bool(preview_cfg.get("center_principal_point", False))
-        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+        return build_undistortion_model(
             self.mtx,
             self.dist,
-            (width, height),
-            preview_alpha,
-            (width, height),
-            centerPrincipalPoint=center_principal_point,
+            image_size_wh,
+            self.cfg.get("undistortion_preview", {}) or {},
+            alpha=alpha,
         )
-        x, y, roi_w, roi_h = [int(value) for value in roi]
-        preview_info = {
-            "alpha": float(preview_alpha),
-            "center_principal_point": center_principal_point,
-            "optimized_camera_matrix": np.asarray(
-                new_camera_matrix, dtype=float
-            ).tolist(),
-            "valid_roi": {
-                "x": x,
-                "y": y,
-                "width": roi_w,
-                "height": roi_h,
-            },
-        }
-        return new_camera_matrix, preview_info
 
     def _undistort_for_preview(self, image, alpha=None):
-        new_camera_matrix, preview_info = self._build_undistortion_model(
-            (image.shape[1], image.shape[0]), alpha=alpha
-        )
-        undistorted = cv2.undistort(image, self.mtx, self.dist, None, new_camera_matrix)
-        return undistorted, preview_info
-
-    def _draw_valid_roi(self, image, preview_info):
-        roi = (preview_info or {}).get("valid_roi") or {}
-        x = int(roi.get("x", 0))
-        y = int(roi.get("y", 0))
-        roi_w = int(roi.get("width", 0))
-        roi_h = int(roi.get("height", 0))
-        annotated = image.copy()
-        if roi_w > 0 and roi_h > 0:
-            cv2.rectangle(
-                annotated,
-                (x, y),
-                (x + roi_w - 1, y + roi_h - 1),
-                (0, 255, 0),
-                2,
-            )
-        return annotated
-
-    def _draw_dynamic_ui(self, display, w, h):
-        """Draw dynamically updating UI elements: completed green grid and status text."""
-        # 1. Draw the highlighted green grid.
-        gh, gw = self.grid_shape
-        for r in range(gh):
-            for c in range(gw):
-                if self.grid_coverage[r, c] > 0:
-                    y0, x0 = int(r * h / gh), int(c * w / gw)
-                    y1, x1 = int((r + 1) * h / gh), int((c + 1) * w / gw)
-
-                    # Create a temporary transparent layer the same size as the displayed image.
-                    overlay = display.copy()
-                    # Draw a solid green rectangle on this temporary layer.
-                    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 255, 0), -1)
-                    # Blend this temporary layer with the green squares with the main display image.
-                    cv2.addWeighted(overlay, 0.3, display, 0.7, 0, display)
-
-        # 2. Draw status text
-        self._draw_text(display, self.feedback_text, (50, 60), (0, 255, 255))
-        self._draw_text(
-            display,
-            f"Samples: {len(self.objpoints)}/{self.min_total_samples}",
-            (50, 110),
-            (0, 255, 255),
+        return undistort_for_preview(
+            image,
+            self.mtx,
+            self.dist,
+            self.cfg.get("undistortion_preview", {}) or {},
+            alpha=alpha,
         )
 
-    def _generate_grid_overlay(self, w, h):
-        """Generate a transparent grid layer of fixed size to avoid flickering."""
-        overlay = np.zeros((h, w, 3), np.uint8)
-        gh, gw = self.ac_cfg["grid_shape"]
-        color = (255, 100, 100)
-        thickness = 2
-        for r in range(gh + 1):
-            y = int(round(r * h / gh))
-            cv2.line(overlay, (0, y), (w, y), color, thickness)
-        for c in range(gw + 1):
-            x = int(round(c * w / gw))
-            cv2.line(overlay, (x, 0), (x, h), color, thickness)
-        return overlay
+    def _find_target(self, gray, frame_counter, detect_every_frame=False):
+        optimization = dict(self.cfg["optimization"])
+        if detect_every_frame:
+            optimization["detection_interval"] = 1
+        return self.target_detector.detect(gray, frame_counter, optimization)
 
-    def _find_corners(self, gray, frame_counter):
-        opt = self.cfg["optimization"]
-        if frame_counter % opt["detection_interval"] == 0:
-            factor = opt["resize_factor"]
-            small = cv2.resize(
-                gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA
-            )
-            found, small_corners = cv2.findChessboardCorners(
-                small,
-                self.pattern_size,
-                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK,
-            )
-            self.last_found = found
-            if found:
-                self.last_corners = small_corners / factor
-        return getattr(self, "last_found", False), getattr(self, "last_corners", None)
-
-    def _run_auto_capture(self, gray, corners, w, h):
-        if time.time() - self.last_capture_time < self.ac_cfg["delay_between_captures"]:
-            return
-        center = np.mean(corners, axis=0)[0]
-        if self.last_corners_center is not None:
-            dist = np.linalg.norm(center - self.last_corners_center)
-            if dist < self.ac_cfg["stability_threshold"]:
-                self.stability_counter += 1
-                self.feedback_text = f"Hold steady ({self.stability_counter})"
+    def _run_auto_capture(
+        self,
+        gray,
+        detection,
+        w,
+        h,
+        frame_bgr=None,
+        source="interactive",
+        frame_counter=0,
+    ):
+        if not self.sampling.can_capture_now():
+            return False
+        sampling_debug = self.sampling.note_detection(detection.image_points)
+        stability_counter = int(sampling_debug.get("stability_counter", 0))
+        self._record_sampling_debug(sampling_debug, frame_counter, source)
+        if stability_counter > 0:
+            motion_px = sampling_debug.get("motion_px")
+            threshold_px = sampling_debug.get("effective_threshold_px")
+            if motion_px is not None:
+                self.feedback_text = (
+                    f"Hold steady ({stability_counter}/{self.sampling.stability_frames}, "
+                    f"motion {float(motion_px):.1f}px < {float(threshold_px):.1f}px)"
+                )
             else:
-                self.stability_counter = 0
-        self.last_corners_center = center
+                self.feedback_text = f"Hold steady ({stability_counter})"
+        elif sampling_debug.get("motion_px") is not None:
+            motion_px = float(sampling_debug.get("motion_px") or 0.0)
+            threshold_px = float(sampling_debug.get("effective_threshold_px") or 0.0)
+            if motion_px >= threshold_px:
+                self.feedback_text = (
+                    f"Stabilize board (motion {motion_px:.1f}px > {threshold_px:.1f}px)"
+                )
 
-        if self.stability_counter >= self.ac_cfg["stability_frames"]:
-            gx = int(center[0] * self.grid_shape[1] / w)
-            gy = int(center[1] * self.grid_shape[0] / h)
-            gx, gy = np.clip(gx, 0, self.grid_shape[1] - 1), np.clip(
-                gy, 0, self.grid_shape[0] - 1
+        if stability_counter >= self.sampling.stability_frames:
+            capture_decision = self.sampling.evaluate_capture_candidate(
+                detection.image_points,
+                (w, h),
             )
-            if self.grid_coverage[gy, gx] < self.samples_per_grid:
-                self._save_sample(gray, corners)
-                self.grid_coverage[gy, gx] += 1
-            self.stability_counter = 0
+            sampling_debug.update(capture_decision)
+            self._record_sampling_debug(sampling_debug, frame_counter, source)
+            remaining_samples = int(capture_decision.get("remaining_required_samples") or 0)
+            remaining_cells = int(self.sampling.remaining_coverage_cells)
+            if bool(capture_decision.get("accept")):
+                self._save_sample(
+                    gray,
+                    detection,
+                    source=source,
+                    frame_bgr=frame_bgr,
+                    capture_reason=str(capture_decision.get("capture_reason", "")),
+                )
+            else:
+                capture_reason = str(capture_decision.get("capture_reason", ""))
+                if capture_reason == "move_to_uncovered_cells":
+                    self.feedback_text = (
+                        f"Move target to uncovered cells ({remaining_cells} cells left)"
+                    )
+                elif capture_reason == "pose_not_novel":
+                    self.feedback_text = self._build_pose_rejection_feedback(
+                        capture_decision
+                    )
+                elif capture_reason == "sample_target_met":
+                    self.feedback_text = "Capture complete"
+            self.sampling.reset_stability()
             if len(self.objpoints) >= self.min_total_samples:
+                if self.capture_only:
+                    self.feedback_text = "Capture complete"
+                    return True
+                self._prepare_run_session(dataset_label=self.capture_session.label if self.capture_session else None)
                 self._calibrate(w, h)
+        return False
 
-    def _save_sample(self, gray, corners):
-        print(f"[OK] Captured sample #{len(self.objpoints)+1}")
-        refined = cv2.cornerSubPix(
-            gray,
-            corners,
-            (11, 11),
-            (-1, -1),
-            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
-        )
-        center = np.mean(np.asarray(refined, dtype=float).reshape(-1, 2), axis=0)
+    def _save_sample(
+        self,
+        gray,
+        detection,
+        source="interactive",
+        source_path=None,
+        frame_bgr=None,
+        capture_reason="",
+    ):
+        sample_index = len(self.objpoints) + 1
+        capture_reason = str(capture_reason or "coverage_needed")
+        if capture_reason == "pose_novel":
+            print(f"[OK] Captured sample #{sample_index} (diverse pose)")
+        elif capture_reason == "coverage_needed":
+            print(f"[OK] Captured sample #{sample_index} (coverage)")
+        else:
+            print(f"[OK] Captured sample #{sample_index}")
+        refined = np.asarray(detection.image_points, dtype=np.float32).reshape(-1, 1, 2)
+        object_points = np.asarray(detection.object_points, dtype=np.float32).reshape(-1, 3)
         width = int(gray.shape[1])
         height = int(gray.shape[0])
-        grid_cell = (
-            min(
-                self.grid_shape[1] - 1,
-                max(0, int((center[0] / max(width, 1)) * self.grid_shape[1])),
-            ),
-            min(
-                self.grid_shape[0] - 1,
-                max(0, int((center[1] / max(height, 1)) * self.grid_shape[0])),
-            ),
-        )
-        self._append_sample(
+        saved_source_path = source_path
+        if (
+            saved_source_path is None
+            and frame_bgr is not None
+            and self.capture_session is not None
+            and self.workspace.save_live_accepted_frames
+        ):
+            sample_path = self.workspace.accepted_sample_path(
+                self.capture_session,
+                len(self.objpoints) + 1,
+            )
+            if cv2.imwrite(str(sample_path), frame_bgr):
+                saved_source_path = str(sample_path)
+                print(f"[SAVED] Accepted sample image: {saved_source_path}")
+        self.sampling.append_sample(
             refined,
             (width, height),
-            source="interactive",
-            grid_cell=grid_cell,
+            object_points=object_points,
+            source=source,
+            source_path=saved_source_path,
         )
-        self.last_capture_time = time.time()
+        if self.capture_session is not None:
+            self._write_capture_session_manifest(status="collecting")
 
     def _calibrate(self, w, h):
         print(f"[INFO] Calibrating ({len(self.objpoints)} samples)...")
-        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
-            self.objpoints, self.imgpoints, (w, h), None, None
+        ret, mtx, dist, rvecs, tvecs = calibrate_camera(
+            self.objpoints,
+            self.imgpoints,
+            (w, h),
         )
-        if mtx is None or dist is None:
+        if not ret:
             print("[ERROR] Calibration failed.")
             return
-        print(f"[INFO] Calibration RMS: {float(ret):.6f}")
         self.mtx, self.dist = mtx, dist
         per_view_report = self._per_view_reprojection_report(rvecs, tvecs)
         err = self._reprojection_error(rvecs, tvecs)
@@ -1329,96 +1067,53 @@ class CameraCalibrator:
         self.state = "SHOWING_RESULT"
 
     def _reprojection_error(self, rvecs, tvecs):
-        total_squared_error = 0.0
-        total_point_count = 0
-        for i in range(len(self.objpoints)):
-            imgpts2, _ = cv2.projectPoints(
-                self.objpoints[i], rvecs[i], tvecs[i], self.mtx, self.dist
-            )
-            observed = np.asarray(self.imgpoints[i], dtype=float).reshape(-1, 2)
-            predicted = np.asarray(imgpts2, dtype=float).reshape(-1, 2)
-            residuals = predicted - observed
-            total_squared_error += float(np.sum(residuals**2))
-            total_point_count += int(residuals.shape[0])
-        if total_point_count <= 0:
-            return 0.0
-        return float(np.sqrt(total_squared_error / total_point_count))
+        return mean_reprojection_error(
+            self.objpoints,
+            self.imgpoints,
+            self.mtx,
+            self.dist,
+            rvecs,
+            tvecs,
+        )
 
     def _build_result_canv(self, w, h):
         print("[INFO] Generating Distortion Comparison View...")
-        canvas = np.full((h, w * 2 + 60, 3), 40, np.uint8)
+        self._prepare_run_session(dataset_label=self.capture_session.label if self.capture_session else None)
 
         if self.last_raw_frame is None:
             self.last_raw_frame = np.zeros((h, w, 3), dtype=np.uint8)
 
         dist_img = self.last_raw_frame.copy()
         und, preview_info = self._undistort_for_preview(dist_img)
-        und = self._draw_valid_roi(und, preview_info)
-        canvas[:, 20 : 20 + w] = dist_img
-        canvas[:, 40 + w : 40 + 2 * w] = und
-        self._draw_text(canvas, "Distorted", (50, 50), (200, 200, 255))
-        self._draw_text(
-            canvas,
-            f"Undistorted alpha={preview_info['alpha']:.2f}",
-            (w + 80, 50),
-            (180, 255, 180),
-        )
-        self._draw_text(
-            canvas,
-            "Green ROI shows the all-valid crop window",
-            (w + 80, 95),
-            (180, 255, 180),
-        )
-        self.comparison_view_path = "comparison_view.png"
+        und = draw_valid_roi(und, preview_info)
+        canvas = build_comparison_canvas(dist_img, und, preview_info)
+        self.comparison_view_path = str(self.run_session.comparison_view_path)
         cv2.imwrite(self.comparison_view_path, canvas)
         print(f"[SAVED] {self.comparison_view_path}")
-        preview = dist_img.copy()
-        self._draw_text(preview, "Calibration complete; showing original full-frame preview", (50, 50), (180, 255, 180), scale=0.8)
-        self._draw_text(
-            preview,
-            f"Side-by-side comparison saved to {self.comparison_view_path}",
-            (50, 95),
-            (180, 255, 180),
-            scale=0.8,
-        )
-        self._draw_text(
-            preview,
-            "Press V for undistorted validation view, R to restart, ESC to exit",
-            (50, 140),
-            (180, 255, 180),
-            scale=0.8,
-        )
-        self.result_canvas = preview
-
-    def _draw_text(
-        self,
-        img,
-        text,
-        pos,
-        color=(255, 255, 255),
-        scale=1.0,
-        thickness=2,
-    ):
-        cv2.putText(
-            img,
-            text,
-            pos,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            scale,
-            color,
-            thickness,
-        )
+        self.result_canvas = canvas
 
     def _save_results(self, w, h, error, *, per_view_report):
-        fname = f"calibration_{datetime.now():%Y%m%d_%H%M%S}.yaml"
+        self._prepare_run_session(dataset_label=self.capture_session.label if self.capture_session else None)
+        fname = str(self.run_session.calibration_yaml_path)
+        self.capture_runtime_info = self._capture_runtime_snapshot()
         _, preview_info = self._build_undistortion_model((w, h))
         distortion = np.asarray(self.dist, dtype=float).reshape(-1)
         coverage = self._coverage_metrics()
         monotonicity_report = self._distortion_monotonicity_report((w, h))
         data = dict(
             time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            workflow={
+                "run_dir": str(self.run_session.session_dir),
+                "dataset_images_dir": self.dataset_images_dir,
+                "capture_session_dir": (
+                    str(self.capture_session.session_dir)
+                    if self.capture_session is not None
+                    else None
+                ),
+            },
             image_width=w,
             image_height=h,
+            calibration_target=self.target_detector.target_config(),
             camera_matrix=dict(rows=3, cols=3, data=self.mtx.tolist()),
             distortion_model=str(self.cfg.get("distortion_model", "plumb_bob")),
             distortion_coefficients=dict(
@@ -1428,6 +1123,7 @@ class CameraCalibrator:
             ),
             capture_runtime=self.capture_runtime_info,
             undistortion_preview=preview_info,
+            latest_detection_debug=self.last_detection_debug,
             sample_quality={
                 "accepted_sample_count": int(len(self.sample_records)),
                 "required_sample_count": int(self.min_total_samples),
@@ -1449,6 +1145,7 @@ class CameraCalibrator:
             coverage=coverage,
             monotonicity_report=monotonicity_report,
         )
+        self.last_release_ready = bool(review_artifacts.get("release_ready", False))
         print(
             "[SAVED] Intrinsic diagnostics:",
             review_artifacts["diagnostics_dir"],
@@ -1456,72 +1153,6 @@ class CameraCalibrator:
 
 
 if __name__ == "__main__":
-    import argparse
+    from camera.cli import main
 
-    parser = argparse.ArgumentParser(description="WheelOS Industrial Camera Calibrator")
-    parser.add_argument("--config", default="config.yaml")
-    parser.add_argument(
-        "--images-dir",
-        default=None,
-        help="Directory of images for headless calibration",
-    )
-    parser.add_argument(
-        "--pattern-size", default=None, help="Override pattern size as W,H (optional)"
-    )
-    args = parser.parse_args()
-
-    config_exists = os.path.exists(args.config)
-    if not config_exists and args.config != "config.yaml":
-        print(f"[ERROR] Config file not found: {args.config}")
-        print(
-            "[HINT] Provide a valid config path. Run without --config once if you need a template config.yaml."
-        )
-        raise SystemExit(1)
-
-    if not config_exists:
-        default_cfg = dict(
-            camera_index=0,
-            window_name="Industrial Calibration Tool",
-            window_width=1280,
-            window_height=720,
-            capture={
-                "force_resolution": False,
-                "width": None,
-                "height": None,
-                "fourcc": None,
-                "strict_resolution_match": False,
-            },
-            distortion_model="plumb_bob",
-            pattern_size=[11, 8],
-            square_size=0.025,
-            optimization={"resize_factor": 0.5, "detection_interval": 2},
-            undistortion_preview={"alpha": 1.0, "center_principal_point": False},
-            auto_capture_settings=dict(
-                grid_shape=[3, 3],
-                samples_per_grid=1,
-                delay_between_captures=1.0,
-                stability_frames=5,
-                stability_threshold=2.0,
-            ),
-        )
-        with open(args.config, "w") as f:
-            yaml.dump(default_cfg, f, indent=4)
-        print("[INFO] Default config.yaml created.")
-
-    calibrator = CameraCalibrator(args.config)
-
-    if args.pattern_size:
-        try:
-            w, h = map(int, args.pattern_size.split(","))
-            calibrator.pattern_size = (w, h)
-            calibrator.objp = np.zeros((w * h, 3), np.float32)
-            calibrator.objp[:, :2] = np.mgrid[0:w, 0:h].T.reshape(-1, 2)
-            calibrator.objp *= calibrator.square_size
-        except Exception:
-            print("[WARN] invalid --pattern-size, ignoring")
-
-    if args.images_dir:
-        rc = calibrator.run_headless(args.images_dir)
-        raise SystemExit(rc)
-    else:
-        calibrator.run()
+    main()

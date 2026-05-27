@@ -17,13 +17,13 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = [
-  "cyber-record",
   "click",
   "flatbuffers",
   "numpy",
   "opencv-python",
   "open3d",
-  "protobuf>=3.20,<4",
+  "protobuf>=5.29,<6",
+  "pycyber",
   "scipy",
   "pyyaml"
 ]
@@ -39,6 +39,7 @@ where = ["."]
 lidar2lidar = ["conf/*.yaml", "conf/*.md"]
 
 [project.scripts]
+camera-intrinsic-calibrate = "camera.cli:main"
 lidar2lidar-calibrate = "lidar2lidar.cli:main"
 lidar2lidartool = "lidar2lidar.cli:main"
 lidar2lidar-auto = "lidar2lidar.auto_calib:main"

@@ -34,7 +34,7 @@ For `camera`, the same pattern lives under `calibration_*_diagnostics/`.
 
 | Module | Minimal validation command | What it proves quickly |
 | --- | --- | --- |
-| `camera` | `python camera/intrinsic.py --config tmp_config.yaml --images-dir /path/to/images --pattern-size 4,3` | confirms the checkerboard dataset and intrinsic pipeline are usable |
+| `camera` | `camera-intrinsic-calibrate --config tmp_config.yaml --images-dir /path/to/images --pattern-size 4,3` | confirms the checkerboard dataset and intrinsic pipeline are usable |
 | `camera2camera` | `python tools/run_camera2camera_smoke.py --pairs 8` | confirms the stereo bundle-adjustment baseline can recover a synthetic camera↔camera extrinsic |
 | `lidar2camera` | `PYTHONPATH=. python3 tools/run_lidar2camera_smoke.py --poses 5` | confirms the runtime and optimizer behave on a synthetic reference case |
 | `lidar2lidar` | `lidar2lidar-auto --record-path /path/to/record --conf-dir lidar2lidar/conf --output-dir outputs/lidar2lidar/run` | confirms the record can be parsed and a baseline automatic run can finish |
@@ -49,18 +49,32 @@ checks.
 
 Read in this order:
 
-1. `calibration_*/..._diagnostics/data_quality.yaml`
-2. `calibration_*/..._diagnostics/per_view_reprojection.csv`
-3. `calibration_*/..._diagnostics/image_coverage_heatmap.png`
-4. `comparison_view.png`
-5. the calibration YAML itself
+1. `outputs/camera_intrinsic/captures/<session>/capture_session.yaml` when the dataset came from a live collection pass
+2. `outputs/camera_intrinsic/runs/<session>/calibration_diagnostics/data_quality.yaml`
+3. `outputs/camera_intrinsic/runs/<session>/calibration_diagnostics/acceptance_report.yaml`
+4. `outputs/camera_intrinsic/runs/<session>/calibration_diagnostics/per_view_reprojection.csv`
+5. `outputs/camera_intrinsic/runs/<session>/calibration_diagnostics/image_coverage_heatmap.png`
+6. `outputs/camera_intrinsic/runs/<session>/comparison_view.png`
+7. `outputs/camera_intrinsic/runs/<session>/calibration.yaml`
 
 Primary signals:
 
+- capture resolution vs preview rendering mapping
 - average reprojection error
 - per-view reprojection long tail
 - image coverage breadth
 - radial monotonicity
+
+For the live-capture manifest, inspect these fields first:
+
+- `capture_runtime.actual_capture_resolution`
+- `capture_runtime.display_rendering.aspect_ratio_preserved`
+- `capture_runtime.display_rendering.render_width`
+- `capture_runtime.display_rendering.render_height`
+- `capture_runtime.display_rendering.pad_x`
+- `capture_runtime.display_rendering.pad_y`
+
+For `comparison_view.png`, the left half must be a real captured frame rather than a blank canvas. The image is only reviewable when the distorted and undistorted views are both present.
 
 ### Camera-to-camera
 
@@ -164,8 +178,8 @@ These are review baselines, not a substitute for project-specific release gates.
 
 | Module | Files to open | What you are checking visually |
 | --- | --- | --- |
-| `camera` | `comparison_view.png`, `image_coverage_heatmap.png` | undistortion sanity and board coverage |
-| `camera2camera` | `parent_image_coverage_heatmap.png`, `child_image_coverage_heatmap.png`, `pose_diversity_plot.png`, `epipolar_previews/` | both cameras saw enough board motion and correspondences remain close to predicted epipolar lines |
+| `camera` | `runs/<session>/comparison_view.png`, `runs/<session>/calibration_diagnostics/image_coverage_heatmap.png` | undistortion sanity and board coverage |
+| `camera2camera` | `runs/<session>/diagnostics/parent_image_coverage_heatmap.png`, `runs/<session>/diagnostics/child_image_coverage_heatmap.png`, `runs/<session>/diagnostics/pose_diversity_plot.png`, `runs/<session>/diagnostics/epipolar_previews/` | both cameras saw enough board motion and correspondences remain close to predicted epipolar lines |
 | `lidar2camera` | `image_coverage_heatmap.png`, `pose_diversity_plot.png`, any overlay artifact listed in diagnostics | target coverage and whether the optimized extrinsic makes geometric sense |
 | `lidar2lidar` | `merged_cloud_baseline_colored.ply`, `merged_cloud_loop_closure_colored.ply`, `visual_evaluation.yaml` | wall thickness, corner spread, ghosting, sensor misalignment after loop closure |
 | `lidar2imu` | `review_report.html`, `ground_residuals_plot.svg`, `ground_height_residuals_plot.svg`, `motion_rotation_residuals_plot.svg`, `motion_residuals_plot.svg`, `motion_registration_fitness_plot.svg`, `trajectory_overlay.svg`, `trajectory_position_gap_plot.svg`, `imu_trajectory_cloud.ply`, `lidar_trajectory_cloud.ply`, `trajectory_overlay_cloud.ply`, `holdout_motion_residuals_plot.svg`, `yaw_cost_scan.svg`, plus the residual CSV/YAML files | browser-friendly visual triage for ground support, motion quality, IMU-vs-LiDAR trajectory consistency, stitched-keyframe geometry, holdout behavior, and yaw support |
