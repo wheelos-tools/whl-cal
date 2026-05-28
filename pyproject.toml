@@ -22,8 +22,8 @@ dependencies = [
   "numpy",
   "opencv-python",
   "open3d",
-  "protobuf>=5.29,<6",
-  "pycyber",
+  "protobuf==3.19.4",
+  "cyber_record",
   "scipy",
   "pyyaml"
 ]
