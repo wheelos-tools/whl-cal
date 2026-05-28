@@ -22,13 +22,10 @@ from __future__ import annotations
 import os
 from typing import Iterable, Iterator
 
-from lidar2lidar.apollo_flatbuffer_messages import get_flat_message_decoder
-from lidar2lidar.apollo_record_messages import get_message_class
-
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 try:
-    from pycyber.record import RecordReader
+    from cyber_record.record import Record as RecordReader
 except ImportError:
     RecordReader = None
 
@@ -37,8 +34,8 @@ def ensure_record_available() -> None:
     if RecordReader is None:
         raise RuntimeError(
             (
-                "pycyber is not installed. "
-                "Use `pip install -e .` or install `pycyber`."
+                "cyber_record is not installed. "
+                "Use `pip install -e .` or install `cyber_record`."
             )
         )
 
@@ -47,28 +44,6 @@ def _normalize_topics(topics: Iterable[str] | None) -> set[str] | None:
     if topics is None:
         return None
     return {str(topic) for topic in topics}
-
-
-def _normalize_type_name(type_name: str | bytes) -> str:
-    if isinstance(type_name, bytes):
-        return type_name.decode("utf-8")
-    return str(type_name)
-
-
-def decode_message(payload: bytes, type_name: str | bytes):
-    normalized_type_name = _normalize_type_name(type_name)
-    flat_message_decoder = get_flat_message_decoder(normalized_type_name)
-    if flat_message_decoder is not None:
-        return flat_message_decoder(payload)
-    message_cls = get_message_class(normalized_type_name)
-    if message_cls is None:
-        raise RuntimeError(
-            f"Unsupported Apollo record message type: {normalized_type_name}"
-        )
-
-    message = message_cls()
-    message.ParseFromString(payload)
-    return message
 
 
 class Record:
@@ -86,21 +61,17 @@ class Record:
         self, topics: Iterable[str] | None = None
     ) -> Iterator[tuple[str, bytes, str, int]]:
         topic_filter = _normalize_topics(topics)
-        for bag_message in self._reader.read_messages():
-            topic = str(bag_message.topic)
-            if topic_filter is not None and topic not in topic_filter:
-                continue
+        for topic, message, timestamp_ns in self._reader.read_messages(
+            topics=topic_filter
+        ):
             yield (
-                topic,
-                bytes(bag_message.message),
-                _normalize_type_name(bag_message.data_type),
-                int(bag_message.timestamp),
+                str(topic),
+                message.SerializeToString(),
+                str(message.DESCRIPTOR.full_name),
+                int(timestamp_ns),
             )
 
     def read_messages(
         self, topics: Iterable[str] | None = None
     ) -> Iterator[tuple[str, object, int]]:
-        for topic, payload, type_name, timestamp_ns in self.read_raw_messages(
-            topics=topics
-        ):
-            yield topic, decode_message(payload, type_name), timestamp_ns
+        yield from self._reader.read_messages(topics=_normalize_topics(topics))

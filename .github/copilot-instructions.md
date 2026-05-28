@@ -80,8 +80,8 @@ lidar2imu-calibrate \
 - `lidar2imu` is intentionally split between:
   - record conversion to `standardized_samples.yaml` (`record_converter.py`)
   - calibration / metrics (`pipeline.py`, `algorithms.py`, `metrics.py`, `io.py`)
-- Apollo record decoding does **not** use `cyber_record` or `record_msg`. The supported stack is:
-  - `lidar2lidar/record_adapter.py` wrapping `pycyber.record.RecordReader`
+- Apollo record decoding uses `cyber_record` with in-repo protobuf wrappers. The supported stack is:
+  - `lidar2lidar/record_adapter.py` wrapping `cyber_record.record.Record`
   - `lidar2lidar/apollo_record_messages.py` providing minimal in-repo protobuf definitions for the message types this repo actually consumes
 - `tools/` contains operational helper scripts layered on top of the library packages. Reusable workflow logic belongs in `lidar2lidar/` or `lidar2imu/`, not in `tools/`.
 
