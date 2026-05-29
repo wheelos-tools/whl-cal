@@ -93,8 +93,12 @@ def draw_dynamic_ui(display, grid_coverage, grid_shape, feedback_text, progress)
     }.get(stage, stage)
     sample_count = int(progress.get("sample_count", 0))
     required_samples = int(progress.get("required_sample_count", 0))
-    coverage_count = int(progress.get("coverage_cell_count", np.count_nonzero(grid_coverage > 0)))
-    coverage_target = int(progress.get("coverage_target_cell_count", grid_coverage.size))
+    coverage_count = int(
+        progress.get("coverage_cell_count", np.count_nonzero(grid_coverage > 0))
+    )
+    coverage_target = int(
+        progress.get("coverage_target_cell_count", grid_coverage.size)
+    )
     guidance_summary = str(progress.get("guidance_summary") or "")
     guidance_actions = list(progress.get("guidance_actions") or [])
 
@@ -104,7 +108,9 @@ def draw_dynamic_ui(display, grid_coverage, grid_shape, feedback_text, progress)
     panel_lines.append((stage_label, (0, 255, 255), 0.8))
     panel_lines.append(
         (
-            f"Diverse samples: {sample_count}/{required_samples} | Spatial coverage: {coverage_count}/{coverage_target}",
+            "Diverse samples: "
+            f"{sample_count}/{required_samples} | Spatial coverage: "
+            f"{coverage_count}/{coverage_target}",
             (0, 255, 255),
             0.8,
         )
@@ -141,7 +147,9 @@ def draw_dynamic_ui(display, grid_coverage, grid_shape, feedback_text, progress)
                 cv2.rectangle(overlay, (x0, y0), (x1, y1), heat_color, -1)
                 cv2.addWeighted(overlay, alpha, display, 1.0 - alpha, 0, display)
 
-            border_color = (0, 180, 255) if (row, col) in sparsest_cells else (70, 70, 70)
+            border_color = (
+                (0, 180, 255) if (row, col) in sparsest_cells else (70, 70, 70)
+            )
             border_thickness = 3 if (row, col) in sparsest_cells else 2
             cv2.rectangle(display, (x0, y0), (x1, y1), border_color, border_thickness)
 
@@ -199,6 +207,7 @@ def draw_dynamic_ui(display, grid_coverage, grid_shape, feedback_text, progress)
             thickness=2,
         )
 
+
 def draw_aprilgrid_debug(image, debug_info):
     debug_info = debug_info or {}
     if not debug_info or debug_info.get("target_type") != "aprilgrid":
@@ -227,7 +236,8 @@ def draw_aprilgrid_debug(image, debug_info):
         lines.append(f"IDs: {ids_preview}")
     if attempts:
         attempt_summary = " ".join(
-            f"{float(item.get('scale', 0.0)):.2f}x:{int(item.get('detected_marker_count', 0))}"
+            f"{float(item.get('scale', 0.0)):.2f}x:"
+            f"{int(item.get('detected_marker_count', 0))}"
             for item in attempts[:6]
         )
         lines.append(f"Attempts {attempt_summary}")
@@ -311,4 +321,161 @@ def build_comparison_canvas(distorted_image, undistorted_image, preview_info):
         (width + 80, 95),
         (180, 255, 180),
     )
+    return canvas
+
+
+def draw_relative_pose_panel(image, pose_summary, *, origin_xy=(0, 0)):
+    if not pose_summary:
+        return
+
+    x0, y0 = origin_xy
+    panel_w = 360
+    panel_h = 220
+    overlay = image.copy()
+    cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h), (32, 32, 32), -1)
+    cv2.addWeighted(overlay, 0.7, image, 0.3, 0, image)
+    cv2.rectangle(image, (x0, y0), (x0 + panel_w, y0 + panel_h), (90, 90, 90), 2)
+
+    title = str(pose_summary.get("title") or "Stereo relative pose")
+    draw_text(image, title, (x0 + 16, y0 + 28), color=(255, 255, 255), scale=0.65)
+
+    translation = pose_summary.get("translation_m") or {}
+    euler = pose_summary.get("euler_deg") or {}
+    delta = pose_summary.get("delta_to_consensus") or {}
+    lines = [
+        (
+            "t[m] "
+            f"x={float(translation.get('x', 0.0)):.3f} "
+            f"y={float(translation.get('y', 0.0)):.3f} "
+            f"z={float(translation.get('z', 0.0)):.3f}"
+        ),
+        (
+            "rpy[deg] "
+            f"r={float(euler.get('roll', 0.0)):.2f} "
+            f"p={float(euler.get('pitch', 0.0)):.2f} "
+            f"y={float(euler.get('yaw', 0.0)):.2f}"
+        ),
+    ]
+    if delta:
+        lines.append(
+            "delta "
+            f"t={float(delta.get('translation_norm_m', 0.0)):.3f}m "
+            f"r={float(delta.get('rotation_deg', 0.0)):.2f}deg"
+        )
+    extra = str(pose_summary.get("extra") or "")
+    if extra:
+        lines.append(extra)
+
+    for index, line in enumerate(lines):
+        draw_text(
+            image,
+            line,
+            (x0 + 16, y0 + 58 + index * 28),
+            color=(180, 240, 255),
+            scale=0.55,
+            thickness=2,
+        )
+
+    diagram_center = (x0 + 180, y0 + 170)
+    cv2.circle(image, diagram_center, 12, (0, 255, 255), -1)
+    draw_text(
+        image,
+        "Parent",
+        (diagram_center[0] - 28, diagram_center[1] + 30),
+        color=(0, 255, 255),
+        scale=0.5,
+        thickness=1,
+    )
+
+    tx = float(translation.get("x", 0.0))
+    ty = float(translation.get("y", 0.0))
+    scale = 110.0
+    child_center = (
+        int(round(diagram_center[0] + tx * scale)),
+        int(round(diagram_center[1] - ty * scale)),
+    )
+    child_center = (
+        int(np.clip(child_center[0], x0 + 25, x0 + panel_w - 25)),
+        int(np.clip(child_center[1], y0 + 120, y0 + panel_h - 25)),
+    )
+    cv2.line(image, diagram_center, child_center, (120, 200, 255), 2, cv2.LINE_AA)
+    cv2.circle(image, child_center, 12, (120, 200, 255), -1)
+    draw_text(
+        image,
+        "Child",
+        (child_center[0] - 22, child_center[1] + 30),
+        color=(120, 200, 255),
+        scale=0.5,
+        thickness=1,
+    )
+
+    yaw_deg = float(euler.get("yaw", 0.0))
+    yaw_rad = np.deg2rad(yaw_deg)
+    arrow_len = 28
+    arrow_tip = (
+        int(round(child_center[0] + np.cos(yaw_rad) * arrow_len)),
+        int(round(child_center[1] - np.sin(yaw_rad) * arrow_len)),
+    )
+    cv2.arrowedLine(
+        image,
+        child_center,
+        arrow_tip,
+        (255, 220, 120),
+        2,
+        cv2.LINE_AA,
+        tipLength=0.25,
+    )
+
+
+def build_stereo_comparison_canvas(
+    parent_image,
+    child_image,
+    *,
+    footer_lines=None,
+    pose_summary=None,
+):
+    footer_lines = [str(line) for line in list(footer_lines or []) if str(line).strip()]
+    top_pad = 70
+    bottom_pad = max(80, 34 * max(len(footer_lines), 1) + 30)
+    gap = 30
+    side_pad = 20
+    panel_gap = 24
+    pose_panel_width = 380 if pose_summary else 0
+
+    left_h, left_w = parent_image.shape[:2]
+    right_h, right_w = child_image.shape[:2]
+    frame_h = max(left_h, right_h)
+    canvas_h = top_pad + frame_h + bottom_pad
+    canvas_w = (
+        side_pad * 2
+        + left_w
+        + gap
+        + right_w
+        + (panel_gap + pose_panel_width if pose_panel_width else 0)
+    )
+    canvas = np.full((canvas_h, canvas_w, 3), 36, np.uint8)
+
+    left_x = side_pad
+    right_x = left_x + left_w + gap
+    image_y = top_pad
+    canvas[image_y : image_y + left_h, left_x : left_x + left_w] = parent_image
+    canvas[image_y : image_y + right_h, right_x : right_x + right_w] = child_image
+    draw_text(canvas, "Parent view", (left_x + 10, 38), (200, 200, 255), scale=0.8)
+    draw_text(canvas, "Child view", (right_x + 10, 38), (180, 255, 180), scale=0.8)
+
+    if pose_summary:
+        pose_x = right_x + right_w + panel_gap
+        draw_relative_pose_panel(canvas, pose_summary, origin_xy=(pose_x, top_pad))
+
+    footer_y = top_pad + frame_h + 36
+    for index, line in enumerate(footer_lines):
+        color = (0, 255, 255) if index == 0 else (180, 240, 255)
+        draw_text(
+            canvas,
+            line,
+            (side_pad + 8, footer_y + index * 28),
+            color=color,
+            scale=0.65,
+            thickness=2,
+        )
     return canvas
