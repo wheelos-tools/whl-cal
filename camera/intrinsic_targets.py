@@ -7,6 +7,19 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+try:
+    from pupil_apriltags import Detector as PupilAprilTagDetector
+except ImportError:  # pragma: no cover - optional dependency
+    PupilAprilTagDetector = None
+
+
+_APRILTAG_DICTIONARY_TO_FAMILY = {
+    "DICT_APRILTAG_16h5": "tag16h5",
+    "DICT_APRILTAG_25h9": "tag25h9",
+    "DICT_APRILTAG_36h10": "tag36h10",
+    "DICT_APRILTAG_36h11": "tag36h11",
+}
+
 
 @dataclass
 class DetectionResult:
@@ -68,7 +81,8 @@ class CalibrationTargetDetector:
             return
         if self.pattern_size is None or self.square_size is None:
             raise ValueError(
-                "Chessboard calibration requires pattern_size and square_size in the config."
+                "Chessboard calibration requires pattern_size and square_size "
+                "in the config."
             )
         self.chessboard_objp = np.zeros(
             (self.pattern_size[0] * self.pattern_size[1], 3), np.float32
@@ -97,6 +111,8 @@ class CalibrationTargetDetector:
         if self.target_type != "aprilgrid":
             self.aruco_detector = None
             self.april_board = None
+            self.pupil_april_detector = None
+            self.april_board_marker_lookup = {}
             return
 
         if not hasattr(cv2, "aruco"):
@@ -121,17 +137,41 @@ class CalibrationTargetDetector:
         if spacing is None:
             ratio = float(self.apr_cfg.get("tag_spacing_ratio", 0.3))
             spacing = tag_size * ratio
-        self.april_board = cv2.aruco.GridBoard((cols, rows), tag_size, float(spacing), dictionary)
+        self.april_board = cv2.aruco.GridBoard(
+            (cols, rows), tag_size, float(spacing), dictionary
+        )
         self.april_board_shape = (cols, rows)
         self.april_tag_size = tag_size
         self.april_tag_spacing = float(spacing)
+        self.april_board_marker_lookup = {}
+        board_ids = np.asarray(self.april_board.getIds(), dtype=np.int32).reshape(-1)
+        board_obj_points = list(self.april_board.getObjPoints())
+        for marker_id, corners in zip(board_ids.tolist(), board_obj_points):
+            self.april_board_marker_lookup[int(marker_id)] = np.asarray(
+                corners, dtype=np.float32
+            ).reshape(1, 4, 3)
+        family = _APRILTAG_DICTIONARY_TO_FAMILY.get(self.april_dictionary_name)
+        self.pupil_april_detector = None
+        if PupilAprilTagDetector is not None and family is not None:
+            self.pupil_april_detector = PupilAprilTagDetector(
+                families=family,
+                nthreads=max(1, int(self.apr_cfg.get("pupil_nthreads", 1))),
+                quad_decimate=float(self.apr_cfg.get("pupil_quad_decimate", 1.0)),
+                quad_sigma=float(self.apr_cfg.get("pupil_quad_sigma", 0.0)),
+                refine_edges=1,
+                decode_sharpening=float(
+                    self.apr_cfg.get("pupil_decode_sharpening", 0.25)
+                ),
+            )
 
     def _init_charuco_if_needed(self):
         self.charuco_cfg = self.cfg.get("charuco", {}) or {}
         self.charuco_dictionary_name = str(
             self.charuco_cfg.get("dictionary", "DICT_4X4_100")
         )
-        self.min_charuco_corners = int(self.charuco_cfg.get("min_corners_per_frame", 12))
+        self.min_charuco_corners = int(
+            self.charuco_cfg.get("min_corners_per_frame", 12)
+        )
 
         if self.target_type != "charuco":
             self.charuco_detector = None
@@ -231,7 +271,9 @@ class CalibrationTargetDetector:
 
     def _detect_chessboard(self, gray, optimization_cfg):
         factor = float(optimization_cfg["resize_factor"])
-        small = cv2.resize(gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA)
+        small = cv2.resize(
+            gray, None, fx=factor, fy=factor, interpolation=cv2.INTER_AREA
+        )
         found, small_corners = cv2.findChessboardCorners(
             small,
             self.pattern_size,
@@ -255,13 +297,102 @@ class CalibrationTargetDetector:
             feature_ids=np.arange(refined.shape[0], dtype=np.int32).reshape(-1, 1),
         )
 
-    def _detect_aprilgrid_markers(self, gray, optimization_cfg):
-        base_factor = float((optimization_cfg or {}).get("resize_factor", 1.0))
-        candidate_scales = []
-        if base_factor > 0 and abs(base_factor - 1.0) >= 1e-6:
-            candidate_scales.append(base_factor)
-        candidate_scales.extend(self.april_detection_scale_factors)
-        normalized_scales = self._normalize_scale_factors(candidate_scales, [1.0])
+    def _detect_aprilgrid_markers_pupil(self, gray, normalized_scales):
+        if self.pupil_april_detector is None:
+            return None
+        attempts = []
+        best_marker_corners = None
+        best_marker_ids = None
+        best_marker_count = -1
+        best_scale = None
+        for effective_scale in normalized_scales:
+            if abs(effective_scale - 1.0) < 1e-6:
+                scaled_gray = gray
+            else:
+                interpolation = (
+                    cv2.INTER_CUBIC if effective_scale > 1.0 else cv2.INTER_AREA
+                )
+                scaled_gray = cv2.resize(
+                    gray,
+                    None,
+                    fx=effective_scale,
+                    fy=effective_scale,
+                    interpolation=interpolation,
+                )
+            detections = self.pupil_april_detector.detect(
+                scaled_gray,
+                estimate_tag_pose=False,
+            )
+            detections = [
+                detection
+                for detection in detections
+                if int(getattr(detection, "tag_id", -1))
+                in self.april_board_marker_lookup
+            ]
+            detections.sort(key=lambda item: int(getattr(item, "tag_id", -1)))
+            marker_corners = []
+            marker_ids = []
+            for detection in detections:
+                corners = np.asarray(detection.corners, dtype=np.float32).reshape(
+                    1, 4, 2
+                )
+                if abs(effective_scale - 1.0) >= 1e-6:
+                    corners = corners / effective_scale
+                marker_corners.append(corners)
+                marker_ids.append([int(detection.tag_id)])
+            marker_count = int(len(marker_ids))
+            attempts.append(
+                {
+                    "backend": "pupil_apriltags",
+                    "scale": float(effective_scale),
+                    "detected_marker_count": marker_count,
+                    "detected_marker_ids": [
+                        int(value[0])
+                        for value in marker_ids[: min(20, len(marker_ids))]
+                    ],
+                    "rejected_candidate_count": 0,
+                    "met_min_tags_threshold": bool(
+                        marker_count >= self.min_tags_per_frame
+                    ),
+                }
+            )
+            if marker_count > best_marker_count or (
+                marker_count == best_marker_count
+                and best_scale is not None
+                and abs(effective_scale - 1.0) < abs(best_scale - 1.0)
+            ):
+                best_marker_corners = marker_corners
+                best_marker_ids = (
+                    np.asarray(marker_ids, dtype=np.int32).reshape(-1, 1)
+                    if marker_ids
+                    else None
+                )
+                best_marker_count = marker_count
+                best_scale = float(effective_scale)
+        selected_ids = []
+        if best_marker_ids is not None:
+            selected_ids = [
+                int(value) for value in np.asarray(best_marker_ids).reshape(-1).tolist()
+            ]
+        return (
+            best_marker_corners,
+            best_marker_ids,
+            {
+                "target_type": "aprilgrid",
+                "detector_backend": "pupil_apriltags",
+                "dictionary": self.april_dictionary_name,
+                "candidate_scales": [float(value) for value in normalized_scales],
+                "attempts": attempts,
+                "min_tags_per_frame": int(self.min_tags_per_frame),
+                "detected_marker_count": int(max(best_marker_count, 0)),
+                "selected_scale": best_scale,
+                "selected_marker_ids": selected_ids,
+                "selected_rejected_candidate_count": 0,
+                "selected_by": "max_marker_count",
+            },
+        )
+
+    def _detect_aprilgrid_markers_opencv(self, gray, normalized_scales):
         attempts = []
         best_marker_corners = None
         best_marker_ids = None
@@ -296,6 +427,7 @@ class CalibrationTargetDetector:
                 ]
             attempts.append(
                 {
+                    "backend": "opencv_aruco",
                     "scale": float(effective_scale),
                     "detected_marker_count": int(marker_count),
                     "detected_marker_ids": flattened_ids,
@@ -314,13 +446,10 @@ class CalibrationTargetDetector:
                     for corners in marker_corners
                 ]
 
-            if (
-                marker_count > best_marker_count
-                or (
-                    marker_count == best_marker_count
-                    and best_scale is not None
-                    and abs(effective_scale - 1.0) < abs(best_scale - 1.0)
-                )
+            if marker_count > best_marker_count or (
+                marker_count == best_marker_count
+                and best_scale is not None
+                and abs(effective_scale - 1.0) < abs(best_scale - 1.0)
             ):
                 best_marker_corners = marker_corners
                 best_marker_ids = np.asarray(marker_ids, dtype=np.int32).reshape(-1, 1)
@@ -333,19 +462,37 @@ class CalibrationTargetDetector:
             selected_ids = [
                 int(value) for value in np.asarray(best_marker_ids).reshape(-1).tolist()
             ]
-        debug_info = {
-            "target_type": "aprilgrid",
-            "dictionary": self.april_dictionary_name,
-            "candidate_scales": [float(value) for value in normalized_scales],
-            "attempts": attempts,
-            "min_tags_per_frame": int(self.min_tags_per_frame),
-            "detected_marker_count": int(max(best_marker_count, 0)),
-            "selected_scale": best_scale,
-            "selected_marker_ids": selected_ids,
-            "selected_rejected_candidate_count": int(best_rejected_count),
-            "selected_by": "max_marker_count",
-        }
-        return best_marker_corners, best_marker_ids, debug_info
+        return (
+            best_marker_corners,
+            best_marker_ids,
+            {
+                "target_type": "aprilgrid",
+                "detector_backend": "opencv_aruco",
+                "dictionary": self.april_dictionary_name,
+                "candidate_scales": [float(value) for value in normalized_scales],
+                "attempts": attempts,
+                "min_tags_per_frame": int(self.min_tags_per_frame),
+                "detected_marker_count": int(max(best_marker_count, 0)),
+                "selected_scale": best_scale,
+                "selected_marker_ids": selected_ids,
+                "selected_rejected_candidate_count": int(best_rejected_count),
+                "selected_by": "max_marker_count",
+            },
+        )
+
+    def _detect_aprilgrid_markers(self, gray, optimization_cfg):
+        base_factor = float((optimization_cfg or {}).get("resize_factor", 1.0))
+        candidate_scales = []
+        if base_factor > 0 and abs(base_factor - 1.0) >= 1e-6:
+            candidate_scales.append(base_factor)
+        candidate_scales.extend(self.april_detection_scale_factors)
+        normalized_scales = self._normalize_scale_factors(candidate_scales, [1.0])
+        pupil_result = self._detect_aprilgrid_markers_pupil(gray, normalized_scales)
+        if pupil_result is not None:
+            marker_corners, marker_ids, debug_info = pupil_result
+            if marker_ids is not None and len(marker_ids) >= self.min_tags_per_frame:
+                return marker_corners, marker_ids, debug_info
+        return self._detect_aprilgrid_markers_opencv(gray, normalized_scales)
 
     def _detect_aprilgrid(self, gray, optimization_cfg):
         marker_corners, marker_ids, debug_info = self._detect_aprilgrid_markers(

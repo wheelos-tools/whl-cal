@@ -38,6 +38,7 @@ class StereoCalibrationConfig:
     child_image_directory: str = "calibration_data/child"
     parent_frame: str = "camera_parent"
     child_frame: str = "camera_child"
+    target_type: str = "checkerboard"
     board_pattern_size: tuple[int, int] = (11, 8)
     board_square_size_m: float = 0.025
     extraction_min_bbox_area_ratio: float = 0.003

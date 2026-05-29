@@ -20,11 +20,11 @@ Before running this tool:
 
 | Item | Required | Notes |
 | --- | --- | --- |
-| paired parent / child images | yes | matched by filename stem |
+| paired parent / child images | yes | matched by filename stem for offline mode |
 | parent intrinsic YAML | yes | use `camera/intrinsic.py` output or equivalent YAML |
 | child intrinsic YAML | yes | same requirement as parent |
-| checkerboard pattern size | yes | inner-corner count, for example `[11, 8]` |
-| checkerboard square size | yes | meter unit |
+| calibration target config | yes | `checkerboard`, `aprilgrid`, or `charuco` |
+| checkerboard / aprilgrid geometry | yes | meter unit |
 | multi-pose board capture | yes | vary depth, tilt, and image location in both cameras |
 
 ## Install
@@ -99,6 +99,129 @@ output:
 camera2camera-calibrate --config camera2camera_config.yaml
 ```
 
+## Live stereo capture
+
+Enable `live_capture.enabled: true` in the config, then point each camera source to
+an RTSP URI or device index:
+
+```yaml
+cameras:
+  parent:
+    frame_id: camera_left
+    intrinsics_path: run01/parent_intrinsics.yaml
+    source:
+      uri: rtsp://192.168.1.10/stream
+      codec: h265
+  child:
+    frame_id: camera_right
+    intrinsics_path: run01/child_intrinsics.yaml
+    source:
+      uri: rtsp://192.168.1.11/stream
+      codec: h265
+target:
+  type: aprilgrid
+  aprilgrid:
+    dictionary: DICT_APRILTAG_36h11
+    grid_cols: 6
+    grid_rows: 6
+    tag_size: 0.04
+    tag_spacing_ratio: 0.3
+live_capture:
+  enabled: true
+  provisional_eval_interval: 1
+  auto_stop_on_release_ready: true
+auto_capture_settings:
+  min_total_samples: 12
+```
+
+Then run:
+
+```bash
+camera2camera-calibrate \
+  --config camera2camera_config.yaml \
+  --session-name round01_factory \
+  --headless-live-max-seconds 300
+```
+
+Useful live flags:
+
+1. `--capture-only` saves accepted stereo pairs and skips final calibration.
+2. `--require-release-ready` returns non-zero if the final run is still review-only.
+3. `--headless-live-max-seconds` is useful on servers without a display.
+
+Live capture saves paired images under
+`outputs/camera2camera/captures/<session>/parent` and `child`, keeps per-camera
+coverage/diversity guidance during capture, and runs provisional stereo reviews as
+the pair set grows. The GUI now shows:
+
+1. parent / child views side by side
+2. per-camera live diagnostics and heatmaps
+3. the current stereo relative-pose panel from the last accepted / provisional result
+
+## Pair-by-pair live interaction
+
+The live workflow is now intentionally **single-pair incremental**:
+
+1. Both cameras must detect the same target.
+2. Both views must pass the stability gate.
+3. Both views must pass coverage / novelty checks.
+4. The pair must pass per-camera pose solve checks:
+   - bbox not too small
+   - margin from image border not too small
+   - `solvePnP` succeeds
+   - reprojection RMS stays below the extraction threshold
+5. Only then is the pair saved.
+6. Immediately after saving, the system writes `debug/sample_<N>_review.yaml` and
+   tells the operator what to do next.
+
+Before the dataset reaches the stereo minimum pair count, the review explains:
+
+- whether the current pair itself is geometrically valid
+- how many more pairs are needed before full stereo review
+- whether to prioritize uncovered image regions or stronger pose diversity
+
+After the minimum pair count is reached, every newly accepted pair also triggers a
+provisional stereo review.
+
+## Operator guidance and debugging
+
+The live UI / headless logs now translate common failures into direct actions:
+
+| live symptom | meaning | operator action |
+| --- | --- | --- |
+| target lost | board not reliably detected in one or both cameras | keep the full board visible, reduce glare, reduce motion blur, move slightly closer |
+| board too small | target bbox area is too small for stable pose | move the board closer or use a larger target |
+| near image edge | target margin is too small | move the board away from the image boundary |
+| pose solve failed | detector succeeded but PnP is unstable | keep the board flatter, sharper, and fully visible |
+| reprojection too high | image points are noisy or board is blurred / extreme-angle | hold steadier, improve focus/exposure, avoid grazing angles |
+| pose not novel | this sample is too similar to prior accepted views | change depth, tilt, and lateral offset |
+| inconsistent relative transform | current pair disagrees with the current stereo consensus | avoid unsynchronized board motion; keep both views stable on the same pose |
+
+For factory collection, the recommended operator loop is:
+
+1. Start with the board centered and medium distance so both cameras detect it easily.
+2. Collect a few easy fronto-parallel pairs first to establish a stable stereo seed.
+3. Then deliberately expand:
+   - left / right image coverage
+   - top / bottom coverage
+   - near / far depth
+   - low / high tilt
+4. Stop only when the provisional stereo review turns `release_ready`, not merely
+   when detection succeeds.
+
+## Recommended targets
+
+1. `aprilgrid` is the recommended live target because tag IDs resolve orientation
+   ambiguity and partial visibility better than checkerboard.
+2. `checkerboard` remains supported, but live collection uses conservative per-pair
+   pose gating and then relies on the stereo provisional/final review to resolve
+   ordering robustly across multiple pairs.
+3. `charuco` is also supported when you want marker IDs plus chessboard-style
+   corner refinement.
+
+For AprilGrid, the detector now prefers `pupil_apriltags` and falls back to
+OpenCV ArUco/AprilTag when that package is unavailable.
+
 ## Minimal validation
 
 ```bash
@@ -153,4 +276,3 @@ Outputs include:
 
 Treat missing holdout evidence, weak coverage, or warning-level repeatability as
 **review-only**, not release-ready.
-

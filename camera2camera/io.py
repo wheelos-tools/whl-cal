@@ -497,7 +497,7 @@ def write_outputs(
     standardized_data = {
         "schema_version": 1,
         "module": "camera2camera",
-        "representation": "checkerboard_image_pair_observations",
+        "representation": "target_image_pair_observations",
         "frames": {
             "parent_frame": dataset.parent_frame,
             "child_frame": dataset.child_frame,
@@ -743,7 +743,7 @@ def write_failure_outputs(
     standardized_data = {
         "schema_version": 1,
         "module": "camera2camera",
-        "representation": "checkerboard_image_pair_observations",
+        "representation": "target_image_pair_observations",
         "frames": {
             "parent_frame": dataset.parent_frame,
             "child_frame": dataset.child_frame,

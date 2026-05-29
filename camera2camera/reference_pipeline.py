@@ -11,11 +11,17 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as R
 
 from camera2camera.io import write_failure_outputs, write_outputs
-from camera2camera.metrics import (build_metrics_output, float_list_summary,
-                                   transform_delta_metrics)
-from camera2camera.models import (StereoCalibrationConfig,
-                                  StereoCalibrationDataset,
-                                  StereoCalibrationObservation)
+from camera2camera.metrics import (
+    build_metrics_output,
+    float_list_summary,
+    transform_delta_metrics,
+)
+from camera2camera.models import (
+    StereoCalibrationConfig,
+    StereoCalibrationDataset,
+    StereoCalibrationObservation,
+)
+from camera.intrinsic_targets import CalibrationTargetDetector
 from lidar2lidar.extrinsic_io import load_extrinsics_file
 
 
@@ -33,17 +39,72 @@ def default_reference_config_payload() -> dict[str, Any]:
                 "frame_id": "camera_parent",
                 "image_directory": "calibration_data/parent",
                 "intrinsics_path": "parent_intrinsics.yaml",
+                "source": {
+                    "uri": "",
+                    "codec": "h265",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 25,
+                },
             },
             "child": {
                 "frame_id": "camera_child",
                 "image_directory": "calibration_data/child",
                 "intrinsics_path": "child_intrinsics.yaml",
+                "source": {
+                    "uri": "",
+                    "codec": "h265",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 25,
+                },
             },
         },
         "target": {
             "type": "checkerboard",
             "pattern_size": [11, 8],
             "square_size_m": 0.025,
+            "aprilgrid": {
+                "dictionary": "DICT_APRILTAG_36h11",
+                "grid_cols": 6,
+                "grid_rows": 6,
+                "tag_size": 0.04,
+                "tag_spacing_ratio": 0.3,
+                "min_tags_per_frame": 6,
+            },
+        },
+        "workflow": {
+            "root_dir": "outputs/camera2camera",
+            "save_live_accepted_frames": True,
+        },
+        "live_capture": {
+            "enabled": False,
+            "provisional_eval_interval": 1,
+            "auto_stop_on_release_ready": True,
+        },
+        "capture": {
+            "force_resolution": False,
+            "width": None,
+            "height": None,
+            "fourcc": None,
+            "buffersize": 1,
+            "warmup_frames": 12,
+            "reconnect_bad_frame_burst": 30,
+            "initial_ready_timeout_s": 10.0,
+            "latest_frame_read_timeout_s": 0.25,
+            "reconnect_sleep_s": 0.5,
+        },
+        "auto_capture_settings": {
+            "grid_shape": [3, 3],
+            "min_total_samples": 12,
+            "pose_novelty_center_distance_ratio": 0.08,
+            "pose_novelty_area_delta": 0.02,
+            "pose_novelty_aspect_delta": 0.12,
+            "samples_per_grid": 1,
+            "delay_between_captures": 1.0,
+            "stability_frames": 5,
+            "stability_threshold": 2.0,
+            "stability_threshold_ratio": 0.02,
         },
         "extraction": {
             "min_bbox_area_ratio": 0.003,
@@ -211,6 +272,7 @@ def _load_config(
         ),
         parent_frame=str(parent_camera_payload.get("frame_id", "camera_parent")),
         child_frame=str(child_camera_payload.get("frame_id", "camera_child")),
+        target_type=str(target.get("type", "checkerboard")).lower(),
         board_pattern_size=tuple(target.get("pattern_size", [11, 8])),
         board_square_size_m=float(target.get("square_size_m", 0.025)),
         extraction_min_bbox_area_ratio=float(
@@ -288,6 +350,7 @@ def _load_config(
             "child_distortion": child_distortion,
             "child_camera_metadata": child_camera_metadata,
             "initial_transform": initial_transform,
+            "target_payload": copy.deepcopy(target),
         },
         resolved_output_dir,
     )
@@ -353,6 +416,263 @@ def _find_checkerboard_corners(
         (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001),
     )
     return np.asarray(refined, dtype=float).reshape(-1, 2)
+
+
+def _target_detector_config(
+    config: StereoCalibrationConfig, target_payload: dict[str, Any]
+) -> dict[str, Any]:
+    detector_target_type = (
+        "chessboard" if config.target_type == "checkerboard" else config.target_type
+    )
+    detector_cfg: dict[str, Any] = {"target_type": detector_target_type}
+    if config.target_type == "checkerboard":
+        detector_cfg["pattern_size"] = list(config.board_pattern_size)
+        detector_cfg["square_size"] = float(config.board_square_size_m)
+    elif config.target_type == "aprilgrid":
+        detector_cfg["aprilgrid"] = copy.deepcopy(
+            target_payload.get("aprilgrid") or target_payload
+        )
+    elif config.target_type == "charuco":
+        detector_cfg["charuco"] = copy.deepcopy(
+            target_payload.get("charuco") or target_payload
+        )
+    else:
+        raise ValueError(f"Unsupported camera2camera target_type: {config.target_type}")
+    return detector_cfg
+
+
+def _build_target_detector(
+    config: StereoCalibrationConfig, target_payload: dict[str, Any]
+) -> CalibrationTargetDetector:
+    detector_cfg = _target_detector_config(config, target_payload)
+    pattern_size = (
+        tuple(config.board_pattern_size)
+        if config.target_type == "checkerboard"
+        else None
+    )
+    square_size = (
+        float(config.board_square_size_m)
+        if config.target_type == "checkerboard"
+        else None
+    )
+    return CalibrationTargetDetector(
+        detector_cfg,
+        pattern_size=pattern_size,
+        square_size=square_size,
+    )
+
+
+def _detect_target(
+    image: np.ndarray,
+    *,
+    config: StereoCalibrationConfig,
+    detector: CalibrationTargetDetector,
+) -> dict[str, Any] | None:
+    if config.target_type == "checkerboard":
+        image_points = _find_checkerboard_corners(image, config.board_pattern_size)
+        if image_points is None:
+            return None
+        return {
+            "image_points": np.asarray(image_points, dtype=float),
+            "object_points": _build_board_template(
+                config.board_pattern_size,
+                config.board_square_size_m,
+            ),
+            "feature_ids": np.arange(image_points.shape[0], dtype=np.int32).reshape(
+                -1, 1
+            ),
+            "debug_info": {"target_type": "checkerboard"},
+            "marker_corners": None,
+            "marker_ids": None,
+        }
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    detection = detector.detect(
+        gray,
+        0,
+        {"resize_factor": 1.0, "detection_interval": 1},
+    )
+    if not detection.found:
+        return None
+    return {
+        "image_points": np.asarray(detection.image_points, dtype=float).reshape(-1, 2),
+        "object_points": np.asarray(detection.object_points, dtype=float).reshape(
+            -1, 3
+        ),
+        "feature_ids": (
+            None
+            if detection.feature_ids is None
+            else np.asarray(detection.feature_ids, dtype=np.int32).reshape(-1, 1)
+        ),
+        "debug_info": copy.deepcopy(detection.debug_info or {}),
+        "marker_corners": (
+            None
+            if detection.marker_corners is None
+            else [
+                np.asarray(corners, dtype=float) for corners in detection.marker_corners
+            ]
+        ),
+        "marker_ids": (
+            None
+            if detection.marker_ids is None
+            else np.asarray(detection.marker_ids, dtype=np.int32).reshape(-1, 1)
+        ),
+    }
+
+
+def _target_not_found_reason(prefix: str, target_type: str) -> str:
+    if target_type == "checkerboard":
+        return f"{prefix}_checkerboard_not_found"
+    return f"{prefix}_{target_type}_not_found"
+
+
+def _match_target_pair(
+    *,
+    config: StereoCalibrationConfig,
+    detector: CalibrationTargetDetector,
+    parent_detection: dict[str, Any],
+    child_detection: dict[str, Any],
+) -> dict[str, Any] | None:
+    if config.target_type == "checkerboard":
+        return {
+            "object_points": np.asarray(parent_detection["object_points"], dtype=float),
+            "parent_image_points": np.asarray(
+                parent_detection["image_points"], dtype=float
+            ),
+            "child_image_points": np.asarray(
+                child_detection["image_points"], dtype=float
+            ),
+            "feature_ids": np.asarray(parent_detection["feature_ids"], dtype=np.int32),
+        }
+
+    if config.target_type == "aprilgrid":
+        if (
+            parent_detection.get("marker_ids") is None
+            or child_detection.get("marker_ids") is None
+        ):
+            return None
+        parent_ids = np.asarray(
+            parent_detection.get("marker_ids"), dtype=np.int32
+        ).reshape(-1)
+        child_ids = np.asarray(
+            child_detection.get("marker_ids"), dtype=np.int32
+        ).reshape(-1)
+        if parent_ids.size <= 0 or child_ids.size <= 0:
+            return None
+        common_ids = sorted(set(parent_ids.tolist()) & set(child_ids.tolist()))
+        if not common_ids:
+            return None
+        parent_lookup = {
+            int(marker_id): np.asarray(corners, dtype=np.float32)
+            for marker_id, corners in zip(
+                parent_ids.tolist(), parent_detection.get("marker_corners") or []
+            )
+        }
+        child_lookup = {
+            int(marker_id): np.asarray(corners, dtype=np.float32)
+            for marker_id, corners in zip(
+                child_ids.tolist(), child_detection.get("marker_corners") or []
+            )
+        }
+        parent_marker_corners = []
+        child_marker_corners = []
+        marker_ids = []
+        for marker_id in common_ids:
+            if marker_id not in parent_lookup or marker_id not in child_lookup:
+                continue
+            marker_ids.append([int(marker_id)])
+            parent_marker_corners.append(parent_lookup[marker_id])
+            child_marker_corners.append(child_lookup[marker_id])
+        if len(marker_ids) <= 0:
+            return None
+        marker_ids_array = np.asarray(marker_ids, dtype=np.int32).reshape(-1, 1)
+        parent_object_points, parent_image_points = (
+            detector.april_board.matchImagePoints(
+                parent_marker_corners,
+                marker_ids_array,
+            )
+        )
+        child_object_points, child_image_points = detector.april_board.matchImagePoints(
+            child_marker_corners,
+            marker_ids_array,
+        )
+        if parent_object_points is None or child_object_points is None:
+            return None
+        parent_object_points = np.asarray(parent_object_points, dtype=float).reshape(
+            -1, 3
+        )
+        child_object_points = np.asarray(child_object_points, dtype=float).reshape(
+            -1, 3
+        )
+        if parent_object_points.shape != child_object_points.shape:
+            return None
+        if parent_object_points.shape[0] < 8:
+            return None
+        return {
+            "object_points": parent_object_points,
+            "parent_image_points": np.asarray(parent_image_points, dtype=float).reshape(
+                -1, 2
+            ),
+            "child_image_points": np.asarray(child_image_points, dtype=float).reshape(
+                -1, 2
+            ),
+            "feature_ids": marker_ids_array,
+        }
+
+    if (
+        parent_detection.get("feature_ids") is None
+        or child_detection.get("feature_ids") is None
+    ):
+        return None
+    parent_ids = np.asarray(
+        parent_detection.get("feature_ids"), dtype=np.int32
+    ).reshape(-1)
+    child_ids = np.asarray(child_detection.get("feature_ids"), dtype=np.int32).reshape(
+        -1
+    )
+    if parent_ids.size <= 0 or child_ids.size <= 0:
+        return None
+    common_ids = sorted(set(parent_ids.tolist()) & set(child_ids.tolist()))
+    if len(common_ids) < 8:
+        return None
+    parent_lookup = {
+        int(feature_id): (
+            np.asarray(parent_detection["object_points"], dtype=float)[index],
+            np.asarray(parent_detection["image_points"], dtype=float)[index],
+        )
+        for index, feature_id in enumerate(parent_ids.tolist())
+    }
+    child_lookup = {
+        int(feature_id): (
+            np.asarray(child_detection["object_points"], dtype=float)[index],
+            np.asarray(child_detection["image_points"], dtype=float)[index],
+        )
+        for index, feature_id in enumerate(child_ids.tolist())
+    }
+    object_points = []
+    parent_image_points = []
+    child_image_points = []
+    kept_ids = []
+    for feature_id in common_ids:
+        parent_item = parent_lookup.get(feature_id)
+        child_item = child_lookup.get(feature_id)
+        if parent_item is None or child_item is None:
+            continue
+        object_points.append(np.asarray(parent_item[0], dtype=float))
+        parent_image_points.append(np.asarray(parent_item[1], dtype=float))
+        child_image_points.append(np.asarray(child_item[1], dtype=float))
+        kept_ids.append([int(feature_id)])
+    if len(object_points) < 8:
+        return None
+    return {
+        "object_points": np.asarray(object_points, dtype=float).reshape(-1, 3),
+        "parent_image_points": np.asarray(parent_image_points, dtype=float).reshape(
+            -1, 2
+        ),
+        "child_image_points": np.asarray(child_image_points, dtype=float).reshape(
+            -1, 2
+        ),
+        "feature_ids": np.asarray(kept_ids, dtype=np.int32).reshape(-1, 1),
+    }
 
 
 def _image_point_metrics(
@@ -604,27 +924,23 @@ def _build_dataset(
     parent_directory = Path(config.parent_image_directory).expanduser()
     child_directory = Path(config.child_image_directory).expanduser()
     pairs, pairing_summary = _pair_image_files(parent_directory, child_directory)
-    object_points = _build_board_template(
-        config.board_pattern_size, config.board_square_size_m
-    )
     preliminary_pairs = []
     extraction_entries: list[dict[str, Any]] = []
     skip_reason_counts: dict[str, int] = {}
+    target_payload = copy.deepcopy(camera_data.get("target_payload") or {})
+    target_detector = _build_target_detector(config, target_payload)
     dataset_metadata = {
-        "board_template_extent_xy_m": {
-            "x": float((config.board_pattern_size[0] - 1) * config.board_square_size_m),
-            "y": float((config.board_pattern_size[1] - 1) * config.board_square_size_m),
-        },
-        "target": {
-            "type": "checkerboard",
-            "pattern_size": list(config.board_pattern_size),
-            "square_size_m": float(config.board_square_size_m),
-        },
+        "target": _target_detector_config(config, target_payload),
         "camera_sources": {
             "parent": camera_data["parent_camera_metadata"],
             "child": camera_data["child_camera_metadata"],
         },
     }
+    if config.target_type == "checkerboard":
+        dataset_metadata["board_template_extent_xy_m"] = {
+            "x": float((config.board_pattern_size[0] - 1) * config.board_square_size_m),
+            "y": float((config.board_pattern_size[1] - 1) * config.board_square_size_m),
+        }
     fallback_initial_transform = (
         np.asarray(camera_data["initial_transform"], dtype=float)
         if camera_data.get("initial_transform") is not None
@@ -689,28 +1005,58 @@ def _build_dataset(
             )
             continue
 
-        parent_corners = _find_checkerboard_corners(
-            parent_image, config.board_pattern_size
+        parent_detection = _detect_target(
+            parent_image,
+            config=config,
+            detector=target_detector,
         )
-        child_corners = _find_checkerboard_corners(
-            child_image, config.board_pattern_size
+        child_detection = _detect_target(
+            child_image,
+            config=config,
+            detector=target_detector,
         )
-        if parent_corners is None:
-            entry["skip_reason"] = "parent_checkerboard_not_found"
+        if parent_detection is None:
+            entry["skip_reason"] = _target_not_found_reason(
+                "parent", config.target_type
+            )
             extraction_entries.append(entry)
-            skip_reason_counts["parent_checkerboard_not_found"] = (
-                skip_reason_counts.get("parent_checkerboard_not_found", 0) + 1
+            reason = entry["skip_reason"]
+            skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
+            continue
+        if child_detection is None:
+            entry["skip_reason"] = _target_not_found_reason("child", config.target_type)
+            extraction_entries.append(entry)
+            reason = entry["skip_reason"]
+            skip_reason_counts[reason] = skip_reason_counts.get(reason, 0) + 1
+            continue
+
+        matched_pair = _match_target_pair(
+            config=config,
+            detector=target_detector,
+            parent_detection=parent_detection,
+            child_detection=child_detection,
+        )
+        if matched_pair is None:
+            entry["skip_reason"] = "insufficient_common_target_points"
+            extraction_entries.append(entry)
+            skip_reason_counts["insufficient_common_target_points"] = (
+                skip_reason_counts.get("insufficient_common_target_points", 0) + 1
             )
             continue
-        if child_corners is None:
-            entry["skip_reason"] = "child_checkerboard_not_found"
-            extraction_entries.append(entry)
-            skip_reason_counts["child_checkerboard_not_found"] = (
-                skip_reason_counts.get("child_checkerboard_not_found", 0) + 1
-            )
-            continue
-        parent_metrics = _image_point_metrics(parent_corners, parent_size)
-        child_metrics = _image_point_metrics(child_corners, child_size)
+
+        parent_image_points = np.asarray(
+            matched_pair["parent_image_points"], dtype=float
+        ).reshape(-1, 2)
+        child_image_points = np.asarray(
+            matched_pair["child_image_points"], dtype=float
+        ).reshape(-1, 2)
+        object_points = np.asarray(matched_pair["object_points"], dtype=float).reshape(
+            -1, 3
+        )
+        feature_ids = matched_pair.get("feature_ids")
+
+        parent_metrics = _image_point_metrics(parent_image_points, parent_size)
+        child_metrics = _image_point_metrics(child_image_points, child_size)
         entry["parent_image_metrics"] = parent_metrics
         entry["child_image_metrics"] = child_metrics
         if (
@@ -736,7 +1082,7 @@ def _build_dataset(
 
         parent_pose = _solve_board_pose(
             object_points,
-            parent_corners,
+            parent_image_points,
             camera_data["parent_camera_matrix"],
             camera_data["parent_distortion"],
         )
@@ -759,9 +1105,16 @@ def _build_dataset(
             continue
 
         child_candidates = []
-        for permutation, candidate_corners in _corner_permutations(
-            child_corners, config.board_pattern_size
-        ).items():
+        if config.target_type == "checkerboard":
+            candidate_point_map = _corner_permutations(
+                child_image_points,
+                config.board_pattern_size,
+            )
+        else:
+            candidate_point_map = {
+                "identity": np.asarray(child_image_points, dtype=float)
+            }
+        for permutation, candidate_corners in candidate_point_map.items():
             child_pose = _solve_board_pose(
                 object_points,
                 candidate_corners,
@@ -800,8 +1153,14 @@ def _build_dataset(
                 "child_image_path": str(child_path),
                 "parent_image_size_wh": parent_size,
                 "child_image_size_wh": child_size,
-                "parent_image_points": np.asarray(parent_corners, dtype=float),
-                "raw_child_image_points": np.asarray(child_corners, dtype=float),
+                "parent_image_points": np.asarray(parent_image_points, dtype=float),
+                "raw_child_image_points": np.asarray(child_image_points, dtype=float),
+                "object_points": np.asarray(object_points, dtype=float),
+                "feature_ids": (
+                    None
+                    if feature_ids is None
+                    else np.asarray(feature_ids, dtype=np.int32)
+                ),
                 "parent_pose": parent_pose,
                 "child_candidates": child_candidates,
                 "image_entry": entry,
@@ -886,8 +1245,15 @@ def _build_dataset(
             "initial_child_board_transform_matrix": np.asarray(
                 selected["child_pose"]["transform"], dtype=float
             ).tolist(),
-            "selected_permutation": pair["selected_permutation"],
+            "selected_permutation": pair.get("selected_permutation"),
             "delta_to_consensus": selected.get("delta_to_consensus"),
+            "feature_ids": (
+                None
+                if pair.get("feature_ids") is None
+                else np.asarray(pair["feature_ids"], dtype=np.int32)
+                .reshape(-1)
+                .tolist()
+            ),
         }
         observations.append(
             StereoCalibrationObservation(
@@ -900,7 +1266,7 @@ def _build_dataset(
                     pair["parent_image_points"], dtype=float
                 ),
                 child_image_points=np.asarray(selected["image_points"], dtype=float),
-                object_points=np.asarray(object_points, dtype=float),
+                object_points=np.asarray(pair["object_points"], dtype=float),
                 metadata=metadata,
             )
         )
@@ -1551,13 +1917,16 @@ def _evaluate_dataset(
     }
 
 
-def run_reference_calibration_from_config(
-    config_path: str,
+def _run_reference_calibration(
     *,
+    config_path: str = "",
+    prepared_payload: dict[str, Any] | None = None,
+    raise_on_failure: bool = True,
     output_dir_override: str | None = None,
 ) -> dict[str, Any]:
     _, config, camera_data, output_dir = _load_config(
         config_path,
+        prepared_payload=prepared_payload,
         output_dir_override=output_dir_override,
     )
     dataset, extraction_report, initial_transform = _build_dataset(
@@ -1565,13 +1934,34 @@ def run_reference_calibration_from_config(
         camera_data=camera_data,
     )
     if not bool(extraction_report.get("ready_for_optimization", True)):
-        write_failure_outputs(
+        manifest = write_failure_outputs(
             output_dir,
             dataset=dataset,
             extraction_report=extraction_report,
             failure_message=str(extraction_report.get("failure_message")),
         )
-        raise SystemExit(str(extraction_report.get("failure_message")))
+        result = {
+            "success": False,
+            "dataset": dataset,
+            "initial_transform": initial_transform,
+            "final_transform": initial_transform,
+            "extraction_report": extraction_report,
+            "optimization_report": {
+                "skipped": True,
+                "reason": "extraction_failed",
+            },
+            "evaluation": {
+                "skipped": True,
+                "reason": "extraction_failed",
+            },
+            "metrics_output": None,
+            "manifest": manifest,
+            "failure_message": str(extraction_report.get("failure_message")),
+        }
+        if raise_on_failure:
+            raise SystemExit(str(extraction_report.get("failure_message")))
+        return result
+
     optimized_dataset, final_transform, board_transforms, optimization_report = (
         _optimize_dataset(
             dataset,
@@ -1615,6 +2005,7 @@ def run_reference_calibration_from_config(
         metrics_output=metrics_output,
     )
     return {
+        "success": True,
         "dataset": optimized_dataset,
         "initial_transform": initial_transform,
         "final_transform": final_transform,
@@ -1623,4 +2014,30 @@ def run_reference_calibration_from_config(
         "evaluation": evaluation,
         "metrics_output": metrics_output,
         "manifest": manifest,
+        "failure_message": None,
     }
+
+
+def run_reference_calibration_from_config(
+    config_path: str,
+    *,
+    output_dir_override: str | None = None,
+) -> dict[str, Any]:
+    return _run_reference_calibration(
+        config_path=config_path,
+        output_dir_override=output_dir_override,
+        raise_on_failure=True,
+    )
+
+
+def run_reference_calibration_from_payload(
+    prepared_payload: dict[str, Any],
+    *,
+    output_dir_override: str | None = None,
+    raise_on_failure: bool = False,
+) -> dict[str, Any]:
+    return _run_reference_calibration(
+        prepared_payload=prepared_payload,
+        output_dir_override=output_dir_override,
+        raise_on_failure=raise_on_failure,
+    )

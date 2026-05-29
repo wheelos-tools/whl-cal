@@ -24,6 +24,7 @@ dependencies = [
   "open3d",
   "protobuf==3.19.4",
   "cyber_record",
+  "pupil-apriltags",
   "scipy",
   "pyyaml"
 ]
