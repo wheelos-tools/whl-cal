@@ -102,10 +102,15 @@ lidar2imu-calibrate \
   - `lidar2lidar-auto` is the practical **scan-to-scan baseline**
   - `lidar2lidar-temporal` is an **experimental comparison / observability branch**
   - `lidar2lidar-scan2map-dataset` and `lidar2lidar-scan2map` are the **scan-to-map path**
+- For direct LiDAR-to-LiDAR with strong shared coverage, prefer `scan2scan` before heavier candidates.
+- If the topology contains a real loop and the loop edges are individually healthy, add loop closure as a consistency upgrade.
+- If there is no loop, prefer multi-window pairwise consensus or representative-transform selection over repeated seed-only full-dataset optimization.
 - `scan2map` is additive, not a rename of `scan2scan`. Keep the baseline visible in outputs and comparisons.
 - `scan2map` currently assumes a dataset artifact first, then optimization:
   - `diagnostics/scan2map_dataset.yaml` is the extraction surface
   - `diagnostics/scan2map_optimization.yaml` and `diagnostics/evaluation.yaml` are the optimization/evaluation surfaces
   - the current default dataset rule is to keep every 3rd aligned scan as holdout
+- Treat Open3D/PCL-style global registration and TEASER++ as initialization candidates, not as release verdicts by themselves.
+- For timing issues, prefer acquisition or header timestamps over publish order; static bags can tolerate publish skew, but they cannot reliably estimate true temporal bias on their own.
 - Prefer decisions based on `coarse_metrics`, `fine_metrics`, information-matrix diagnostics, and explicit skip reasons. Do not treat registration fitness alone as sufficient evidence.
 - Update the matching overview / quick-start / design docs when a pipeline, artifact, or command changes. The repo keeps these docs separate on purpose.

@@ -137,6 +137,17 @@ Align validation to this repository's stable review surfaces:
 - require observability or uncertainty evidence when the module provides it
 - prefer coarse and fine metrics plus human-visible overlays over one scalar score
 
+## LiDAR-to-LiDAR validation rule
+
+For `lidar2lidar`, validate in two different ways depending on topology:
+
+- **loop available**
+  - require healthy pairwise edges, cycle consistency, repeatability, and visual geometry
+- **no loop**
+  - require multi-window repeatability, one stable solution family, and representative-transform agreement
+
+In both cases, overlap, scene sufficiency, and visual geometry must stay visible. High fitness alone is never enough, and seed sensitivity must be reported whenever the method depends on iterative refinement.
+
 ## Output style
 
 Lead with the verdict:

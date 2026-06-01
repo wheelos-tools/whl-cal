@@ -56,6 +56,15 @@ Common interpretations:
 - **few accepted samples** usually means the extraction stage is the real bottleneck
 - **candidate only wins on easy scenes** usually means the claimed upgrade is fragile
 
+## LiDAR-to-LiDAR failure cues
+
+Common `lidar2lidar` patterns:
+
+- **roughly 180-degree flips or meter-scale jumps across reruns** usually mean weak observability or competing solution families
+- **loop closure improves one scalar but pairwise overlays worsen** usually means the loop is rescuing a bad edge numerically, not geometrically
+- **static scenes with acceptable skew but unstable extrinsics** usually point to weak shared geometry, not timing, as the main bottleneck
+- **repeated seed-only reruns that alternate between solutions** usually mean pairing or consensus selection is missing
+
 ## Fix order
 
 Prefer the smallest fix that matches the diagnosed cause:
