@@ -41,6 +41,9 @@ hard requirements, upgrade recommendations, and external references.
   - evaluation
 - `scan2scan` remains the production default
 - `scan2map` should be compared against `scan2scan`, not replace it blindly
+- high-coverage direct overlap should prefer `scan2scan` before heavier global methods
+- when the topology contains a healthy loop, loop closure should be added as a consistency upgrade
+- when there is no loop, use multi-window direct-edge consensus rather than repeated seed-only full-dataset reruns
 - vehicle-rig judgment must split:
   - planar: `x/y/yaw`
   - vertical-attitude: `z/pitch/roll`
@@ -50,6 +53,10 @@ hard requirements, upgrade recommendations, and external references.
 - `record_data_0402`:
   - `left -> main`: scan2map can be accepted as a refinement candidate
   - `right -> main`: unconstrained scan2map remains diagnostic because its gain is mainly driven by `z/pitch/roll` drift
+- `/mnt/synology/calibration/2026-05-31-lidar2lidar`:
+  - direct `left_front -> right_front` and `right_back -> right_front` `scan2scan` is solvable as review-only
+  - the best current candidate is still not release-ready because scene sufficiency, repeatability, and visual geometry remain weak
+  - seed-only full-dataset reruns are not converging monotonically and should not be treated as the next production path
 
 ## lidar2imu summary
 
@@ -135,5 +142,6 @@ Current tested workflow decision:
 1. `validated_conclusions.md`
 2. `engineering_index.md`
 3. `verification_points.md`
-4. `../lidar2imu_context.md`
-5. `../scan2map_context.md`
+4. `../lidar2lidar_scan2scan_playbook.md`
+5. `../lidar2imu_context.md`
+6. `../scan2map_context.md`

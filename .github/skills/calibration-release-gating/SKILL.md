@@ -68,6 +68,17 @@ Promote only when the candidate:
 - preserves or improves reviewability
 - remains comparable to the previous baseline
 
+## LiDAR-to-LiDAR release rule
+
+For `lidar2lidar`, the release question depends on topology:
+
+- **loop-capable case**
+  - promote only when pairwise edges are healthy and loop consistency agrees with them
+- **no-loop case**
+  - promote only when multi-window consensus is stable and the run shows one dominant solution family
+
+If the method only looks good after repeated reseeding, or if different seeds land in materially different extrinsics, keep it at `review-only` or below.
+
 ## Reference canon
 
 Use production-minded references:

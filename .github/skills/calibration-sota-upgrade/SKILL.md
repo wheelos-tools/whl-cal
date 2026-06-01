@@ -78,6 +78,17 @@ When proposing a paper-driven improvement, structure it as:
 6. likely new failure mode
 7. acceptance evidence required
 
+## LiDAR-to-LiDAR upgrade ladder
+
+For `lidar2lidar`, prefer these judgments:
+
+- **direct `scan2scan` with strong overlap**: baseline-ready
+- **pairwise `scan2scan` plus loop closure pose graph**: mature enough to challenge the baseline when loops really exist
+- **multi-window no-loop consensus**: worth adding behind a flag
+- **NDT or GICP replacements**: worth a bounded spike, not an automatic upgrade
+- **TEASER++ or feature-based global registration**: initialization ideas, not release criteria
+- **continuous-time or joint spatiotemporal optimization**: not worth integrating first unless real async timing or motion distortion is proven to dominate
+
 ## Anti-patterns
 
 Avoid these mistakes:

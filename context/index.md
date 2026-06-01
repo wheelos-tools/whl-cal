@@ -26,6 +26,7 @@ The organizing rule is:
    - `lidar2imu_context.md`
    - `lidar2imu_customer_runbook.md`
    - `prepared_rig_dataset_context.md`
+   - `lidar2lidar_scan2scan_playbook.md`
    - `lidar2lidar_advanced_strategy.md`
    - `calibration_dataset_2026_05_06.md`
    - `calibration_algorithm_review_2026_05_17.md`
@@ -81,6 +82,9 @@ The organizing rule is:
 - `prepared_rig_dataset_context.md`
   - raw-LiDAR-only reusable extraction surface
   - run-eight bag findings for shared lidar2imu/lidar2lidar preprocessing
+- `lidar2lidar_scan2scan_playbook.md`
+  - current production-minded LiDAR-to-LiDAR decision ladder
+  - high-overlap scan2scan baseline, loop-closure policy, and no-loop consensus fallback
 - `lidar2lidar_advanced_strategy.md`
   - next-stage production strategy for four-corner rig calibration
   - priors, topology-aware solving, scene sufficiency, and advanced metrics

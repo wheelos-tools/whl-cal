@@ -72,6 +72,18 @@ Good iteration ideas include:
 - better uncertainty or conditioning diagnostics
 - explicit fallback from strong candidate to trusted baseline
 
+## LiDAR-to-LiDAR iteration order
+
+For `lidar2lidar`, prefer this order:
+
+1. better window selection and scene sufficiency gating
+2. better pairing inside static windows
+3. better representative-transform or consensus selection across windows
+4. only then better local refinement or loop-closure optimization
+5. only after that, stronger initialization methods
+
+If repeated reruns jump between distinct solution families, stop calling it convergence. Treat it as an observability or pairing problem and change the earlier stages first.
+
 ## Required output
 
 When proposing or reviewing an iteration, include:

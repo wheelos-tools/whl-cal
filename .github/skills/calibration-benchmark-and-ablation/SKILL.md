@@ -77,6 +77,24 @@ Prefer:
 - per-case tables, not only mean scores
 - visual review on representative wins and losses
 
+## LiDAR-to-LiDAR benchmark matrix
+
+For `lidar2lidar`, include at least these case families when possible:
+
+1. high-overlap direct pairwise scenes
+2. loop-capable rigs with healthy perimeter edges
+3. no-loop rigs with several static windows
+4. wall-dominant or low-corner scenes
+5. seed-perturbed reruns
+6. static publish-skew cases vs truly motion-rich timing cases
+
+Report whether the candidate:
+
+- improves pairwise quality
+- improves loop consistency when loops exist
+- reduces or increases solution-family instability
+- keeps the same diagnostics and artifact contract as the baseline
+
 ## Reference canon
 
 Good anchors include:

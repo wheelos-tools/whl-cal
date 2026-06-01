@@ -89,6 +89,17 @@ Align designs to this repository's architecture:
 - For `lidar2lidar`, keep `scan2scan` as the practical baseline and position `scan2map` as additive refinement.
 - Prefer decisions based on coarse and fine metrics, conditioning or information diagnostics, repeatability, explicit skip reasons, and human-visible overlays rather than a single fitness number.
 
+## LiDAR-to-LiDAR design rule
+
+For `lidar2lidar`, prefer this design ladder:
+
+1. direct high-overlap pairwise `scan2scan`
+2. add loop closure only when the topology truly contains a healthy loop
+3. when there is no loop, use multi-window pairwise consensus or representative-transform selection
+4. use global registration or TEASER++ only as initialization candidates behind a flag
+
+Do not design a no-loop workflow around repeated seed-only full-dataset reruns. That is an iteration tactic, not a missing geometric constraint.
+
 ## Reference expectations
 
 Before proposing a stronger method, check at least these categories:
