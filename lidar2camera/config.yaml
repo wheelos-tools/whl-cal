@@ -1,3 +1,8 @@
+# Active calibration run. Each capture is self-contained under runs/<id>/.
+# To calibrate a new capture: create runs/<id>/inputs/ with the video, csv and
+# lidar PCDs, then point run_dir here and re-run the pipeline (see README).
+run_dir: runs/20260610_171231
+
 camera:
   # cam2 = 192.168.1.64 (cam64). From whl-cal/intrinsics/intrinsics_cam64.yaml
   # (avg reprojection error 0.020 px, 1920x1080). Verified board: 11x8 / 0.045 m.
@@ -23,21 +28,15 @@ checkerboard:
     - 11
   square_size: 0.045 # 45 mm
 
-# --- inputs for the point-to-plane pipeline (extract/) ---
-# Edit these per capture. Paths may be absolute or relative to this file.
+# pipeline inputs — paths are relative to run_dir (or absolute)
 data:
-  camera_video:  data/cam2_192.168.1.64_00000.mkv   # HEVC camera recording
-  camera_csv:    data/cam2_192.168.1.64.frames.csv  # per-frame clk_unix_ns sidecar
-  livox_pcd_dir: data/livox_front_pcd               # PCDs from extract_pcd_from_bag.py
+  camera_video:  inputs/cam2_192.168.1.64_00000.mkv   # HEVC camera recording
+  camera_csv:    inputs/cam2_192.168.1.64.frames.csv  # per-frame clk_unix_ns sidecar
+  livox_pcd_dir: inputs/livox_front_pcd               # PCDs from extract_pcd_from_bag.py
   detect_stride: 3       # run corner detection on every Nth video frame
   max_frame: 0           # 0 = scan whole video; else stop at this frame index
   n_poses: 24            # diverse board poses to select for calibration
   sync_tol_ms: 60        # max camera<->lidar timestamp gap when pairing
-
-# staging dir the pipeline writes paired NNNN.png / NNNN.pcd into
-data_directory: calibration_data
-output:
-  directory: calibration_output
 
 # --- legacy reference_based.py only (deprecated, see README) ---
 point_cloud:

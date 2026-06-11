@@ -9,28 +9,19 @@ span) plus the full-res PNG for every detection. All paths/params come from
 """
 import csv
 import json
-from pathlib import Path
 
 import cv2
 import numpy as np
-import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
-CFG = yaml.safe_load(open(ROOT / "config.yaml"))
+from runpaths import CFG, CAMERA_VIDEO, CAMERA_CSV, CAND_DIR
 
-
-def _path(p):
-    p = Path(p)
-    return p if p.is_absolute() else (ROOT / p)
-
-
-MKV = _path(CFG["data"]["camera_video"])
-CSV = _path(CFG["data"]["camera_csv"])
+MKV = CAMERA_VIDEO
+CSV = CAMERA_CSV
 PATTERN = tuple(CFG["checkerboard"]["pattern_size"])     # interior corners
 STRIDE = int(CFG["data"].get("detect_stride", 3))
 MAX_FRAME = int(CFG["data"].get("max_frame", 0)) or None  # 0 -> no cap
-OUT = Path(__file__).resolve().parent / "cam_candidates"
-OUT.mkdir(exist_ok=True)
+OUT = CAND_DIR
+OUT.mkdir(parents=True, exist_ok=True)
 
 
 def load_clk(csv_path):

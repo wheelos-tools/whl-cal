@@ -8,26 +8,17 @@ NNNN.png / NNNN.pcd into calibration_data. Paths/params come from ../config.yaml
 """
 import glob
 import json
+import os
 import re
 import shutil
-from pathlib import Path
 
 import numpy as np
-import yaml
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-CFG = yaml.safe_load(open(ROOT / "config.yaml"))
+from runpaths import CFG, LIVOX_DIR, CAND_DIR, PAIR_DIR
 
-
-def _path(p):
-    p = Path(p)
-    return p if p.is_absolute() else (ROOT / p)
-
-
-CAND = HERE / "cam_candidates" / "candidates.json"
-LIVOX = sorted(glob.glob(str(_path(CFG["data"]["livox_pcd_dir"]) / "*.pcd")))
-OUT = _path(CFG.get("data_directory", "calibration_data"))
+CAND = CAND_DIR / "candidates.json"
+LIVOX = sorted(glob.glob(str(LIVOX_DIR / "*.pcd")))
+OUT = PAIR_DIR
 
 MAX_MATCH_NS = int(CFG["data"].get("sync_tol_ms", 60) * 1e6)
 N_POSES = int(CFG["data"].get("n_poses", 24))   # over-select; calibrator filters
@@ -77,15 +68,15 @@ def main():
             print(f"[SKIP] frame {t['frame_idx']}: nearest livox {dt/1e6:.0f} ms")
             continue
         name = f"{out_idx:04d}"
-        shutil.copy(HERE / "cam_candidates" / f"frame_{t['frame_idx']:06d}.png",
+        shutil.copy(CAND_DIR / f"frame_{t['frame_idx']:06d}.png",
                     OUT / f"{name}.png")
         shutil.copy(LIVOX[j], OUT / f"{name}.pcd")
         manifest.append({"name": name, "frame_idx": t["frame_idx"],
                          "cam_clk_ns": clk, "livox_ts_ns": int(lts[j]),
                          "sync_dt_ms": dt / 1e6,
-                         "livox_file": Path(LIVOX[j]).name})
+                         "livox_file": os.path.basename(LIVOX[j])})
         print(f"[PAIR] {name}: frame {t['frame_idx']} dt={dt/1e6:.1f}ms "
-              f"<- {Path(LIVOX[j]).name}")
+              f"<- {os.path.basename(LIVOX[j])}")
         out_idx += 1
     json.dump(manifest, open(OUT / "manifest.json", "w"), indent=2)
     print(f"\n[DONE] wrote {out_idx} pose pairs to {OUT}")

@@ -22,9 +22,8 @@ import numpy as np
 import open3d as o3d
 from scipy.optimize import least_squares
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "calibration_data"
-OUT = ROOT / "calibration_output"
+from runpaths import ROOT, PAIR_DIR as DATA, OUT_DIR as OUT  # noqa: F401
+
 FLAGS = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
 R0 = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], float)   # cam->lidar axis map
 
