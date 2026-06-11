@@ -17,6 +17,19 @@
 # Created Date: 2025-11-06
 # Author: daohu527
 
+# ============================================================================
+# DEPRECATED — kept for reference only. Do NOT use for new calibrations.
+#
+# This method fits only the board PLANE in the LiDAR and synthesises 3D corners
+# with an arbitrary in-plane rotation, so per-corner correspondence to the image
+# is wrong; on real data it produced ~100 px reprojection error. It also assumes
+# the cloud is already cropped to a board-dominant plane, which fails in
+# cluttered scenes.
+#
+# Use the point-to-plane pipeline instead:  extract/calibrate_p2plane.py
+# See README.md ("LiDAR -> Camera extrinsic calibration").
+# ============================================================================
+
 
 import cv2
 import numpy as np
@@ -60,11 +73,12 @@ class ReferenceBasedCalibrator:
     def _find_2d_corners(self, image):
         """Finds checkerboard corners in the 2D image with subpixel refinement."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        found, corners = cv2.findChessboardCorners(
-            gray,
-            self.board_pattern,
-            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK,
-        )
+        # Use more robust flags for corner detection.
+        # CALIB_CB_FAST_CHECK can lead to premature failures in non-ideal conditions.
+        # CALIB_CB_NORMALIZE_IMAGE improves robustness against lighting variations.
+        flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+        found, corners = cv2.findChessboardCorners(gray, self.board_pattern, flags)
+
         if not found:
             return None
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)

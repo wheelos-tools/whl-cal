@@ -127,3 +127,8 @@ Note: [ ] means optional parameters
 - Inlier RMSE: root mean square error of inlier correspondences (sensitive to threshold)  
 - Extrinsic matrix: the computed rigid transformation matrix (rotation + translation)  
 
+# LiDAR → Camera Calibration
+
+For LiDAR-to-camera extrinsic calibration (checkerboard, point-to-plane bundle),
+see [`lidar2camera/README.md`](lidar2camera/README.md).
+
