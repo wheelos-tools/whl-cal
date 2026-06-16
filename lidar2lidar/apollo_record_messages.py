@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
-
 _TYPE_DOUBLE = descriptor_pb2.FieldDescriptorProto.TYPE_DOUBLE
 _TYPE_FLOAT = descriptor_pb2.FieldDescriptorProto.TYPE_FLOAT
 _TYPE_UINT32 = descriptor_pb2.FieldDescriptorProto.TYPE_UINT32
@@ -34,12 +33,14 @@ _LABEL_OPTIONAL = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
 _LABEL_REPEATED = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
 
 
-def _add_field(message: descriptor_pb2.DescriptorProto,
-               name: str,
-               number: int,
-               field_type: int,
-               label: int = _LABEL_OPTIONAL,
-               type_name: str | None = None) -> None:
+def _add_field(
+    message: descriptor_pb2.DescriptorProto,
+    name: str,
+    number: int,
+    field_type: int,
+    label: int = _LABEL_OPTIONAL,
+    type_name: str | None = None,
+) -> None:
     field = message.field.add()
     field.name = name
     field.number = number
@@ -104,45 +105,17 @@ def _build_pointcloud_file() -> descriptor_pb2.FileDescriptorProto:
     _add_field(cloud, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
     _add_field(cloud, "frame_id", 2, _TYPE_STRING)
     _add_field(cloud, "is_dense", 3, _TYPE_BOOL)
-    _add_field(cloud, "point", 4, _TYPE_MESSAGE, label=_LABEL_REPEATED, type_name=".apollo.drivers.PointXYZIT")
+    _add_field(
+        cloud,
+        "point",
+        4,
+        _TYPE_MESSAGE,
+        label=_LABEL_REPEATED,
+        type_name=".apollo.drivers.PointXYZIT",
+    )
     _add_field(cloud, "measurement_time", 5, _TYPE_DOUBLE)
     _add_field(cloud, "width", 6, _TYPE_UINT32)
     _add_field(cloud, "height", 7, _TYPE_UINT32)
-
-    return file_proto
-
-
-def _build_image_file() -> descriptor_pb2.FileDescriptorProto:
-    file_proto = descriptor_pb2.FileDescriptorProto()
-    file_proto.name = "apollo/drivers/minimal_image.proto"
-    file_proto.package = "apollo.drivers"
-    file_proto.syntax = "proto2"
-    file_proto.dependency.append("apollo/common/minimal_common.proto")
-
-    image = file_proto.message_type.add()
-    image.name = "Image"
-    _add_field(image, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
-    _add_field(image, "frame_id", 2, _TYPE_STRING)
-    _add_field(image, "measurement_time", 3, _TYPE_DOUBLE)
-    _add_field(image, "height", 4, _TYPE_UINT32)
-    _add_field(image, "width", 5, _TYPE_UINT32)
-    _add_field(image, "encoding", 6, _TYPE_STRING)
-    _add_field(image, "step", 7, _TYPE_UINT32)
-    _add_field(image, "data", 8, descriptor_pb2.FieldDescriptorProto.TYPE_BYTES)
-
-    compressed_image = file_proto.message_type.add()
-    compressed_image.name = "CompressedImage"
-    _add_field(compressed_image, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
-    _add_field(compressed_image, "frame_id", 2, _TYPE_STRING)
-    _add_field(compressed_image, "format", 3, _TYPE_STRING)
-    _add_field(
-        compressed_image,
-        "data",
-        4,
-        descriptor_pb2.FieldDescriptorProto.TYPE_BYTES,
-    )
-    _add_field(compressed_image, "measurement_time", 5, _TYPE_DOUBLE)
-    _add_field(compressed_image, "frame_type", 6, _TYPE_UINT32)
 
     return file_proto
 
@@ -157,22 +130,40 @@ def _build_localization_file() -> descriptor_pb2.FileDescriptorProto:
     pose = file_proto.message_type.add()
     pose.name = "Pose"
     _add_field(pose, "position", 1, _TYPE_MESSAGE, type_name=".apollo.common.PointENU")
-    _add_field(pose, "orientation", 2, _TYPE_MESSAGE, type_name=".apollo.common.Quaternion")
-    _add_field(pose, "linear_velocity", 3, _TYPE_MESSAGE, type_name=".apollo.common.Point3D")
-    _add_field(pose, "linear_acceleration", 4, _TYPE_MESSAGE, type_name=".apollo.common.Point3D")
-    _add_field(pose, "angular_velocity", 5, _TYPE_MESSAGE, type_name=".apollo.common.Point3D")
+    _add_field(
+        pose, "orientation", 2, _TYPE_MESSAGE, type_name=".apollo.common.Quaternion"
+    )
+    _add_field(
+        pose, "linear_velocity", 3, _TYPE_MESSAGE, type_name=".apollo.common.Point3D"
+    )
+    _add_field(
+        pose,
+        "linear_acceleration",
+        4,
+        _TYPE_MESSAGE,
+        type_name=".apollo.common.Point3D",
+    )
+    _add_field(
+        pose, "angular_velocity", 5, _TYPE_MESSAGE, type_name=".apollo.common.Point3D"
+    )
     _add_field(pose, "heading", 6, _TYPE_DOUBLE)
 
     estimate = file_proto.message_type.add()
     estimate.name = "LocalizationEstimate"
     _add_field(estimate, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
-    _add_field(estimate, "pose", 2, _TYPE_MESSAGE, type_name=".apollo.localization.Pose")
+    _add_field(
+        estimate, "pose", 2, _TYPE_MESSAGE, type_name=".apollo.localization.Pose"
+    )
     _add_field(estimate, "measurement_time", 4, _TYPE_DOUBLE)
 
     corrected_imu = file_proto.message_type.add()
     corrected_imu.name = "CorrectedImu"
-    _add_field(corrected_imu, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
-    _add_field(corrected_imu, "imu", 3, _TYPE_MESSAGE, type_name=".apollo.localization.Pose")
+    _add_field(
+        corrected_imu, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header"
+    )
+    _add_field(
+        corrected_imu, "imu", 3, _TYPE_MESSAGE, type_name=".apollo.localization.Pose"
+    )
 
     return file_proto
 
@@ -189,8 +180,12 @@ def _build_gnss_imu_file() -> descriptor_pb2.FileDescriptorProto:
     _add_field(imu, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
     _add_field(imu, "measurement_time", 2, _TYPE_DOUBLE)
     _add_field(imu, "measurement_span", 3, _TYPE_FLOAT)
-    _add_field(imu, "linear_acceleration", 4, _TYPE_MESSAGE, type_name=".apollo.common.Point3D")
-    _add_field(imu, "angular_velocity", 5, _TYPE_MESSAGE, type_name=".apollo.common.Point3D")
+    _add_field(
+        imu, "linear_acceleration", 4, _TYPE_MESSAGE, type_name=".apollo.common.Point3D"
+    )
+    _add_field(
+        imu, "angular_velocity", 5, _TYPE_MESSAGE, type_name=".apollo.common.Point3D"
+    )
 
     return file_proto
 
@@ -204,19 +199,32 @@ def _build_transform_file() -> descriptor_pb2.FileDescriptorProto:
 
     transform = file_proto.message_type.add()
     transform.name = "Transform"
-    _add_field(transform, "translation", 1, _TYPE_MESSAGE, type_name=".apollo.common.Point3D")
-    _add_field(transform, "rotation", 2, _TYPE_MESSAGE, type_name=".apollo.common.Quaternion")
+    _add_field(
+        transform, "translation", 1, _TYPE_MESSAGE, type_name=".apollo.common.Point3D"
+    )
+    _add_field(
+        transform, "rotation", 2, _TYPE_MESSAGE, type_name=".apollo.common.Quaternion"
+    )
 
     stamped = file_proto.message_type.add()
     stamped.name = "TransformStamped"
     _add_field(stamped, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
     _add_field(stamped, "child_frame_id", 2, _TYPE_STRING)
-    _add_field(stamped, "transform", 3, _TYPE_MESSAGE, type_name=".apollo.transform.Transform")
+    _add_field(
+        stamped, "transform", 3, _TYPE_MESSAGE, type_name=".apollo.transform.Transform"
+    )
 
     stampeds = file_proto.message_type.add()
     stampeds.name = "TransformStampeds"
     _add_field(stampeds, "header", 1, _TYPE_MESSAGE, type_name=".apollo.common.Header")
-    _add_field(stampeds, "transforms", 2, _TYPE_MESSAGE, label=_LABEL_REPEATED, type_name=".apollo.transform.TransformStamped")
+    _add_field(
+        stampeds,
+        "transforms",
+        2,
+        _TYPE_MESSAGE,
+        label=_LABEL_REPEATED,
+        type_name=".apollo.transform.TransformStamped",
+    )
 
     return file_proto
 
@@ -226,7 +234,6 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
     for file_proto in (
         _build_common_file(),
         _build_pointcloud_file(),
-        _build_image_file(),
         _build_localization_file(),
         _build_gnss_imu_file(),
         _build_transform_file(),
@@ -236,21 +243,20 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
 
 
 _POOL = _build_pool()
+_FACTORY = message_factory.MessageFactory(pool=_POOL)
 
 
-def _resolve_message_class(type_name: str):
+def _build_message_class(type_name: str):
     descriptor = _POOL.FindMessageTypeByName(type_name)
     get_message_class = getattr(message_factory, "GetMessageClass", None)
-    if callable(get_message_class):
+    if get_message_class is not None:
         return get_message_class(descriptor)
-    return message_factory.MessageFactory(_POOL).GetPrototype(descriptor)
+    return _FACTORY.GetPrototype(descriptor)
 
 
 _MESSAGE_TYPES = {
-    type_name: _resolve_message_class(type_name)
+    type_name: _build_message_class(type_name)
     for type_name in (
-        "apollo.drivers.Image",
-        "apollo.drivers.CompressedImage",
         "apollo.drivers.PointCloud",
         "apollo.localization.LocalizationEstimate",
         "apollo.localization.CorrectedImu",

@@ -47,9 +47,15 @@ This file is the compact index for the current engineering surfaces in the repo.
 - `calibrated_tf.yaml`
 - `metrics.yaml`
 - `diagnostics/extraction.yaml`
+- `diagnostics/scene_sufficiency.yaml`
+- `diagnostics/acceptance_report.yaml`
+- `diagnostics/visual_evaluation.yaml`
 - `diagnostics/scan2map_dataset.yaml`
 - `diagnostics/scan2map_optimization.yaml`
 - `diagnostics/evaluation.yaml`
+- `initial_guess/*.yaml`
+- `calibrated/*.yaml`
+- optional `visual_review/*/merged_cloud_colored.ply`
 
 ### lidar2imu
 
@@ -107,6 +113,16 @@ This file is the compact index for the current engineering surfaces in the repo.
 - recommendation field
 - drift to initial / baseline
 - observability warnings
+
+## Current lidar2lidar operating policy
+
+Use this order for practical `lidar2lidar` work:
+
+1. prefer direct `scan2scan` when the pair has high shared coverage
+2. add loop closure only when a real, healthy loop exists
+3. when no loop exists, aggregate multiple windows and keep a representative transform
+4. treat seed-only oscillation across distinct solution families as a data or observability problem, not as convergence
+5. keep release decisions tied to scene sufficiency, repeatability, visual geometry, and topology consistency instead of fitness alone
 
 ## Current lidar2imu window + gate design
 
