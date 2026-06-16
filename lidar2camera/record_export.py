@@ -11,8 +11,10 @@ import numpy as np
 import open3d as o3d
 import yaml
 
+from lidar2lidar.extrinsic_io import load_extrinsics_file
 from lidar2lidar.record_adapter import Record, ensure_record_available
-from lidar2lidar.record_utils import discover_record_files, pointcloud_message_to_open3d
+from lidar2lidar.record_utils import (discover_record_files,
+                                      pointcloud_message_to_open3d)
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,11 @@ def _encoding_as_string(value: Any) -> str:
 
 
 def _decode_image_message(message: object) -> np.ndarray:
-    if hasattr(message, "height") and hasattr(message, "width") and hasattr(message, "encoding"):
+    if (
+        hasattr(message, "height")
+        and hasattr(message, "width")
+        and hasattr(message, "encoding")
+    ):
         height = int(getattr(message, "height"))
         width = int(getattr(message, "width"))
         step = int(getattr(message, "step"))
@@ -138,7 +144,9 @@ def _pair_message_refs(
         if best_match is not None:
             candidates.append(best_match)
 
-    candidates.sort(key=lambda item: (item[2], item[0].timestamp_ns, item[1].timestamp_ns))
+    candidates.sort(
+        key=lambda item: (item[2], item[0].timestamp_ns, item[1].timestamp_ns)
+    )
     selected: list[tuple[MessageRef, MessageRef, int]] = []
     used_image_timestamps: set[int] = set()
     used_lidar_timestamps: set[int] = set()
@@ -153,7 +161,12 @@ def _pair_message_refs(
 
     selected.sort(key=lambda item: item[0].timestamp_ns)
     return [
-        ExportPair(index=index, image_ref=image_ref, lidar_ref=lidar_ref, sync_delta_ns=delta_ns)
+        ExportPair(
+            index=index,
+            image_ref=image_ref,
+            lidar_ref=lidar_ref,
+            sync_delta_ns=delta_ns,
+        )
         for index, (image_ref, lidar_ref, delta_ns) in enumerate(selected)
     ]
 
@@ -171,12 +184,20 @@ def _summarize_float_series(values: list[float]) -> dict[str, float] | None:
     }
 
 
-def _load_camera_intrinsics(camera_calibration_yaml: str) -> tuple[list[list[float]], list[float]]:
-    payload = yaml.safe_load(Path(camera_calibration_yaml).read_text(encoding="utf-8")) or {}
+def _load_camera_intrinsics(
+    camera_calibration_yaml: str,
+) -> tuple[list[list[float]], list[float]]:
+    payload = (
+        yaml.safe_load(Path(camera_calibration_yaml).read_text(encoding="utf-8")) or {}
+    )
     matrix_payload = payload.get("camera_matrix", {})
     distortion_payload = payload.get("distortion_coefficients", {})
-    camera_matrix = np.asarray(matrix_payload.get("data", matrix_payload), dtype=float).reshape(3, 3)
-    distortion = np.asarray(distortion_payload.get("data", distortion_payload), dtype=float).reshape(-1)
+    camera_matrix = np.asarray(
+        matrix_payload.get("data", matrix_payload), dtype=float
+    ).reshape(3, 3)
+    distortion = np.asarray(
+        distortion_payload.get("data", distortion_payload), dtype=float
+    ).reshape(-1)
     return camera_matrix.tolist(), distortion.tolist()
 
 
@@ -190,6 +211,7 @@ def _write_lidar2camera_config(
     checkerboard_square_size_m: float,
     parent_frame: str,
     child_frame: str,
+    initial_transform: list[list[float]] | None,
 ) -> None:
     camera_matrix, distortion = _load_camera_intrinsics(camera_calibration_yaml)
     config_payload = {
@@ -213,6 +235,8 @@ def _write_lidar2camera_config(
             "directory": str(calibration_output_dir),
         },
     }
+    if initial_transform is not None:
+        config_payload["initial_transform"] = initial_transform
     config_output.parent.mkdir(parents=True, exist_ok=True)
     with config_output.open("w", encoding="utf-8") as file:
         yaml.safe_dump(config_payload, file, sort_keys=False)
@@ -271,6 +295,7 @@ def export_record_dataset(
     checkerboard_square_size_m: float | None,
     parent_frame: str | None,
     child_frame: str | None,
+    initial_extrinsics_path: str | None,
 ) -> dict[str, Any]:
     ensure_record_available()
     record_files = discover_record_files(record_path)
@@ -327,7 +352,9 @@ def export_record_dataset(
             continue
 
         with Record(record_file) as record:
-            for channel, message, timestamp_ns in record.read_messages(topics=wanted_topics):
+            for channel, message, timestamp_ns in record.read_messages(
+                topics=wanted_topics
+            ):
                 key = (record_file, int(timestamp_ns))
                 pair = None
                 if channel == image_topic:
@@ -345,8 +372,12 @@ def export_record_dataset(
                         continue
                     cloud = pointcloud_message_to_open3d(message)
                     pcd_path = dataset_dir / f"pair_{pair.index:06d}.pcd"
-                    if not o3d.io.write_point_cloud(str(pcd_path), cloud, write_ascii=True):
-                        raise RuntimeError(f"Failed to write point cloud to {pcd_path}.")
+                    if not o3d.io.write_point_cloud(
+                        str(pcd_path), cloud, write_ascii=True
+                    ):
+                        raise RuntimeError(
+                            f"Failed to write point cloud to {pcd_path}."
+                        )
                     pair_artifacts[pair.index]["pcd_path"] = str(pcd_path)
 
     for pair in pairs:
@@ -358,8 +389,27 @@ def export_record_dataset(
         exported_pairs.append(artifact)
 
     config_output = None
-    resolved_parent_frame = parent_frame or (image_refs[0].frame_id if image_refs else "camera")
-    resolved_child_frame = child_frame or (lidar_refs[0].frame_id if lidar_refs else lidar_topic.split("/")[-2])
+    initial_transform = None
+    loaded_parent_frame = ""
+    loaded_child_frame = ""
+    if initial_extrinsics_path is not None:
+        (
+            initial_transform,
+            loaded_parent_frame,
+            loaded_child_frame,
+            _,
+            _,
+        ) = load_extrinsics_file(initial_extrinsics_path)
+    resolved_parent_frame = (
+        parent_frame
+        or loaded_parent_frame
+        or (image_refs[0].frame_id if image_refs else "camera")
+    )
+    resolved_child_frame = (
+        child_frame
+        or loaded_child_frame
+        or (lidar_refs[0].frame_id if lidar_refs else lidar_topic.split("/")[-2])
+    )
     if camera_calibration_yaml is not None:
         if checkerboard_pattern_size is None or checkerboard_square_size_m is None:
             raise ValueError(
@@ -375,6 +425,9 @@ def export_record_dataset(
             checkerboard_square_size_m=checkerboard_square_size_m,
             parent_frame=resolved_parent_frame,
             child_frame=resolved_child_frame,
+            initial_transform=(
+                None if initial_transform is None else initial_transform.tolist()
+            ),
         )
 
     manifest_path = diagnostics_dir / "record_export.yaml"
@@ -397,6 +450,7 @@ def export_record_dataset(
         "pair_count": int(len(exported_pairs)),
         "image_frame": image_refs[0].frame_id if image_refs else "",
         "lidar_frame": lidar_refs[0].frame_id if lidar_refs else "",
+        "initial_extrinsics_path": initial_extrinsics_path,
     }
 
 
@@ -408,7 +462,9 @@ def _parse_pattern_size(value: str | None) -> tuple[int, int] | None:
         raise argparse.ArgumentTypeError("Pattern size must be provided as cols,rows.")
     cols, rows = (int(parts[0]), int(parts[1]))
     if cols <= 0 or rows <= 0:
-        raise argparse.ArgumentTypeError("Pattern size values must be positive integers.")
+        raise argparse.ArgumentTypeError(
+            "Pattern size values must be positive integers."
+        )
     return cols, rows
 
 
@@ -416,10 +472,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export synchronized Apollo record image/PCD pairs for lidar2camera."
     )
-    parser.add_argument("--record-path", required=True, help="Path to a record file or split-record directory.")
+    parser.add_argument(
+        "--record-path",
+        required=True,
+        help="Path to a record file or split-record directory.",
+    )
     parser.add_argument("--image-topic", required=True, help="Camera image topic.")
     parser.add_argument("--lidar-topic", required=True, help="LiDAR point cloud topic.")
-    parser.add_argument("--output-dir", required=True, help="Output directory for calibration_data and diagnostics.")
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Output directory for calibration_data and diagnostics.",
+    )
     parser.add_argument(
         "--sync-threshold-ms",
         type=float,
@@ -471,6 +535,11 @@ def main() -> None:
         default=None,
         help="Optional child frame override for the generated lidar2camera config.",
     )
+    parser.add_argument(
+        "--initial-extrinsics",
+        default=None,
+        help="Optional extrinsics YAML/JSON path injected into the generated lidar2camera config as initial_transform.",
+    )
     args = parser.parse_args()
 
     if args.frame_stride <= 0:
@@ -492,6 +561,7 @@ def main() -> None:
         checkerboard_square_size_m=args.checkerboard_square_size,
         parent_frame=args.parent_frame,
         child_frame=args.child_frame,
+        initial_extrinsics_path=args.initial_extrinsics,
     )
     print(yaml.safe_dump(result, sort_keys=False).strip())
 

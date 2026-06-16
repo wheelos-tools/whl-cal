@@ -6,6 +6,15 @@ last_tested: 2026-05-11
 
 # LiDAR-to-LiDAR advanced strategy
 
+## Scope note
+
+This file focuses on the broader topology-aware and loop-capable roadmap for the
+repository.
+
+For the current production-minded direct-pair policy, especially for
+high-overlap `scan2scan`, optional loop closure, and no-loop multi-window
+consensus, read `context/lidar2lidar_scan2scan_playbook.md` first.
+
 ## Goal
 
 The next-stage `lidar2lidar` target is not just "run loop closure" but a

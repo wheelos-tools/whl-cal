@@ -26,9 +26,11 @@ The organizing rule is:
    - `lidar2imu_context.md`
    - `lidar2imu_customer_runbook.md`
    - `prepared_rig_dataset_context.md`
+   - `lidar2lidar_scan2scan_playbook.md`
    - `lidar2lidar_advanced_strategy.md`
    - `calibration_dataset_2026_05_06.md`
    - `calibration_algorithm_review_2026_05_17.md`
+  - `camera_intrinsic_round01_review_2026_05_27.md`
    - `timing_sync_context.md`
    - `timing_topic_table.md`
    - `scan2map_context.md`
@@ -80,6 +82,9 @@ The organizing rule is:
 - `prepared_rig_dataset_context.md`
   - raw-LiDAR-only reusable extraction surface
   - run-eight bag findings for shared lidar2imu/lidar2lidar preprocessing
+- `lidar2lidar_scan2scan_playbook.md`
+  - current production-minded LiDAR-to-LiDAR decision ladder
+  - high-overlap scan2scan baseline, loop-closure policy, and no-loop consensus fallback
 - `lidar2lidar_advanced_strategy.md`
   - next-stage production strategy for four-corner rig calibration
   - priors, topology-aware solving, scene sufficiency, and advanced metrics
@@ -87,6 +92,9 @@ The organizing rule is:
   - metadata, topic inventory, and calibration implications for `/mnt/synology/REDACTED/2026-5-6-标定/`
 - `calibration_algorithm_review_2026_05_17.md`
   - lidar2lidar/lidar2imu algorithm review, shared acceptance contract, and target-bag validation
+- `camera_intrinsic_round01_review_2026_05_27.md`
+  - AprilGrid intrinsic round01 failure analysis
+  - weak-view pruning experiments and round02 recollection checklist
 - `timing_sync_context.md`
   - clock-source and timestamp-chain analysis for Vanjee / Huace / MSF
   - bag-level timing measurements and synchronization recommendations

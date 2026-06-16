@@ -36,6 +36,7 @@ Why this matters:
 | Module | Core method | Why this repo uses it |
 | --- | --- | --- |
 | `camera` | checkerboard-based intrinsic calibration with reprojection analysis | still the most reliable production baseline for monocular industrial cameras |
+| `camera2camera` | target-based stereo bundle adjustment with fixed intrinsics and holdout review | keeps camera↔camera release evidence explicit and debuggable instead of hiding everything inside one opaque solve |
 | `lidar2camera` | target-based checkerboard / planar board extraction + PnP / robust optimization | easier to audit and release than targetless methods on vehicle programs |
 | `lidar2lidar` | scene-based registration with ICP / GICP, overlap screening, and optional graph refinement | strong practical baseline when the vehicle can drive through feature-rich static scenes |
 | `lidar2imu` | staged ground + gravity + motion hand-eye calibration with observability gates | explicit failure modes are easier to manage than one opaque joint solve |
@@ -74,6 +75,20 @@ Practical SOTA today is still:
 
 In practice, ChArUco / AprilTag-grid style targets often improve robustness over
 plain checkerboards, but checkerboards remain a strong baseline when acquisition
+is controlled.
+
+### Camera-to-camera
+
+Practical SOTA for release workflows still centers on **target-based** methods:
+
+- pre-calibrated per-camera intrinsics
+- repeated multi-pose board capture
+- pairwise pose bootstrap plus global bundle adjustment
+- holdout / repeatability / coverage review
+
+ChArUco and AprilGrid style targets are often more robust than plain
+checkerboards under partial occlusion or weaker lighting, but a strong
+checkerboard pipeline remains a legitimate production baseline when acquisition
 is controlled.
 
 ### LiDAR↔Camera
@@ -152,6 +167,13 @@ full-confidence 6DoF success.
 The repo keeps the target-based reference pipeline as the production baseline and
 documents targetless / learning-based flows as experimental. That mirrors how
 most mature release processes operate today.
+
+### `camera2camera`
+
+The repo should keep a conservative target-based stereo baseline alive, then
+evolve toward stronger targets such as ChArUco without breaking the artifact
+contract. That mirrors the same “stable review surface, evolving algorithm”
+strategy used by the other production-facing modules.
 
 ## 6. What "excellent practice" means in this repo
 

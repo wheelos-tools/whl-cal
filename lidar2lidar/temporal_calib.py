@@ -37,8 +37,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lidar2lidar.auto_calib import (  # noqa: E402
-    build_candidate_pairs,
+from lidar2lidar.auto_calib import (
+    build_candidate_pairs,  # noqa: E402
     build_extraction_output,
     calibrate_selected_edges,
     choose_target_topic,
@@ -46,15 +46,18 @@ from lidar2lidar.auto_calib import (  # noqa: E402
     select_edges_for_target,
     summarize_values,
 )
-from lidar2lidar.extrinsic_io import (  # noqa: E402
-    build_extrinsics_payload,
+from lidar2lidar.extrinsic_io import (
+    build_extrinsics_payload,  # noqa: E402
     extrinsics_filename,
     save_extrinsics_yaml,
     stamp_ns_to_dict,
 )
-from lidar2lidar.lidar2lidar import calibrate_lidar_extrinsic, preprocess_point_cloud  # noqa: E402
-from lidar2lidar.record_utils import (  # noqa: E402
-    analyze_pointcloud_roots,
+from lidar2lidar.lidar2lidar import (
+    calibrate_lidar_extrinsic,  # noqa: E402
+    preprocess_point_cloud,
+)
+from lidar2lidar.record_utils import (
+    analyze_pointcloud_roots,  # noqa: E402
     build_transform_graph,
     collect_pointcloud_metadata,
     compute_information_metrics,
@@ -67,7 +70,6 @@ from lidar2lidar.record_utils import (  # noqa: E402
     list_topics,
     load_pointcloud_from_meta,
     load_transform_edges_from_dir,
-    lookup_transform,
     merge_transform_edges,
     rotation_angle_degrees,
     save_transform_edges_to_dir,
@@ -76,11 +78,14 @@ from lidar2lidar.record_utils import (  # noqa: E402
     transform_delta_metrics,
 )
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-
-def build_temporal_windows(anchor_pairs: list[dict], strides: list[int], max_windows: int) -> list[dict]:
+def build_temporal_windows(
+    anchor_pairs: list[dict], strides: list[int], max_windows: int
+) -> list[dict]:
     if len(anchor_pairs) < 2:
         return []
 
@@ -111,9 +116,12 @@ def build_temporal_windows(anchor_pairs: list[dict], strides: list[int], max_win
                 "target_end_timestamp_ns": int(end_anchor["target_timestamp_ns"]),
                 "window_dt_ms": float(
                     max(
-                        end_anchor["source_timestamp_ns"] - start_anchor["source_timestamp_ns"],
-                        end_anchor["target_timestamp_ns"] - start_anchor["target_timestamp_ns"],
-                    ) / 1e6
+                        end_anchor["source_timestamp_ns"]
+                        - start_anchor["source_timestamp_ns"],
+                        end_anchor["target_timestamp_ns"]
+                        - start_anchor["target_timestamp_ns"],
+                    )
+                    / 1e6
                 ),
             }
 
@@ -137,31 +145,39 @@ def find_nearest_meta(metas: list, timestamp_ns: int, max_delta_ns: int):
             continue
         candidate_meta = metas[candidate_index]
         delta_ns = abs(candidate_meta.timestamp_ns - timestamp_ns)
-        if delta_ns <= max_delta_ns and (best_delta_ns is None or delta_ns < best_delta_ns):
+        if delta_ns <= max_delta_ns and (
+            best_delta_ns is None or delta_ns < best_delta_ns
+        ):
             best_meta = candidate_meta
             best_delta_ns = delta_ns
             best_index = candidate_index
     return best_meta, best_delta_ns, best_index
 
 
-def build_temporal_dataset(edge: dict,
-                           metadata_by_topic: dict,
-                           sync_threshold_ns: int,
-                           strides: list[int],
-                           max_windows: int) -> dict:
+def build_temporal_dataset(
+    edge: dict,
+    metadata_by_topic: dict,
+    sync_threshold_ns: int,
+    strides: list[int],
+    max_windows: int,
+) -> dict:
     source_metas = metadata_by_topic[edge["source_topic"]]
     target_metas = metadata_by_topic[edge["target_topic"]]
     anchor_pairs = []
     for source_meta in source_metas:
-        target_meta, delta_ns, target_index = find_nearest_meta(target_metas, source_meta.timestamp_ns, sync_threshold_ns)
+        target_meta, delta_ns, target_index = find_nearest_meta(
+            target_metas, source_meta.timestamp_ns, sync_threshold_ns
+        )
         if target_meta is None:
             continue
-        anchor_pairs.append({
-            "source_timestamp_ns": int(source_meta.timestamp_ns),
-            "target_timestamp_ns": int(target_meta.timestamp_ns),
-            "target_index": int(target_index),
-            "sync_dt_ms": float(delta_ns / 1e6),
-        })
+        anchor_pairs.append(
+            {
+                "source_timestamp_ns": int(source_meta.timestamp_ns),
+                "target_timestamp_ns": int(target_meta.timestamp_ns),
+                "target_index": int(target_index),
+                "sync_dt_ms": float(delta_ns / 1e6),
+            }
+        )
 
     unique_strides = sorted({int(stride) for stride in strides if int(stride) > 0})
     if not unique_strides:
@@ -200,7 +216,9 @@ def build_temporal_dataset(edge: dict,
                 "target_end_timestamp_ns": int(target_end.timestamp_ns),
                 "target_start_index": int(target_start_index),
                 "target_end_index": int(target_end_index),
-                "window_dt_ms": float((source_end.timestamp_ns - source_start.timestamp_ns) / 1e6),
+                "window_dt_ms": float(
+                    (source_end.timestamp_ns - source_start.timestamp_ns) / 1e6
+                ),
                 "start_sync_dt_ms": float(start_delta_ns / 1e6),
                 "end_sync_dt_ms": float(end_delta_ns / 1e6),
             }
@@ -219,10 +237,18 @@ def build_temporal_dataset(edge: dict,
         "summary": {
             "anchor_pair_count": len(anchor_pairs),
             "candidate_window_count": len(windows),
-            "anchor_sync_dt_ms": summarize_values([pair["sync_dt_ms"] for pair in anchor_pairs]),
-            "window_dt_ms": summarize_values([window["window_dt_ms"] for window in windows]),
-            "start_sync_dt_ms": summarize_values([window["start_sync_dt_ms"] for window in windows]),
-            "end_sync_dt_ms": summarize_values([window["end_sync_dt_ms"] for window in windows]),
+            "anchor_sync_dt_ms": summarize_values(
+                [pair["sync_dt_ms"] for pair in anchor_pairs]
+            ),
+            "window_dt_ms": summarize_values(
+                [window["window_dt_ms"] for window in windows]
+            ),
+            "start_sync_dt_ms": summarize_values(
+                [window["start_sync_dt_ms"] for window in windows]
+            ),
+            "end_sync_dt_ms": summarize_values(
+                [window["end_sync_dt_ms"] for window in windows]
+            ),
         },
     }
 
@@ -234,15 +260,21 @@ def load_cached_cloud(meta, cloud_cache: dict) -> o3d.geometry.PointCloud:
     return cloud_cache[key]
 
 
-def _freeze_preprocessing_params(preprocessing_params: dict) -> tuple[tuple[str, object], ...]:
-    return tuple(sorted((str(key), preprocessing_params[key]) for key in preprocessing_params))
+def _freeze_preprocessing_params(
+    preprocessing_params: dict,
+) -> tuple[tuple[str, object], ...]:
+    return tuple(
+        sorted((str(key), preprocessing_params[key]) for key in preprocessing_params)
+    )
 
 
-def load_preprocessed_cloud(meta,
-                            *,
-                            preprocessing_params: dict,
-                            cloud_cache: dict,
-                            preprocessed_cloud_cache: dict) -> o3d.geometry.PointCloud:
+def load_preprocessed_cloud(
+    meta,
+    *,
+    preprocessing_params: dict,
+    cloud_cache: dict,
+    preprocessed_cloud_cache: dict,
+) -> o3d.geometry.PointCloud:
     cache_key = (
         meta.topic,
         int(meta.timestamp_ns),
@@ -256,19 +288,21 @@ def load_preprocessed_cloud(meta,
     return preprocessed_cloud_cache[cache_key]
 
 
-def register_motion_clouds(source_cloud,
-                           target_cloud,
-                           *,
-                           start_timestamp_ns: int,
-                           end_timestamp_ns: int,
-                           motion_method: int,
-                           preprocessing_params: dict,
-                           motion_voxel_size: float,
-                           stagnation_dt_ms: float,
-                           stagnation_translation_m: float,
-                           stagnation_rotation_deg: float,
-                           attempts: list[dict] | None = None,
-                           allow_early_break: bool = True) -> dict | None:
+def register_motion_clouds(
+    source_cloud,
+    target_cloud,
+    *,
+    start_timestamp_ns: int,
+    end_timestamp_ns: int,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    attempts: list[dict] | None = None,
+    allow_early_break: bool = True,
+) -> dict | None:
     if len(source_cloud.points) == 0 or len(target_cloud.points) == 0:
         return None
 
@@ -283,11 +317,13 @@ def register_motion_clouds(source_cloud,
     source_eval = source_cloud.voxel_down_sample(eval_voxel_size)
     target_eval = target_cloud.voxel_down_sample(eval_voxel_size)
 
-    def build_motion_record(candidate_name: str,
-                            transform: np.ndarray,
-                            *,
-                            fitness: float,
-                            inlier_rmse: float) -> dict:
+    def build_motion_record(
+        candidate_name: str,
+        transform: np.ndarray,
+        *,
+        fitness: float,
+        inlier_rmse: float,
+    ) -> dict:
         info_metrics = compute_information_metrics(
             source_cloud,
             target_cloud,
@@ -307,7 +343,9 @@ def register_motion_clouds(source_cloud,
                 "translation_m": float(np.linalg.norm(transform[:3, 3])),
                 "rotation_deg": float(rotation_angle_degrees(transform[:3, :3])),
             },
-            "delta_to_identity": transform_delta_metrics(np.eye(4, dtype=float), transform),
+            "delta_to_identity": transform_delta_metrics(
+                np.eye(4, dtype=float), transform
+            ),
             "information_matrix": info_metrics,
         }
         record["stagnant_solution"] = bool(
@@ -336,19 +374,23 @@ def register_motion_clouds(source_cloud,
                 eval_distance,
                 np.asarray(initial_transform, dtype=float),
             )
-            candidate_records.append(build_motion_record(
-                f"{attempt['name']}_coarse",
-                np.asarray(initial_transform, dtype=float),
-                fitness=float(coarse_eval.fitness),
-                inlier_rmse=float(coarse_eval.inlier_rmse),
-            ))
+            candidate_records.append(
+                build_motion_record(
+                    f"{attempt['name']}_coarse",
+                    np.asarray(initial_transform, dtype=float),
+                    fitness=float(coarse_eval.fitness),
+                    inlier_rmse=float(coarse_eval.inlier_rmse),
+                )
+            )
         if final_transform is not None and reg_result is not None:
-            candidate_records.append(build_motion_record(
-                attempt["name"],
-                np.asarray(final_transform, dtype=float),
-                fitness=float(reg_result.fitness),
-                inlier_rmse=float(reg_result.inlier_rmse),
-            ))
+            candidate_records.append(
+                build_motion_record(
+                    attempt["name"],
+                    np.asarray(final_transform, dtype=float),
+                    fitness=float(reg_result.fitness),
+                    inlier_rmse=float(reg_result.inlier_rmse),
+                )
+            )
 
         attempt_best = None
         for record in candidate_records:
@@ -400,18 +442,25 @@ def register_motion_clouds(source_cloud,
     return best_record
 
 
-def estimate_sensor_motion(start_meta,
-                           end_meta,
-                           *,
-                           motion_method: int,
-                           preprocessing_params: dict,
-                           motion_voxel_size: float,
-                           stagnation_dt_ms: float,
-                           stagnation_translation_m: float,
-                           stagnation_rotation_deg: float,
-                           cloud_cache: dict,
-                           motion_cache: dict) -> dict | None:
-    cache_key = (start_meta.topic, int(start_meta.timestamp_ns), int(end_meta.timestamp_ns), motion_method)
+def estimate_sensor_motion(
+    start_meta,
+    end_meta,
+    *,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> dict | None:
+    cache_key = (
+        start_meta.topic,
+        int(start_meta.timestamp_ns),
+        int(end_meta.timestamp_ns),
+        motion_method,
+    )
     if cache_key in motion_cache:
         return motion_cache[cache_key]
 
@@ -446,20 +495,27 @@ def motion_pair_score(source_motion: dict, target_motion: dict) -> float:
     return float(quality_score * (rotation_score + translation_score * 10.0))
 
 
-def compose_relative_transform(metas: list,
-                               source_index: int,
-                               target_index: int,
-                               *,
-                               local_step: int,
-                               motion_method: int,
-                               preprocessing_params: dict,
-                               motion_voxel_size: float,
-                               stagnation_dt_ms: float,
-                               stagnation_translation_m: float,
-                               stagnation_rotation_deg: float,
-                               cloud_cache: dict,
-                               motion_cache: dict) -> tuple[np.ndarray, list[dict]] | None:
-    if source_index < 0 or target_index < 0 or source_index >= len(metas) or target_index >= len(metas):
+def compose_relative_transform(
+    metas: list,
+    source_index: int,
+    target_index: int,
+    *,
+    local_step: int,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> tuple[np.ndarray, list[dict]] | None:
+    if (
+        source_index < 0
+        or target_index < 0
+        or source_index >= len(metas)
+        or target_index >= len(metas)
+    ):
         return None
     if source_index == target_index:
         return np.eye(4, dtype=float), []
@@ -502,30 +558,34 @@ def compose_relative_transform(metas: list,
             )
             if step_record is None:
                 return None
-            step_transform = np.linalg.inv(np.array(step_record["transformation"], dtype=float))
+            step_transform = np.linalg.inv(
+                np.array(step_record["transformation"], dtype=float)
+            )
 
-        path_records.append({
-            "from_index": int(current_index),
-            "to_index": int(next_index),
-            "from_timestamp_ns": int(metas[current_index].timestamp_ns),
-            "to_timestamp_ns": int(metas[next_index].timestamp_ns),
-            "fitness": float(step_record["fitness"]),
-            "inlier_rmse": float(step_record["inlier_rmse"]),
-            "stagnant_solution": bool(step_record["stagnant_solution"]),
-            "information_matrix": step_record["information_matrix"],
-            "delta_to_identity": transform_delta_metrics(np.eye(4, dtype=float), step_transform),
-        })
+        path_records.append(
+            {
+                "from_index": int(current_index),
+                "to_index": int(next_index),
+                "from_timestamp_ns": int(metas[current_index].timestamp_ns),
+                "to_timestamp_ns": int(metas[next_index].timestamp_ns),
+                "fitness": float(step_record["fitness"]),
+                "inlier_rmse": float(step_record["inlier_rmse"]),
+                "stagnant_solution": bool(step_record["stagnant_solution"]),
+                "information_matrix": step_record["information_matrix"],
+                "delta_to_identity": transform_delta_metrics(
+                    np.eye(4, dtype=float), step_transform
+                ),
+            }
+        )
         composed_transform = step_transform @ composed_transform
         current_index = next_index
 
     return composed_transform, path_records
 
 
-def select_submap_support_indices(reference_index: int,
-                                  other_index: int,
-                                  *,
-                                  local_step: int,
-                                  max_support_nodes: int) -> list[int]:
+def select_submap_support_indices(
+    reference_index: int, other_index: int, *, local_step: int, max_support_nodes: int
+) -> list[int]:
     indices = [int(reference_index)]
     support_limit = max(0, int(max_support_nodes))
     if support_limit == 0 or reference_index == other_index:
@@ -546,21 +606,25 @@ def select_submap_support_indices(reference_index: int,
     return indices
 
 
-def build_local_submap(metas: list,
-                       reference_index: int,
-                       support_indices: list[int],
-                       *,
-                       local_step: int,
-                       submap_voxel_size: float,
-                       motion_method: int,
-                       preprocessing_params: dict,
-                       motion_voxel_size: float,
-                       stagnation_dt_ms: float,
-                       stagnation_translation_m: float,
-                       stagnation_rotation_deg: float,
-                       cloud_cache: dict,
-                       motion_cache: dict) -> tuple[o3d.geometry.PointCloud, dict] | None:
-    reference_cloud = copy.deepcopy(load_cached_cloud(metas[reference_index], cloud_cache))
+def build_local_submap(
+    metas: list,
+    reference_index: int,
+    support_indices: list[int],
+    *,
+    local_step: int,
+    submap_voxel_size: float,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> tuple[o3d.geometry.PointCloud, dict] | None:
+    reference_cloud = copy.deepcopy(
+        load_cached_cloud(metas[reference_index], cloud_cache)
+    )
     if len(reference_cloud.points) == 0:
         return None
 
@@ -586,24 +650,36 @@ def build_local_submap(metas: list,
         if transform_result is None:
             continue
         support_transform, path_records = transform_result
-        support_cloud = copy.deepcopy(load_cached_cloud(metas[support_index], cloud_cache))
+        support_cloud = copy.deepcopy(
+            load_cached_cloud(metas[support_index], cloud_cache)
+        )
         if len(support_cloud.points) == 0:
             continue
         support_cloud.transform(support_transform)
         merged_cloud += support_cloud
-        support_records.append({
-            "scan_index": int(support_index),
-            "timestamp_ns": int(metas[support_index].timestamp_ns),
-            "node_hops": len(path_records),
-            "path_fitness": summarize_values([record["fitness"] for record in path_records]),
-            "path_inlier_rmse": summarize_values([record["inlier_rmse"] for record in path_records]),
-            "path_condition_number": summarize_values([
-                float(record["information_matrix"]["condition_number"])
-                for record in path_records
-            ]),
-            "delta_to_reference": transform_delta_metrics(np.eye(4, dtype=float), support_transform),
-            "path_records": path_records,
-        })
+        support_records.append(
+            {
+                "scan_index": int(support_index),
+                "timestamp_ns": int(metas[support_index].timestamp_ns),
+                "node_hops": len(path_records),
+                "path_fitness": summarize_values(
+                    [record["fitness"] for record in path_records]
+                ),
+                "path_inlier_rmse": summarize_values(
+                    [record["inlier_rmse"] for record in path_records]
+                ),
+                "path_condition_number": summarize_values(
+                    [
+                        float(record["information_matrix"]["condition_number"])
+                        for record in path_records
+                    ]
+                ),
+                "delta_to_reference": transform_delta_metrics(
+                    np.eye(4, dtype=float), support_transform
+                ),
+                "path_records": path_records,
+            }
+        )
 
     if submap_voxel_size and submap_voxel_size > 0:
         merged_cloud = merged_cloud.voxel_down_sample(float(submap_voxel_size))
@@ -618,19 +694,21 @@ def build_local_submap(metas: list,
     }
 
 
-def build_window_motion_from_local_chain(metas: list,
-                                         start_index: int,
-                                         end_index: int,
-                                         *,
-                                         local_step: int,
-                                         motion_method: int,
-                                         preprocessing_params: dict,
-                                         motion_voxel_size: float,
-                                         stagnation_dt_ms: float,
-                                         stagnation_translation_m: float,
-                                         stagnation_rotation_deg: float,
-                                         cloud_cache: dict,
-                                         motion_cache: dict) -> dict | None:
+def build_window_motion_from_local_chain(
+    metas: list,
+    start_index: int,
+    end_index: int,
+    *,
+    local_step: int,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> dict | None:
     if start_index >= end_index or start_index < 0 or end_index >= len(metas):
         return None
 
@@ -654,7 +732,9 @@ def build_window_motion_from_local_chain(metas: list,
         if step_record is None:
             return None
         step_records.append(step_record)
-        composed_transform = np.array(step_record["transformation"], dtype=float) @ composed_transform
+        composed_transform = (
+            np.array(step_record["transformation"], dtype=float) @ composed_transform
+        )
 
     condition_numbers = [
         float(step_record["information_matrix"]["condition_number"])
@@ -662,7 +742,9 @@ def build_window_motion_from_local_chain(metas: list,
     ]
     fitness_values = [float(step_record["fitness"]) for step_record in step_records]
     rmse_values = [float(step_record["inlier_rmse"]) for step_record in step_records]
-    window_dt_ms = float((metas[end_index].timestamp_ns - metas[start_index].timestamp_ns) / 1e6)
+    window_dt_ms = float(
+        (metas[end_index].timestamp_ns - metas[start_index].timestamp_ns) / 1e6
+    )
     motion_record = {
         "attempt": "local_odometry_chain",
         "motion_frontend": "chain",
@@ -676,12 +758,21 @@ def build_window_motion_from_local_chain(metas: list,
             "translation_m": float(np.linalg.norm(composed_transform[:3, 3])),
             "rotation_deg": float(rotation_angle_degrees(composed_transform[:3, :3])),
         },
-        "delta_to_identity": transform_delta_metrics(np.eye(4, dtype=float), composed_transform),
+        "delta_to_identity": transform_delta_metrics(
+            np.eye(4, dtype=float), composed_transform
+        ),
         "information_matrix": {
             "matrix": None,
             "eigenvalues": None,
-            "condition_number": float(max(condition_numbers)) if condition_numbers else float("inf"),
-            "degenerate": bool(any(step_record["information_matrix"]["degenerate"] for step_record in step_records)),
+            "condition_number": (
+                float(max(condition_numbers)) if condition_numbers else float("inf")
+            ),
+            "degenerate": bool(
+                any(
+                    step_record["information_matrix"]["degenerate"]
+                    for step_record in step_records
+                )
+            ),
         },
         "local_odometry": {
             "step_count": len(step_records),
@@ -694,27 +785,30 @@ def build_window_motion_from_local_chain(metas: list,
     }
     motion_record["stagnant_solution"] = bool(
         motion_record["window_dt_ms"] >= stagnation_dt_ms
-        and motion_record["motion_magnitude"]["translation_m"] <= stagnation_translation_m
+        and motion_record["motion_magnitude"]["translation_m"]
+        <= stagnation_translation_m
         and motion_record["motion_magnitude"]["rotation_deg"] <= stagnation_rotation_deg
     )
     return motion_record
 
 
-def build_window_motion_from_submaps(metas: list,
-                                     start_index: int,
-                                     end_index: int,
-                                     *,
-                                     local_step: int,
-                                     submap_support_nodes: int,
-                                     submap_voxel_size: float,
-                                     motion_method: int,
-                                     preprocessing_params: dict,
-                                     motion_voxel_size: float,
-                                     stagnation_dt_ms: float,
-                                     stagnation_translation_m: float,
-                                     stagnation_rotation_deg: float,
-                                     cloud_cache: dict,
-                                     motion_cache: dict) -> dict | None:
+def build_window_motion_from_submaps(
+    metas: list,
+    start_index: int,
+    end_index: int,
+    *,
+    local_step: int,
+    submap_support_nodes: int,
+    submap_voxel_size: float,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> dict | None:
     if start_index >= end_index or start_index < 0 or end_index >= len(metas):
         return None
 
@@ -813,22 +907,24 @@ def build_window_motion_from_submaps(metas: list,
     return motion_record
 
 
-def estimate_window_motion(metas: list,
-                           start_index: int,
-                           end_index: int,
-                           *,
-                           motion_frontend: str,
-                           local_step: int,
-                           submap_support_nodes: int,
-                           submap_voxel_size: float,
-                           motion_method: int,
-                           preprocessing_params: dict,
-                           motion_voxel_size: float,
-                           stagnation_dt_ms: float,
-                           stagnation_translation_m: float,
-                           stagnation_rotation_deg: float,
-                           cloud_cache: dict,
-                           motion_cache: dict) -> dict | None:
+def estimate_window_motion(
+    metas: list,
+    start_index: int,
+    end_index: int,
+    *,
+    motion_frontend: str,
+    local_step: int,
+    submap_support_nodes: int,
+    submap_voxel_size: float,
+    motion_method: int,
+    preprocessing_params: dict,
+    motion_voxel_size: float,
+    stagnation_dt_ms: float,
+    stagnation_translation_m: float,
+    stagnation_rotation_deg: float,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> dict | None:
     if motion_frontend == "submap":
         return build_window_motion_from_submaps(
             metas,
@@ -862,12 +958,14 @@ def estimate_window_motion(metas: list,
     )
 
 
-def collect_motion_pairs(edge: dict,
-                         temporal_dataset: dict,
-                         metadata_by_topic: dict,
-                         args,
-                         cloud_cache: dict,
-                         motion_cache: dict) -> tuple[list[dict], list[dict]]:
+def collect_motion_pairs(
+    edge: dict,
+    temporal_dataset: dict,
+    metadata_by_topic: dict,
+    args,
+    cloud_cache: dict,
+    motion_cache: dict,
+) -> tuple[list[dict], list[dict]]:
     source_metas = metadata_by_topic[edge["source_topic"]]
     target_metas = metadata_by_topic[edge["target_topic"]]
     accepted = []
@@ -889,10 +987,12 @@ def collect_motion_pairs(edge: dict,
             or window["target_start_index"] < 0
             or window["target_end_index"] >= len(target_metas)
         ):
-            skipped.append({
-                **window,
-                "reason": "missing_window_metadata",
-            })
+            skipped.append(
+                {
+                    **window,
+                    "reason": "missing_window_metadata",
+                }
+            )
             continue
 
         source_motion = estimate_window_motion(
@@ -930,10 +1030,12 @@ def collect_motion_pairs(edge: dict,
             motion_cache=motion_cache,
         )
         if source_motion is None or target_motion is None:
-            skipped.append({
-                **window,
-                "reason": "motion_estimation_failed",
-            })
+            skipped.append(
+                {
+                    **window,
+                    "reason": "motion_estimation_failed",
+                }
+            )
             continue
 
         reasons = []
@@ -958,7 +1060,10 @@ def collect_motion_pairs(edge: dict,
             source_motion["motion_magnitude"]["translation_m"],
             target_motion["motion_magnitude"]["translation_m"],
         )
-        if max_rotation < args.motion_min_rotation_deg and max_translation < args.motion_min_translation_m:
+        if (
+            max_rotation < args.motion_min_rotation_deg
+            and max_translation < args.motion_min_translation_m
+        ):
             reasons.append("low_motion_excitation")
 
         motion_pair = {
@@ -969,16 +1074,20 @@ def collect_motion_pairs(edge: dict,
             "score": motion_pair_score(source_motion, target_motion),
         }
         if reasons:
-            skipped.append({
-                **motion_pair,
-                "reason": "motion_pair_rejected",
-                "reasons": reasons,
-            })
+            skipped.append(
+                {
+                    **motion_pair,
+                    "reason": "motion_pair_rejected",
+                    "reasons": reasons,
+                }
+            )
             continue
         accepted.append(motion_pair)
 
-    accepted.sort(key=lambda item: (-item["score"], -item["stride"], item["start_index"]))
-    return accepted[:args.max_motion_pairs], skipped
+    accepted.sort(
+        key=lambda item: (-item["score"], -item["stride"], item["start_index"])
+    )
+    return accepted[: args.max_motion_pairs], skipped
 
 
 def solve_handeye_rotation(motion_pairs: list[dict]) -> tuple[np.ndarray | None, dict]:
@@ -986,8 +1095,12 @@ def solve_handeye_rotation(motion_pairs: list[dict]) -> tuple[np.ndarray | None,
     target_rotvecs = []
     weights = []
     for pair in motion_pairs:
-        source_transform = np.array(pair["source_motion"]["transformation"], dtype=float)
-        target_transform = np.array(pair["target_motion"]["transformation"], dtype=float)
+        source_transform = np.array(
+            pair["source_motion"]["transformation"], dtype=float
+        )
+        target_transform = np.array(
+            pair["target_motion"]["transformation"], dtype=float
+        )
         source_rotvec = R.from_matrix(source_transform[:3, :3]).as_rotvec()
         target_rotvec = R.from_matrix(target_transform[:3, :3]).as_rotvec()
         if np.linalg.norm(source_rotvec) < 1e-6 or np.linalg.norm(target_rotvec) < 1e-6:
@@ -1005,7 +1118,9 @@ def solve_handeye_rotation(motion_pairs: list[dict]) -> tuple[np.ndarray | None,
     source_stack = np.vstack(source_rotvecs)
     target_stack = np.vstack(target_rotvecs)
     cross_covariance = np.zeros((3, 3), dtype=float)
-    for source_rotvec, target_rotvec, weight in zip(source_stack, target_stack, weights):
+    for source_rotvec, target_rotvec, weight in zip(
+        source_stack, target_stack, weights
+    ):
         cross_covariance += weight * np.outer(target_rotvec, source_rotvec)
 
     u, singular_values, vt = np.linalg.svd(cross_covariance)
@@ -1021,7 +1136,9 @@ def solve_handeye_rotation(motion_pairs: list[dict]) -> tuple[np.ndarray | None,
             axes.append(rotvec / norm)
     if axes:
         axes_singular_values = np.linalg.svd(np.vstack(axes), compute_uv=False)
-        axis_rank = int(sum(value > 0.2 * axes_singular_values[0] for value in axes_singular_values))
+        axis_rank = int(
+            sum(value > 0.2 * axes_singular_values[0] for value in axes_singular_values)
+        )
     else:
         axes_singular_values = np.zeros(3)
         axis_rank = 0
@@ -1029,20 +1146,31 @@ def solve_handeye_rotation(motion_pairs: list[dict]) -> tuple[np.ndarray | None,
     return rotation_matrix, {
         "usable_motion_pairs": len(source_rotvecs),
         "singular_values": [float(value) for value in singular_values.tolist()],
-        "rotation_axis_singular_values": [float(value) for value in axes_singular_values.tolist()],
+        "rotation_axis_singular_values": [
+            float(value) for value in axes_singular_values.tolist()
+        ],
         "rotation_axis_rank": axis_rank,
     }
 
 
-def solve_handeye_translation(rotation_matrix: np.ndarray, motion_pairs: list[dict]) -> tuple[np.ndarray | None, dict]:
+def solve_handeye_translation(
+    rotation_matrix: np.ndarray, motion_pairs: list[dict]
+) -> tuple[np.ndarray | None, dict]:
     left_blocks = []
     right_blocks = []
     for pair in motion_pairs:
-        source_transform = np.array(pair["source_motion"]["transformation"], dtype=float)
-        target_transform = np.array(pair["target_motion"]["transformation"], dtype=float)
+        source_transform = np.array(
+            pair["source_motion"]["transformation"], dtype=float
+        )
+        target_transform = np.array(
+            pair["target_motion"]["transformation"], dtype=float
+        )
         weight = float(np.sqrt(max(pair["weight"], 1e-6)))
         left_blocks.append(weight * (target_transform[:3, :3] - np.eye(3, dtype=float)))
-        right_blocks.append(weight * (rotation_matrix @ source_transform[:3, 3] - target_transform[:3, 3]))
+        right_blocks.append(
+            weight
+            * (rotation_matrix @ source_transform[:3, 3] - target_transform[:3, 3])
+        )
 
     if not left_blocks:
         return None, {
@@ -1053,9 +1181,13 @@ def solve_handeye_translation(rotation_matrix: np.ndarray, motion_pairs: list[di
 
     left_matrix = np.vstack(left_blocks)
     right_vector = np.concatenate(right_blocks)
-    solution, _, rank, singular_values = np.linalg.lstsq(left_matrix, right_vector, rcond=None)
+    solution, _, rank, singular_values = np.linalg.lstsq(
+        left_matrix, right_vector, rcond=None
+    )
     positive = singular_values[singular_values > 1e-9]
-    condition_number = float(positive[-1] / positive[0]) if len(positive) >= 2 else float("inf")
+    condition_number = (
+        float(positive[-1] / positive[0]) if len(positive) >= 2 else float("inf")
+    )
     return solution, {
         "rank": int(rank),
         "condition_number": condition_number,
@@ -1070,37 +1202,65 @@ def pack_transform(rotation_matrix: np.ndarray, translation: np.ndarray) -> np.n
     return transform
 
 
-def handeye_residual_components(transform: np.ndarray, motion_pairs: list[dict]) -> list[dict]:
+def handeye_residual_components(
+    transform: np.ndarray, motion_pairs: list[dict]
+) -> list[dict]:
     inverse_transform = np.linalg.inv(transform)
     residuals = []
     for pair in motion_pairs:
-        source_transform = np.array(pair["source_motion"]["transformation"], dtype=float)
-        target_transform = np.array(pair["target_motion"]["transformation"], dtype=float)
-        delta = target_transform @ transform @ np.linalg.inv(source_transform) @ inverse_transform
-        residuals.append({
-            "start_index": int(pair["start_index"]),
-            "end_index": int(pair["end_index"]),
-            "weight": float(pair["weight"]),
-            "rotation_deg": float(rotation_angle_degrees(delta[:3, :3])),
-            "translation_m": float(np.linalg.norm(delta[:3, 3])),
-        })
+        source_transform = np.array(
+            pair["source_motion"]["transformation"], dtype=float
+        )
+        target_transform = np.array(
+            pair["target_motion"]["transformation"], dtype=float
+        )
+        delta = (
+            target_transform
+            @ transform
+            @ np.linalg.inv(source_transform)
+            @ inverse_transform
+        )
+        residuals.append(
+            {
+                "start_index": int(pair["start_index"]),
+                "end_index": int(pair["end_index"]),
+                "weight": float(pair["weight"]),
+                "rotation_deg": float(rotation_angle_degrees(delta[:3, :3])),
+                "translation_m": float(np.linalg.norm(delta[:3, 3])),
+            }
+        )
     return residuals
 
 
-def refine_handeye_solution(initial_transform: np.ndarray, motion_pairs: list[dict]) -> tuple[np.ndarray, dict]:
+def refine_handeye_solution(
+    initial_transform: np.ndarray, motion_pairs: list[dict]
+) -> tuple[np.ndarray, dict]:
     initial_rotation = R.from_matrix(initial_transform[:3, :3]).as_rotvec()
     initial_translation = initial_transform[:3, 3]
 
     def residual_vector(parameters: np.ndarray) -> np.ndarray:
-        transform = pack_transform(R.from_rotvec(parameters[:3]).as_matrix(), parameters[3:])
+        transform = pack_transform(
+            R.from_rotvec(parameters[:3]).as_matrix(), parameters[3:]
+        )
         inverse_transform = np.linalg.inv(transform)
         residuals = []
         for pair in motion_pairs:
-            source_transform = np.array(pair["source_motion"]["transformation"], dtype=float)
-            target_transform = np.array(pair["target_motion"]["transformation"], dtype=float)
-            delta = target_transform @ transform @ np.linalg.inv(source_transform) @ inverse_transform
+            source_transform = np.array(
+                pair["source_motion"]["transformation"], dtype=float
+            )
+            target_transform = np.array(
+                pair["target_motion"]["transformation"], dtype=float
+            )
+            delta = (
+                target_transform
+                @ transform
+                @ np.linalg.inv(source_transform)
+                @ inverse_transform
+            )
             weight = float(np.sqrt(max(pair["weight"], 1e-6)))
-            residuals.extend((weight * R.from_matrix(delta[:3, :3]).as_rotvec()).tolist())
+            residuals.extend(
+                (weight * R.from_matrix(delta[:3, :3]).as_rotvec()).tolist()
+            )
             residuals.extend((weight * delta[:3, 3]).tolist())
         return np.asarray(residuals, dtype=float)
 
@@ -1122,22 +1282,28 @@ def refine_handeye_solution(initial_transform: np.ndarray, motion_pairs: list[di
         "nfev": int(optimized.nfev),
         "status": int(optimized.status),
         "message": str(optimized.message),
-        "rotation_residual_deg": summarize_values([item["rotation_deg"] for item in residual_components]),
-        "translation_residual_m": summarize_values([item["translation_m"] for item in residual_components]),
+        "rotation_residual_deg": summarize_values(
+            [item["rotation_deg"] for item in residual_components]
+        ),
+        "translation_residual_m": summarize_values(
+            [item["translation_m"] for item in residual_components]
+        ),
         "per_motion_pair": residual_components,
     }
 
 
-def evaluate_transform_on_pairs(transform: np.ndarray,
-                                source_topic: str,
-                                target_topic: str,
-                                metadata_by_topic: dict,
-                                sync_threshold_ns: int,
-                                sample_count: int,
-                                preprocessing_params: dict,
-                                evaluation_distance: float,
-                                cloud_cache: dict,
-                                preprocessed_cloud_cache: dict) -> dict:
+def evaluate_transform_on_pairs(
+    transform: np.ndarray,
+    source_topic: str,
+    target_topic: str,
+    metadata_by_topic: dict,
+    sync_threshold_ns: int,
+    sample_count: int,
+    preprocessing_params: dict,
+    evaluation_distance: float,
+    cloud_cache: dict,
+    preprocessed_cloud_cache: dict,
+) -> dict:
     matches = find_synchronized_pairs(
         metadata_by_topic[source_topic],
         metadata_by_topic[target_topic],
@@ -1175,13 +1341,15 @@ def evaluate_transform_on_pairs(transform: np.ndarray,
         )
         fitness_values.append(float(evaluation.fitness))
         rmse_values.append(float(evaluation.inlier_rmse))
-        per_sample.append({
-            "source_timestamp_ns": int(source_meta.timestamp_ns),
-            "target_timestamp_ns": int(target_meta.timestamp_ns),
-            "sync_dt_ms": float(delta_ns / 1e6),
-            "fitness": float(evaluation.fitness),
-            "inlier_rmse": float(evaluation.inlier_rmse),
-        })
+        per_sample.append(
+            {
+                "source_timestamp_ns": int(source_meta.timestamp_ns),
+                "target_timestamp_ns": int(target_meta.timestamp_ns),
+                "sync_dt_ms": float(delta_ns / 1e6),
+                "fitness": float(evaluation.fitness),
+                "inlier_rmse": float(evaluation.inlier_rmse),
+            }
+        )
 
     return {
         "samples": len(matches),
@@ -1191,7 +1359,9 @@ def evaluate_transform_on_pairs(transform: np.ndarray,
     }
 
 
-def summarize_pairwise_baseline(edge_results: list[dict], skipped_edges: list[dict]) -> dict:
+def summarize_pairwise_baseline(
+    edge_results: list[dict], skipped_edges: list[dict]
+) -> dict:
     fitness_values = [float(item["best_run"]["fitness"]) for item in edge_results]
     rmse_values = [float(item["best_run"]["inlier_rmse"]) for item in edge_results]
     return {
@@ -1217,7 +1387,9 @@ def summarize_pairwise_baseline(edge_results: list[dict], skipped_edges: list[di
     }
 
 
-def build_temporal_tf_output(base_frame: str, target_topic: str, edge_results: list[dict]) -> dict:
+def build_temporal_tf_output(
+    base_frame: str, target_topic: str, edge_results: list[dict]
+) -> dict:
     return {
         "base_topic": target_topic,
         "base_frame": base_frame,
@@ -1230,7 +1402,9 @@ def build_temporal_tf_output(base_frame: str, target_topic: str, edge_results: l
                 metadata={
                     "mode": "temporal_handeye",
                     "source_topic": edge_result["source_topic"],
-                    "registration_target_topic": edge_result["registration_target_topic"],
+                    "registration_target_topic": edge_result[
+                        "registration_target_topic"
+                    ],
                     "motion_pair_count": int(edge_result["motion_pair_count"]),
                 },
             )
@@ -1239,11 +1413,15 @@ def build_temporal_tf_output(base_frame: str, target_topic: str, edge_results: l
     }
 
 
-def write_temporal_edge_files(output_dir: Path, base_frame: str, edge_results: list[dict]) -> list[str]:
+def write_temporal_edge_files(
+    output_dir: Path, base_frame: str, edge_results: list[dict]
+) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_paths = []
     for edge_result in edge_results:
-        file_path = output_dir / extrinsics_filename(base_frame, edge_result["source_frame"])
+        file_path = output_dir / extrinsics_filename(
+            base_frame, edge_result["source_frame"]
+        )
         save_extrinsics_yaml(
             str(file_path),
             parent_frame=base_frame,
@@ -1261,11 +1439,13 @@ def write_temporal_edge_files(output_dir: Path, base_frame: str, edge_results: l
     return saved_paths
 
 
-def calibrate_temporal_edges(selected_edges: list[dict],
-                             metadata_by_topic: dict,
-                             sync_threshold_ns: int,
-                             args,
-                             pairwise_baseline_by_topic: dict[str, dict]) -> tuple[list[dict], list[dict], list[dict]]:
+def calibrate_temporal_edges(
+    selected_edges: list[dict],
+    metadata_by_topic: dict,
+    sync_threshold_ns: int,
+    args,
+    pairwise_baseline_by_topic: dict[str, dict],
+) -> tuple[list[dict], list[dict], list[dict]]:
     temporal_results = []
     skipped_edges = []
     temporal_datasets = []
@@ -1307,39 +1487,49 @@ def calibrate_temporal_edges(selected_edges: list[dict],
             motion_cache,
         )
         if len(motion_pairs) < args.min_motion_pairs:
-            skipped_edges.append({
-                **edge,
-                "reason": "insufficient_motion_pairs",
-                "usable_motion_pairs": len(motion_pairs),
-                "dataset_summary": dataset["summary"],
-                "skipped_motion_pairs": skipped_motion_pairs,
-            })
+            skipped_edges.append(
+                {
+                    **edge,
+                    "reason": "insufficient_motion_pairs",
+                    "usable_motion_pairs": len(motion_pairs),
+                    "dataset_summary": dataset["summary"],
+                    "skipped_motion_pairs": skipped_motion_pairs,
+                }
+            )
             continue
 
         rotation_matrix, rotation_info = solve_handeye_rotation(motion_pairs)
         if rotation_matrix is None:
-            skipped_edges.append({
-                **edge,
-                "reason": "rotation_solve_failed",
-                "usable_motion_pairs": len(motion_pairs),
-                "rotation_info": rotation_info,
-                "skipped_motion_pairs": skipped_motion_pairs,
-            })
+            skipped_edges.append(
+                {
+                    **edge,
+                    "reason": "rotation_solve_failed",
+                    "usable_motion_pairs": len(motion_pairs),
+                    "rotation_info": rotation_info,
+                    "skipped_motion_pairs": skipped_motion_pairs,
+                }
+            )
             continue
 
-        translation, translation_info = solve_handeye_translation(rotation_matrix, motion_pairs)
+        translation, translation_info = solve_handeye_translation(
+            rotation_matrix, motion_pairs
+        )
         if translation is None:
-            skipped_edges.append({
-                **edge,
-                "reason": "translation_solve_failed",
-                "rotation_info": rotation_info,
-                "translation_info": translation_info,
-                "skipped_motion_pairs": skipped_motion_pairs,
-            })
+            skipped_edges.append(
+                {
+                    **edge,
+                    "reason": "translation_solve_failed",
+                    "rotation_info": rotation_info,
+                    "translation_info": translation_info,
+                    "skipped_motion_pairs": skipped_motion_pairs,
+                }
+            )
             continue
 
         initial_transform = pack_transform(rotation_matrix, translation)
-        refined_transform, refinement_info = refine_handeye_solution(initial_transform, motion_pairs)
+        refined_transform, refinement_info = refine_handeye_solution(
+            initial_transform, motion_pairs
+        )
         transform_delta = transform_delta_metrics(
             np.array(edge["initial_transform"], dtype=float),
             refined_transform,
@@ -1402,16 +1592,21 @@ def calibrate_temporal_edges(selected_edges: list[dict],
             quality_reasons.append("translation_condition_number_above_threshold")
         rotation_p95 = refinement_info["rotation_residual_deg"]["p95"]
         translation_p95 = refinement_info["translation_residual_m"]["p95"]
-        if rotation_p95 is not None and rotation_p95 > args.max_handeye_rotation_residual_deg:
+        if (
+            rotation_p95 is not None
+            and rotation_p95 > args.max_handeye_rotation_residual_deg
+        ):
             quality_reasons.append("rotation_residual_above_threshold")
-        if translation_p95 is not None and translation_p95 > args.max_handeye_translation_residual_m:
+        if (
+            translation_p95 is not None
+            and translation_p95 > args.max_handeye_translation_residual_m
+        ):
             quality_reasons.append("translation_residual_above_threshold")
 
         result = {
             **edge,
             "latest_timestamp_ns": max(
-                pair["source_motion"]["end_timestamp_ns"]
-                for pair in motion_pairs
+                pair["source_motion"]["end_timestamp_ns"] for pair in motion_pairs
             ),
             "initial_transform": edge["initial_transform"],
             "initial_transform_stamp": stamp_ns_to_dict(None),
@@ -1433,10 +1628,12 @@ def calibrate_temporal_edges(selected_edges: list[dict],
             "quality_gate_reasons": quality_reasons,
         }
         if quality_reasons:
-            skipped_edges.append({
-                **result,
-                "reason": "quality_gate_failed",
-            })
+            skipped_edges.append(
+                {
+                    **result,
+                    "reason": "quality_gate_failed",
+                }
+            )
             continue
         temporal_results.append(result)
 
@@ -1449,16 +1646,18 @@ def calibrate_temporal_edges(selected_edges: list[dict],
     return temporal_results, skipped_edges, temporal_datasets
 
 
-def build_temporal_metrics_output(record_files: list[str],
-                                  target_topic: str,
-                                  target_frame: str,
-                                  root_analysis: dict,
-                                  temporal_results: list[dict],
-                                  skipped_edges: list[dict],
-                                  extraction_output: dict,
-                                  temporal_datasets: list[dict],
-                                  pairwise_baseline: dict,
-                                  output_dir: Path) -> dict:
+def build_temporal_metrics_output(
+    record_files: list[str],
+    target_topic: str,
+    target_frame: str,
+    root_analysis: dict,
+    temporal_results: list[dict],
+    skipped_edges: list[dict],
+    extraction_output: dict,
+    temporal_datasets: list[dict],
+    pairwise_baseline: dict,
+    output_dir: Path,
+) -> dict:
     temporal_holdout_fitness = [
         float(item["holdout_evaluation"]["temporal"]["fitness"]["mean"])
         for item in temporal_results
@@ -1483,21 +1682,33 @@ def build_temporal_metrics_output(record_files: list[str],
 
     per_edge = []
     for result in temporal_results:
-        per_edge.append({
-            "extrinsics_file": str(output_dir / "calibrated" / extrinsics_filename(target_frame, result["source_frame"])),
-            "source_topic": result["source_topic"],
-            "target_topic": result["target_topic"],
-            "registration_target_topic": result["registration_target_topic"],
-            "motion_pair_count": int(result["motion_pair_count"]),
-            "rotation_axis_rank": int(result["rotation_info"]["rotation_axis_rank"]),
-            "translation_rank": int(result["translation_info"]["rank"]),
-            "translation_condition_number": float(result["translation_info"]["condition_number"]),
-            "rotation_residual_deg": result["refinement"]["rotation_residual_deg"],
-            "translation_residual_m": result["refinement"]["translation_residual_m"],
-            "delta_to_initial": result["comparison"]["delta_to_initial"],
-            "delta_to_pairwise": result["comparison"].get("delta_to_pairwise"),
-            "holdout_evaluation": result["holdout_evaluation"],
-        })
+        per_edge.append(
+            {
+                "extrinsics_file": str(
+                    output_dir
+                    / "calibrated"
+                    / extrinsics_filename(target_frame, result["source_frame"])
+                ),
+                "source_topic": result["source_topic"],
+                "target_topic": result["target_topic"],
+                "registration_target_topic": result["registration_target_topic"],
+                "motion_pair_count": int(result["motion_pair_count"]),
+                "rotation_axis_rank": int(
+                    result["rotation_info"]["rotation_axis_rank"]
+                ),
+                "translation_rank": int(result["translation_info"]["rank"]),
+                "translation_condition_number": float(
+                    result["translation_info"]["condition_number"]
+                ),
+                "rotation_residual_deg": result["refinement"]["rotation_residual_deg"],
+                "translation_residual_m": result["refinement"][
+                    "translation_residual_m"
+                ],
+                "delta_to_initial": result["comparison"]["delta_to_initial"],
+                "delta_to_pairwise": result["comparison"].get("delta_to_pairwise"),
+                "holdout_evaluation": result["holdout_evaluation"],
+            }
+        )
 
     summary = {
         "accepted_edges": len(temporal_results),
@@ -1512,9 +1723,21 @@ def build_temporal_metrics_output(record_files: list[str],
         **summary,
         "statuses": {
             "coverage": "pass" if temporal_results else "warning",
-            "motion_pairs": "pass" if motion_pair_counts and min(motion_pair_counts) >= 3 else "warning",
-            "rotation_residual": "pass" if rotation_residual_p95 and max(rotation_residual_p95) <= 2.0 else "warning",
-            "translation_residual": "pass" if translation_residual_p95 and max(translation_residual_p95) <= 1.0 else "warning",
+            "motion_pairs": (
+                "pass"
+                if motion_pair_counts and min(motion_pair_counts) >= 3
+                else "warning"
+            ),
+            "rotation_residual": (
+                "pass"
+                if rotation_residual_p95 and max(rotation_residual_p95) <= 2.0
+                else "warning"
+            ),
+            "translation_residual": (
+                "pass"
+                if translation_residual_p95 and max(translation_residual_p95) <= 1.0
+                else "warning"
+            ),
         },
     }
     fine_metrics = {
@@ -1523,7 +1746,9 @@ def build_temporal_metrics_output(record_files: list[str],
         "target_selection": {
             "preferred_root_frame": root_analysis.get("preferred_root_frame"),
             "strategy": root_analysis.get("target_selection_strategy"),
-            "missing_transform_frames_to_target": root_analysis.get("missing_transform_frames_to_target", []),
+            "missing_transform_frames_to_target": root_analysis.get(
+                "missing_transform_frames_to_target", []
+            ),
         },
         "extraction_summary": extraction_output["summary"],
         "temporal_dataset_summary": [
@@ -1543,7 +1768,9 @@ def build_temporal_metrics_output(record_files: list[str],
         "target_selection": {
             "preferred_root_frame": root_analysis.get("preferred_root_frame"),
             "strategy": root_analysis.get("target_selection_strategy"),
-            "missing_transform_frames_to_target": root_analysis.get("missing_transform_frames_to_target", []),
+            "missing_transform_frames_to_target": root_analysis.get(
+                "missing_transform_frames_to_target", []
+            ),
         },
         "summary": summary,
         "per_edge": per_edge,
@@ -1564,50 +1791,237 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Temporal multi-frame LiDAR-to-LiDAR hand-eye calibration with pairwise ICP comparison."
     )
-    parser.add_argument("--record-path", required=True, help="Path to a .record file or record directory.")
-    parser.add_argument("--output-dir", default="outputs/lidar2lidar/temporal_calib", help="Directory for reports and output files.")
-    parser.add_argument("--conf-dir", default="lidar2lidar/conf", help="Directory that stores fallback extrinsics YAML files.")
-    parser.add_argument("--bootstrap-conf", action="store_true", help="Export record-derived static TF edges into the conf directory.")
-    parser.add_argument("--target-topic", default=None, help="Target point cloud topic. If omitted, the pipeline selects one automatically.")
-    parser.add_argument("--source-topics", nargs="*", default=None, help="Optional explicit source point cloud topics.")
-    parser.add_argument("--sync-threshold-ms", type=float, default=20.0, help="Maximum timestamp difference for frame synchronization.")
-    parser.add_argument("--min-overlap", type=float, default=0.30, help="Minimum voxel overlap ratio required to calibrate a topic pair.")
-    parser.add_argument("--overlap-voxel-size", type=float, default=0.5, help="Voxel size used during overlap pre-check.")
-    parser.add_argument("--max-samples", type=int, default=1, help="Maximum synchronized frame pairs to evaluate per pairwise ICP edge.")
-    parser.add_argument("--methods", nargs="+", type=int, default=[2], help="Pairwise ICP methods to compare (1: point-to-plane, 2: GICP, 3: point-to-point).")
-    parser.add_argument("--voxel-size", type=float, default=0.04, help="Voxel size for cross-sensor evaluation preprocessing.")
-    parser.add_argument("--motion-frontend", choices=["chain", "submap"], default="submap", help="Same-sensor motion frontend used before AX=XB solving.")
-    parser.add_argument("--motion-voxel-size", type=float, default=0.08, help="Voxel size for same-sensor motion estimation.")
-    parser.add_argument("--motion-method", type=int, default=2, help="Registration method used for same-sensor motion estimation.")
-    parser.add_argument("--max-height", type=float, default=None, help="Optional max height filter for preprocessing.")
-    parser.add_argument("--remove-ground", action="store_true", help="Remove the dominant ground plane during preprocessing.")
-    parser.add_argument("--remove-walls", action="store_true", help="Remove vertical planes during preprocessing.")
-    parser.add_argument("--min-fitness", type=float, default=0.0, help="Minimum fitness required to keep a pairwise ICP edge.")
-    parser.add_argument("--max-condition-number", type=float, default=1e6, help="Maximum information-matrix condition number allowed for pairwise ICP edges.")
-    parser.add_argument("--temporal-window-strides", nargs="+", type=int, default=[10, 20, 30, 40], help="Anchor-pair strides used to build temporal windows.")
-    parser.add_argument("--max-temporal-windows", type=int, default=12, help="Maximum temporal windows to evaluate per edge.")
-    parser.add_argument("--max-motion-pairs", type=int, default=8, help="Maximum accepted motion pairs kept per edge.")
-    parser.add_argument("--min-motion-pairs", type=int, default=3, help="Minimum accepted motion pairs required for hand-eye solving.")
-    parser.add_argument("--motion-min-fitness", type=float, default=0.10, help="Minimum same-sensor motion fitness required to keep a motion pair.")
-    parser.add_argument("--motion-min-rotation-deg", type=float, default=0.3, help="Minimum rotational excitation for a temporal motion pair.")
-    parser.add_argument("--motion-min-translation-m", type=float, default=0.05, help="Minimum translational excitation for a temporal motion pair.")
-    parser.add_argument("--local-odometry-step", type=int, default=4, help="Number of frames between chained local-odometry nodes.")
-    parser.add_argument("--submap-support-nodes", type=int, default=1, help="Maximum extra local-odometry nodes fused into each temporal submap.")
-    parser.add_argument("--submap-voxel-size", type=float, default=0.08, help="Optional downsample voxel size applied after building each temporal submap.")
-    parser.add_argument("--motion-stagnation-dt-ms", type=float, default=250.0, help="Minimum window duration that activates stagnant-motion rejection.")
-    parser.add_argument("--motion-stagnation-translation-m", type=float, default=0.02, help="Translation magnitude below this is treated as stagnant for long windows.")
-    parser.add_argument("--motion-stagnation-rotation-deg", type=float, default=0.05, help="Rotation magnitude below this is treated as stagnant for long windows.")
-    parser.add_argument("--min-rotation-axis-rank", type=int, default=1, help="Minimum approximate rank of rotation-axis diversity required for acceptance.")
-    parser.add_argument("--max-translation-condition-number", type=float, default=1e5, help="Maximum translation linear-system condition number allowed for temporal acceptance.")
-    parser.add_argument("--max-handeye-rotation-residual-deg", type=float, default=5.0, help="Maximum p95 AX=XB rotation residual allowed for temporal acceptance.")
-    parser.add_argument("--max-handeye-translation-residual-m", type=float, default=2.0, help="Maximum p95 AX=XB translation residual allowed for temporal acceptance.")
-    parser.add_argument("--comparison-samples", type=int, default=3, help="Number of synchronized cross-sensor samples used for fixed-transform comparison.")
+    parser.add_argument(
+        "--record-path",
+        required=True,
+        help="Path to a .record file or record directory.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs/lidar2lidar/temporal_calib",
+        help="Directory for reports and output files.",
+    )
+    parser.add_argument(
+        "--conf-dir",
+        default="lidar2lidar/conf",
+        help="Directory that stores fallback extrinsics YAML files.",
+    )
+    parser.add_argument(
+        "--bootstrap-conf",
+        action="store_true",
+        help="Export record-derived static TF edges into the conf directory.",
+    )
+    parser.add_argument(
+        "--target-topic",
+        default=None,
+        help="Target point cloud topic. If omitted, the pipeline selects one automatically.",
+    )
+    parser.add_argument(
+        "--source-topics",
+        nargs="*",
+        default=None,
+        help="Optional explicit source point cloud topics.",
+    )
+    parser.add_argument(
+        "--sync-threshold-ms",
+        type=float,
+        default=20.0,
+        help="Maximum timestamp difference for frame synchronization.",
+    )
+    parser.add_argument(
+        "--min-overlap",
+        type=float,
+        default=0.30,
+        help="Minimum voxel overlap ratio required to calibrate a topic pair.",
+    )
+    parser.add_argument(
+        "--overlap-voxel-size",
+        type=float,
+        default=0.5,
+        help="Voxel size used during overlap pre-check.",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=1,
+        help="Maximum synchronized frame pairs to evaluate per pairwise ICP edge.",
+    )
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        type=int,
+        default=[2],
+        help="Pairwise ICP methods to compare (1: point-to-plane, 2: GICP, 3: point-to-point).",
+    )
+    parser.add_argument(
+        "--voxel-size",
+        type=float,
+        default=0.04,
+        help="Voxel size for cross-sensor evaluation preprocessing.",
+    )
+    parser.add_argument(
+        "--motion-frontend",
+        choices=["chain", "submap"],
+        default="submap",
+        help="Same-sensor motion frontend used before AX=XB solving.",
+    )
+    parser.add_argument(
+        "--motion-voxel-size",
+        type=float,
+        default=0.08,
+        help="Voxel size for same-sensor motion estimation.",
+    )
+    parser.add_argument(
+        "--motion-method",
+        type=int,
+        default=2,
+        help="Registration method used for same-sensor motion estimation.",
+    )
+    parser.add_argument(
+        "--max-height",
+        type=float,
+        default=None,
+        help="Optional max height filter for preprocessing.",
+    )
+    parser.add_argument(
+        "--remove-ground",
+        action="store_true",
+        help="Remove the dominant ground plane during preprocessing.",
+    )
+    parser.add_argument(
+        "--remove-walls",
+        action="store_true",
+        help="Remove vertical planes during preprocessing.",
+    )
+    parser.add_argument(
+        "--min-fitness",
+        type=float,
+        default=0.0,
+        help="Minimum fitness required to keep a pairwise ICP edge.",
+    )
+    parser.add_argument(
+        "--max-condition-number",
+        type=float,
+        default=1e6,
+        help="Maximum information-matrix condition number allowed for pairwise ICP edges.",
+    )
+    parser.add_argument(
+        "--temporal-window-strides",
+        nargs="+",
+        type=int,
+        default=[10, 20, 30, 40],
+        help="Anchor-pair strides used to build temporal windows.",
+    )
+    parser.add_argument(
+        "--max-temporal-windows",
+        type=int,
+        default=12,
+        help="Maximum temporal windows to evaluate per edge.",
+    )
+    parser.add_argument(
+        "--max-motion-pairs",
+        type=int,
+        default=8,
+        help="Maximum accepted motion pairs kept per edge.",
+    )
+    parser.add_argument(
+        "--min-motion-pairs",
+        type=int,
+        default=3,
+        help="Minimum accepted motion pairs required for hand-eye solving.",
+    )
+    parser.add_argument(
+        "--motion-min-fitness",
+        type=float,
+        default=0.10,
+        help="Minimum same-sensor motion fitness required to keep a motion pair.",
+    )
+    parser.add_argument(
+        "--motion-min-rotation-deg",
+        type=float,
+        default=0.3,
+        help="Minimum rotational excitation for a temporal motion pair.",
+    )
+    parser.add_argument(
+        "--motion-min-translation-m",
+        type=float,
+        default=0.05,
+        help="Minimum translational excitation for a temporal motion pair.",
+    )
+    parser.add_argument(
+        "--local-odometry-step",
+        type=int,
+        default=4,
+        help="Number of frames between chained local-odometry nodes.",
+    )
+    parser.add_argument(
+        "--submap-support-nodes",
+        type=int,
+        default=1,
+        help="Maximum extra local-odometry nodes fused into each temporal submap.",
+    )
+    parser.add_argument(
+        "--submap-voxel-size",
+        type=float,
+        default=0.08,
+        help="Optional downsample voxel size applied after building each temporal submap.",
+    )
+    parser.add_argument(
+        "--motion-stagnation-dt-ms",
+        type=float,
+        default=250.0,
+        help="Minimum window duration that activates stagnant-motion rejection.",
+    )
+    parser.add_argument(
+        "--motion-stagnation-translation-m",
+        type=float,
+        default=0.02,
+        help="Translation magnitude below this is treated as stagnant for long windows.",
+    )
+    parser.add_argument(
+        "--motion-stagnation-rotation-deg",
+        type=float,
+        default=0.05,
+        help="Rotation magnitude below this is treated as stagnant for long windows.",
+    )
+    parser.add_argument(
+        "--min-rotation-axis-rank",
+        type=int,
+        default=1,
+        help="Minimum approximate rank of rotation-axis diversity required for acceptance.",
+    )
+    parser.add_argument(
+        "--max-translation-condition-number",
+        type=float,
+        default=1e5,
+        help="Maximum translation linear-system condition number allowed for temporal acceptance.",
+    )
+    parser.add_argument(
+        "--max-handeye-rotation-residual-deg",
+        type=float,
+        default=5.0,
+        help="Maximum p95 AX=XB rotation residual allowed for temporal acceptance.",
+    )
+    parser.add_argument(
+        "--max-handeye-translation-residual-m",
+        type=float,
+        default=2.0,
+        help="Maximum p95 AX=XB translation residual allowed for temporal acceptance.",
+    )
+    parser.add_argument(
+        "--comparison-samples",
+        type=int,
+        default=3,
+        help="Number of synchronized cross-sensor samples used for fixed-transform comparison.",
+    )
     args = parser.parse_args()
 
     record_files = discover_record_files(args.record_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    initial_guess_dir, calibrated_dir, diagnostics_dir = prepare_output_layout(output_dir)
+    initial_guess_dir, calibrated_dir, _, diagnostics_dir = prepare_output_layout(
+        output_dir
+    )
 
     logging.info("Using record files: %s", record_files)
     topic_counts = list_topics(record_files)
@@ -1624,7 +2038,9 @@ def main() -> None:
         }
         for topic in pointcloud_topics
     }
-    pointcloud_frames = sorted({info["frame_id"] for info in topic_infos.values() if info["frame_id"]})
+    pointcloud_frames = sorted(
+        {info["frame_id"] for info in topic_infos.values() if info["frame_id"]}
+    )
 
     record_tf_edges = extract_tf_edges(record_files)
     conf_tf_edges = load_transform_edges_from_dir(args.conf_dir)
@@ -1632,8 +2048,13 @@ def main() -> None:
     tf_graph = build_transform_graph(tf_edges) if tf_edges else {}
 
     pointcloud_related_static_edges = [
-        edge for edge in record_tf_edges
-        if edge.is_static and (edge.parent_frame in pointcloud_frames or edge.child_frame in pointcloud_frames)
+        edge
+        for edge in record_tf_edges
+        if edge.is_static
+        and (
+            edge.parent_frame in pointcloud_frames
+            or edge.child_frame in pointcloud_frames
+        )
     ]
     if args.bootstrap_conf and pointcloud_related_static_edges:
         Path(args.conf_dir).mkdir(parents=True, exist_ok=True)
@@ -1650,14 +2071,19 @@ def main() -> None:
         args.overlap_voxel_size,
     )
 
-    target_topic = choose_target_topic(topic_infos, candidate_pairs, root_analysis, args.target_topic)
+    target_topic = choose_target_topic(
+        topic_infos, candidate_pairs, root_analysis, args.target_topic
+    )
     target_frame = topic_infos[target_topic]["frame_id"]
     root_analysis["topics_on_preferred_root_frame"] = [
-        topic for topic, info in topic_infos.items()
+        topic
+        for topic, info in topic_infos.items()
         if info["frame_id"] == root_analysis.get("preferred_root_frame")
     ]
     root_analysis["target_selection_strategy"] = (
-        "tf_static_root" if root_analysis.get("preferred_root_frame") == target_frame else "overlap_fallback"
+        "tf_static_root"
+        if root_analysis.get("preferred_root_frame") == target_frame
+        else "overlap_fallback"
     )
     root_analysis["selected_target_topic"] = target_topic
     root_analysis["selected_target_frame"] = target_frame
@@ -1686,16 +2112,17 @@ def main() -> None:
     pairwise_skipped = skipped_precheck + pairwise_skipped_runtime
     pairwise_baseline = summarize_pairwise_baseline(pairwise_results, pairwise_skipped)
     pairwise_baseline_by_topic = {
-        item["source_topic"]: item
-        for item in pairwise_results
+        item["source_topic"]: item for item in pairwise_results
     }
 
-    temporal_results, temporal_skipped_runtime, temporal_datasets = calibrate_temporal_edges(
-        selected_edges,
-        metadata_by_topic,
-        sync_threshold_ns,
-        args,
-        pairwise_baseline_by_topic,
+    temporal_results, temporal_skipped_runtime, temporal_datasets = (
+        calibrate_temporal_edges(
+            selected_edges,
+            metadata_by_topic,
+            sync_threshold_ns,
+            args,
+            pairwise_baseline_by_topic,
+        )
     )
     temporal_skipped = skipped_precheck + temporal_skipped_runtime
 
@@ -1713,28 +2140,44 @@ def main() -> None:
         skipped_precheck=skipped_precheck,
     )
 
-    initial_guess_files = save_transform_edges_to_dir(initial_guess_dir, pointcloud_related_static_edges)
-    calibrated_files = write_temporal_edge_files(calibrated_dir, target_frame, temporal_results)
+    initial_guess_files = save_transform_edges_to_dir(
+        initial_guess_dir, pointcloud_related_static_edges
+    )
+    calibrated_files = write_temporal_edge_files(
+        calibrated_dir, target_frame, temporal_results
+    )
 
     with open(diagnostics_dir / "extraction.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump(extraction_report, file, sort_keys=False)
     with open(diagnostics_dir / "tf_tree.yaml", "w", encoding="utf-8") as file:
-        yaml.safe_dump({
-            **tf_tree_payload(tf_edges),
-            "root_analysis": root_analysis,
-        }, file, sort_keys=False)
-    with open(diagnostics_dir / "pairwise_baseline.yaml", "w", encoding="utf-8") as file:
+        yaml.safe_dump(
+            {
+                **tf_tree_payload(tf_edges),
+                "root_analysis": root_analysis,
+            },
+            file,
+            sort_keys=False,
+        )
+    with open(
+        diagnostics_dir / "pairwise_baseline.yaml", "w", encoding="utf-8"
+    ) as file:
         yaml.safe_dump(pairwise_baseline, file, sort_keys=False)
     with open(diagnostics_dir / "temporal_dataset.yaml", "w", encoding="utf-8") as file:
         yaml.safe_dump({"edges": temporal_datasets}, file, sort_keys=False)
-    with open(diagnostics_dir / "temporal_calibration.yaml", "w", encoding="utf-8") as file:
-        yaml.safe_dump({
-            "record_files": record_files,
-            "target_topic": target_topic,
-            "target_frame": target_frame,
-            "edge_results": temporal_results,
-            "skipped_edges": temporal_skipped,
-        }, file, sort_keys=False)
+    with open(
+        diagnostics_dir / "temporal_calibration.yaml", "w", encoding="utf-8"
+    ) as file:
+        yaml.safe_dump(
+            {
+                "record_files": record_files,
+                "target_topic": target_topic,
+                "target_frame": target_frame,
+                "edge_results": temporal_results,
+                "skipped_edges": temporal_skipped,
+            },
+            file,
+            sort_keys=False,
+        )
 
     tf_output = build_temporal_tf_output(target_frame, target_topic, temporal_results)
     with open(output_dir / "calibrated_tf.yaml", "w", encoding="utf-8") as file:
@@ -1774,7 +2217,9 @@ def main() -> None:
                 "tf_tree": str(diagnostics_dir / "tf_tree.yaml"),
                 "pairwise_baseline": str(diagnostics_dir / "pairwise_baseline.yaml"),
                 "temporal_dataset": str(diagnostics_dir / "temporal_dataset.yaml"),
-                "temporal_calibration": str(diagnostics_dir / "temporal_calibration.yaml"),
+                "temporal_calibration": str(
+                    diagnostics_dir / "temporal_calibration.yaml"
+                ),
                 "manifest": str(diagnostics_dir / "manifest.yaml"),
             },
         },
@@ -1793,7 +2238,10 @@ def main() -> None:
             edge_result["refinement"]["translation_residual_m"]["p95"],
         )
     if root_analysis["missing_transform_frames_to_target"]:
-        logging.warning("Frames missing transform path to target: %s", root_analysis["missing_transform_frames_to_target"])
+        logging.warning(
+            "Frames missing transform path to target: %s",
+            root_analysis["missing_transform_frames_to_target"],
+        )
     logging.info("Artifacts written to %s", output_dir)
 
 

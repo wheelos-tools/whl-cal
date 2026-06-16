@@ -1475,6 +1475,11 @@ def main() -> None:
         help="Directory that stores fallback extrinsics YAML files.",
     )
     parser.add_argument(
+        "--prefer-conf-tf",
+        action="store_true",
+        help="Use conf-dir extrinsics as the preferred initial TF when the same edge also exists in the record.",
+    )
+    parser.add_argument(
         "--workflow-yaml",
         default=None,
         help="Optional workflow YAML that defines relation planning, scene sufficiency thresholds, repeatability windows, and visualization settings.",
@@ -1671,7 +1676,11 @@ def main() -> None:
         else extract_tf_edges(record_files)
     )
     conf_tf_edges = load_transform_edges_from_dir(args.conf_dir)
-    tf_edges = merge_transform_edges(record_tf_edges, conf_tf_edges)
+    tf_edges = (
+        merge_transform_edges(conf_tf_edges, record_tf_edges)
+        if args.prefer_conf_tf
+        else merge_transform_edges(record_tf_edges, conf_tf_edges)
+    )
     tf_graph = {}
     if tf_edges:
         tf_graph = build_transform_graph(tf_edges)

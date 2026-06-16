@@ -80,8 +80,8 @@ lidar2imu-calibrate \
 - `lidar2imu` is intentionally split between:
   - record conversion to `standardized_samples.yaml` (`record_converter.py`)
   - calibration / metrics (`pipeline.py`, `algorithms.py`, `metrics.py`, `io.py`)
-- Apollo record decoding does **not** use `cyber_record` or `record_msg`. The supported stack is:
-  - `lidar2lidar/record_adapter.py` wrapping `pycyber.record.RecordReader`
+- Apollo record decoding uses `cyber_record` with in-repo protobuf wrappers. The supported stack is:
+  - `lidar2lidar/record_adapter.py` wrapping `cyber_record.record.Record`
   - `lidar2lidar/apollo_record_messages.py` providing minimal in-repo protobuf definitions for the message types this repo actually consumes
 - `tools/` contains operational helper scripts layered on top of the library packages. Reusable workflow logic belongs in `lidar2lidar/` or `lidar2imu/`, not in `tools/`.
 
@@ -102,10 +102,15 @@ lidar2imu-calibrate \
   - `lidar2lidar-auto` is the practical **scan-to-scan baseline**
   - `lidar2lidar-temporal` is an **experimental comparison / observability branch**
   - `lidar2lidar-scan2map-dataset` and `lidar2lidar-scan2map` are the **scan-to-map path**
+- For direct LiDAR-to-LiDAR with strong shared coverage, prefer `scan2scan` before heavier candidates.
+- If the topology contains a real loop and the loop edges are individually healthy, add loop closure as a consistency upgrade.
+- If there is no loop, prefer multi-window pairwise consensus or representative-transform selection over repeated seed-only full-dataset optimization.
 - `scan2map` is additive, not a rename of `scan2scan`. Keep the baseline visible in outputs and comparisons.
 - `scan2map` currently assumes a dataset artifact first, then optimization:
   - `diagnostics/scan2map_dataset.yaml` is the extraction surface
   - `diagnostics/scan2map_optimization.yaml` and `diagnostics/evaluation.yaml` are the optimization/evaluation surfaces
   - the current default dataset rule is to keep every 3rd aligned scan as holdout
+- Treat Open3D/PCL-style global registration and TEASER++ as initialization candidates, not as release verdicts by themselves.
+- For timing issues, prefer acquisition or header timestamps over publish order; static bags can tolerate publish skew, but they cannot reliably estimate true temporal bias on their own.
 - Prefer decisions based on `coarse_metrics`, `fine_metrics`, information-matrix diagnostics, and explicit skip reasons. Do not treat registration fitness alone as sufficient evidence.
 - Update the matching overview / quick-start / design docs when a pipeline, artifact, or command changes. The repo keeps these docs separate on purpose.

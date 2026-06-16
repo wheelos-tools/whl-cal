@@ -1,0 +1,49 @@
+target_type: chessboard
+pattern_size:
+    - 11
+    - 8
+square_size: 0.05
+auto_capture_settings:
+    delay_between_captures: 1.0
+    grid_shape:
+    - 3
+    - 3
+    min_total_samples: 9
+    pose_novelty_area_delta: 0.02
+    pose_novelty_aspect_delta: 0.12
+    pose_novelty_center_distance_ratio: 0.08
+    samples_per_grid: 1
+    stability_frames: 5
+    stability_threshold: 2.0
+    stability_threshold_ratio: 0.05
+cameras:
+  - uri: "rtsp://admin:Nvidia135@10.0.39.98:554/live"
+    codec: "h265"
+    width: 1920
+    height: 1080
+    fps: 25
+capture:
+    buffersize: 1
+    force_resolution: false
+    fourcc: null
+    height: null
+    initial_ready_timeout_s: 10.0
+    latest_frame_read_timeout_s: 0.25
+    reconnect_bad_frame_burst: 30
+    reconnect_sleep_s: 0.5
+    warmup_frames: 12
+    width: null
+distortion_model: plumb_bob
+optimization:
+    detection_interval: 1
+    resize_factor: 0.5
+require_release_ready: false
+undistortion_preview:
+    alpha: 1.0
+    center_principal_point: false
+window_height: 720
+window_name: Industrial Calibration Tool
+window_width: 1280
+workflow:
+    root_dir: outputs/camera_intrinsic
+    save_live_accepted_frames: true
