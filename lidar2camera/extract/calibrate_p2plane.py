@@ -134,7 +134,7 @@ def residuals(x, kept, w_center=12.0):
     return np.concatenate(out)
 
 
-def run():
+def run(save=True):
     K, D, P, objp = load_cfg()
     poses = load_poses(K, D, P, objp)
     print(f"[POSES] {len(poses)} with corners")
@@ -189,18 +189,19 @@ def run():
           f"mean {errs.mean():.1f}px (n={len(errs)})")
 
     Tinv = np.eye(4); Tinv[:3, :3] = R.T; Tinv[:3, 3] = -R.T @ t
-    OUT.mkdir(exist_ok=True)
-    rep = dict(extrinsic_lidar_to_camera=T.tolist(),
-               extrinsic_camera_to_lidar=Tinv.tolist(),
-               point_to_plane_rms_mm=float(np.sqrt((rf**2).mean()) * 1000),
-               board_center_reproj_px_median=float(np.median(errs)),
-               board_center_reproj_px_mean=float(errs.mean()),
-               n_poses=len(kept),
-               kept_poses=[p["name"] for p in kept])
-    yaml.dump(rep, open(OUT / "lidar2camera_extrinsic.yaml", "w"), sort_keys=False)
-    print(f"[SAVED] {OUT/'lidar2camera_extrinsic.yaml'}")
-    save_overlay(kept, rvec, t, K, D)
-    return T
+    if save:
+        OUT.mkdir(exist_ok=True)
+        rep = dict(extrinsic_lidar_to_camera=T.tolist(),
+                   extrinsic_camera_to_lidar=Tinv.tolist(),
+                   point_to_plane_rms_mm=float(np.sqrt((rf**2).mean()) * 1000),
+                   board_center_reproj_px_median=float(np.median(errs)),
+                   board_center_reproj_px_mean=float(errs.mean()),
+                   n_poses=len(kept),
+                   kept_poses=[p["name"] for p in kept])
+        yaml.dump(rep, open(OUT / "lidar2camera_extrinsic.yaml", "w"), sort_keys=False)
+        print(f"[SAVED] {OUT/'lidar2camera_extrinsic.yaml'}")
+        save_overlay(kept, rvec, t, K, D)
+    return T, float(np.median(errs)), len(kept)
 
 
 def save_overlay(kept, rvec, t, K, D):

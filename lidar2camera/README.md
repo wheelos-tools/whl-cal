@@ -130,6 +130,17 @@ Runs the EM match + point-to-plane bundle and writes into
 - `verification_overlay.png` — LiDAR board points (red) and the full cloud
   projected onto the **distorted** image.
 
+**Misaligned camera/LiDAR pairs.** `calibrate_p2plane.py` assumes the camera and
+LiDAR look roughly the same way (a front cam + front lidar, or a side cam + the
+matching side lidar). If they sit at different yaws — and the solve diverges or
+returns an implausible translation (|t| ≳ 0.5 m) — use the auto wrapper, which
+searches the relative yaw and keeps the lowest-reprojection physically-plausible
+result (the bundle still refines full 6-DoF):
+
+```bash
+python3 extract/calibrate_auto.py
+```
+
 ### Step 4 — undistorted overlay (optional)
 
 ```bash
@@ -179,6 +190,7 @@ extract/
   detect_camera.py               step 1  video -> candidates.json
   pair_livox.py                  step 2  pose select + sync -> calibration_data/
   calibrate_p2plane.py           step 3  EM match + point-to-plane bundle
+  calibrate_auto.py              step 3' yaw-search wrapper for misaligned pairs
   overlay_undistort.py           step 4  rectified verification overlay
   experimental/                  superseded stepping-stones (see its README)
 runs/<id>/                       one self-contained capture (git-ignored)

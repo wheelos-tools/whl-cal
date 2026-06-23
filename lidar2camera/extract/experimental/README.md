@@ -13,6 +13,11 @@ kept for reference but are **not** part of the supported pipeline.
 - **`crop_boards.py`** — PnP-bearing-gated board crop that overwrote the PCDs for
   use with `reference_based.py`. The bearing-only gate still caught confounders;
   replaced by the EM matcher inside `calibrate_p2plane.py`.
+- **`auto_init.py`** — RANSAC over (camera centre <-> LiDAR board candidate)
+  correspondences to derive the prior with no axis assumption. Sound in theory,
+  but the board often isn't a reliable candidate in cluttered/oblique side
+  scans, so it found too few inliers. The yaw-search in `calibrate_auto.py`
+  (which scores by the full-bundle reprojection) proved far more robust.
 - **`em_calibrate.py`** — first EM attempt using board *centers* (Kabsch) and
   normal-based rotation. Centers alone span mostly one axis (underconstrained
   rotation) and the sparse LiDAR normals were too noisy; replaced by the
