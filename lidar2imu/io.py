@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+# isort: off
 import json
 from pathlib import Path
 from typing import Any
@@ -26,25 +27,21 @@ from typing import Any
 import numpy as np
 import yaml
 
-from calibration_common.evaluation import (
-    write_acceptance_artifacts,
-    write_paradigm_artifacts,
-    write_table_csv,
-)
+from calibration_common.evaluation import write_acceptance_artifacts
+from calibration_common.evaluation import write_paradigm_artifacts
+from calibration_common.evaluation import write_table_csv
 from lidar2imu.algorithms import normalize_plane, normalize_vector
-from lidar2imu.models import (
-    CalibrationConfig,
-    CalibrationDataset,
-    GroundSample,
-    MotionSample,
-)
+from lidar2imu.models import CalibrationConfig
+from lidar2imu.models import CalibrationDataset
+from lidar2imu.models import GroundSample
+from lidar2imu.models import MotionSample
 from lidar2imu.visualization import build_visualization_artifacts
-from lidar2lidar.extrinsic_io import (
-    build_extrinsics_payload,
-    extrinsics_filename,
-    parse_transform_payload,
-    save_extrinsics_yaml,
-)
+from lidar2lidar.extrinsic_io import build_extrinsics_payload
+from lidar2lidar.extrinsic_io import extrinsics_filename
+from lidar2lidar.extrinsic_io import parse_transform_payload
+from lidar2lidar.extrinsic_io import save_extrinsics_yaml
+
+# isort: on
 
 
 def _load_payload(path: str) -> dict[str, Any]:
@@ -66,6 +63,152 @@ def _vector_from_payload(payload: Any, key: str) -> np.ndarray:
 def _sample_timestamp(payload: dict, key: str, fallback: int = 0) -> int:
     value = payload.get(key, fallback)
     return int(value if value is not None else fallback)
+
+
+def _motion_sample_from_payload(raw_sample: dict) -> MotionSample:
+    if "imu_delta" not in raw_sample or "lidar_delta" not in raw_sample:
+        raise ValueError("Each motion sample must contain imu_delta and lidar_delta.")
+    imu_delta, _, _, _ = parse_transform_payload(raw_sample["imu_delta"])
+    lidar_delta, _, _, _ = parse_transform_payload(raw_sample["lidar_delta"])
+    sample_metadata = dict(raw_sample.get("metadata", {}))
+    for reserved_key in (
+        "start_timestamp_ns",
+        "end_timestamp_ns",
+        "imu_delta",
+        "lidar_delta",
+        "weight",
+        "sync_dt_ms",
+    ):
+        sample_metadata.pop(reserved_key, None)
+    return MotionSample(
+        start_timestamp_ns=_sample_timestamp(raw_sample, "start_timestamp_ns"),
+        end_timestamp_ns=_sample_timestamp(raw_sample, "end_timestamp_ns"),
+        imu_delta_rotation=np.asarray(imu_delta[:3, :3], dtype=float),
+        imu_delta_translation=np.asarray(imu_delta[:3, 3], dtype=float),
+        lidar_delta_rotation=np.asarray(lidar_delta[:3, :3], dtype=float),
+        lidar_delta_translation=np.asarray(lidar_delta[:3, 3], dtype=float),
+        weight=float(raw_sample.get("weight", 1.0)),
+        sync_dt_ms=(
+            float(raw_sample["sync_dt_ms"])
+            if raw_sample.get("sync_dt_ms") is not None
+            else None
+        ),
+        metadata=sample_metadata,
+    )
+
+
+def _motion_sample_from_review_candidate(candidate: dict[str, Any]) -> MotionSample:
+    return _motion_sample_from_payload(
+        {
+            "start_timestamp_ns": candidate["start_timestamp_ns"],
+            "end_timestamp_ns": candidate["end_timestamp_ns"],
+            "imu_delta": candidate["imu_delta"],
+            "lidar_delta": candidate["lidar_delta"],
+            "weight": 1.0,
+            "sync_dt_ms": candidate.get("sync_dt_ms"),
+            "metadata": {
+                "record_path_start": candidate.get("record_path_start"),
+                "record_path_end": candidate.get("record_path_end"),
+                "lidar_topic": candidate.get("lidar_topic"),
+                "pose_topic": candidate.get("pose_topic"),
+                "window_id": (
+                    None
+                    if candidate.get("window_id") is None
+                    else int(candidate["window_id"])
+                ),
+                "motion_registration_mode": candidate.get("motion_registration_mode"),
+                "frame_stride": (
+                    None
+                    if candidate.get("frame_stride") is None
+                    else int(candidate["frame_stride"])
+                ),
+                "pose_rotation_deg": float(candidate.get("pose_rotation_deg", 0.0)),
+                "pose_translation_m": float(candidate.get("pose_translation_m", 0.0)),
+                "information_score": float(candidate.get("information_score", 0.0)),
+                "probabilistic_information_score": candidate.get(
+                    "probabilistic_information_score"
+                ),
+                "probabilistic_window_score": candidate.get(
+                    "probabilistic_window_score"
+                ),
+                "information_uncertainty_scale": candidate.get(
+                    "information_uncertainty_scale"
+                ),
+                "information_rotation_confidence": candidate.get(
+                    "information_rotation_confidence"
+                ),
+                "information_translation_confidence": candidate.get(
+                    "information_translation_confidence"
+                ),
+                "observability_segment_id": candidate.get("observability_segment_id"),
+                "observability_combined_min_eigenvalue": candidate.get(
+                    "observability_combined_min_eigenvalue"
+                ),
+                "observability_combined_condition_number": candidate.get(
+                    "observability_combined_condition_number"
+                ),
+                "observability_min_eigenvalue_gain": candidate.get(
+                    "observability_min_eigenvalue_gain"
+                ),
+                "observability_min_eigenvalue_gain_ratio": candidate.get(
+                    "observability_min_eigenvalue_gain_ratio"
+                ),
+                "observability_condition_worsening_ratio": candidate.get(
+                    "observability_condition_worsening_ratio"
+                ),
+                "observability_capacity_weight": candidate.get(
+                    "observability_capacity_weight"
+                ),
+                "imu_signed_yaw_deg": float(candidate.get("imu_signed_yaw_deg", 0.0)),
+                "imu_translation_heading_deg": candidate.get(
+                    "imu_translation_heading_deg"
+                ),
+                "imu_preintegration_delta_translation_m": candidate.get(
+                    "imu_preintegration_delta_translation_m"
+                ),
+                "imu_preintegration_delta_velocity_mps": candidate.get(
+                    "imu_preintegration_delta_velocity_mps"
+                ),
+                "imu_preintegration_confidence": candidate.get(
+                    "imu_preintegration_confidence"
+                ),
+                "imu_preintegration_sample_count": candidate.get(
+                    "imu_preintegration_sample_count"
+                ),
+                "imu_preintegration_valid_step_count": candidate.get(
+                    "imu_preintegration_valid_step_count"
+                ),
+                "imu_preintegration_duration_sec": candidate.get(
+                    "imu_preintegration_duration_sec"
+                ),
+                "imu_preintegration_mean_specific_accel_mps2": candidate.get(
+                    "imu_preintegration_mean_specific_accel_mps2"
+                ),
+                "imu_preintegration_source": candidate.get("imu_preintegration_source"),
+                "registration_fitness": float(
+                    candidate.get("registration_fitness", 0.0)
+                ),
+                "registration_inlier_rmse": float(
+                    candidate.get("registration_inlier_rmse", 0.0)
+                ),
+                "registered_overlap_quality_score": candidate.get(
+                    "registered_overlap_quality_score"
+                ),
+                "registered_overlap_within_0p4m_ratio": candidate.get(
+                    "registered_overlap_within_0p4m_ratio"
+                ),
+                "registered_overlap_nn_mean_m": candidate.get(
+                    "registered_overlap_nn_mean_m"
+                ),
+                "global_selection_score": float(
+                    candidate.get("global_selection_score") or 0.0
+                ),
+                "selected_for_calibration": bool(
+                    candidate.get("selected_for_calibration", False)
+                ),
+            },
+        }
+    )
 
 
 def load_dataset(
@@ -125,7 +268,8 @@ def load_dataset(
             offset_value = raw_sample["lidar_plane"].get("offset")
         if normal_payload is None or offset_value is None:
             raise ValueError(
-                "Each ground sample must contain lidar_plane_normal and lidar_plane_offset."
+                "Each ground sample must contain lidar_plane_normal and "
+                "lidar_plane_offset."
             )
         normal, offset = normalize_plane(
             _vector_from_payload(normal_payload, "normal"), float(offset_value)
@@ -168,39 +312,13 @@ def load_dataset(
 
     motion_samples = []
     for raw_sample in payload.get("motion_samples", []):
-        if "imu_delta" not in raw_sample or "lidar_delta" not in raw_sample:
-            raise ValueError(
-                "Each motion sample must contain imu_delta and lidar_delta."
-            )
-        imu_delta, _, _, _ = parse_transform_payload(raw_sample["imu_delta"])
-        lidar_delta, _, _, _ = parse_transform_payload(raw_sample["lidar_delta"])
-        sample_metadata = dict(raw_sample.get("metadata", {}))
-        for reserved_key in (
-            "start_timestamp_ns",
-            "end_timestamp_ns",
-            "imu_delta",
-            "lidar_delta",
-            "weight",
-            "sync_dt_ms",
-        ):
-            sample_metadata.pop(reserved_key, None)
-        motion_samples.append(
-            MotionSample(
-                start_timestamp_ns=_sample_timestamp(raw_sample, "start_timestamp_ns"),
-                end_timestamp_ns=_sample_timestamp(raw_sample, "end_timestamp_ns"),
-                imu_delta_rotation=np.asarray(imu_delta[:3, :3], dtype=float),
-                imu_delta_translation=np.asarray(imu_delta[:3, 3], dtype=float),
-                lidar_delta_rotation=np.asarray(lidar_delta[:3, :3], dtype=float),
-                lidar_delta_translation=np.asarray(lidar_delta[:3, 3], dtype=float),
-                weight=float(raw_sample.get("weight", 1.0)),
-                sync_dt_ms=(
-                    float(raw_sample["sync_dt_ms"])
-                    if raw_sample.get("sync_dt_ms") is not None
-                    else None
-                ),
-                metadata=sample_metadata,
-            )
-        )
+        motion_samples.append(_motion_sample_from_payload(raw_sample))
+
+    motion_candidate_pool = []
+    for candidate in payload.get("review_motion_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        motion_candidate_pool.append(_motion_sample_from_review_candidate(candidate))
 
     raw_config = payload.get("config", {})
     config = CalibrationConfig(
@@ -218,6 +336,7 @@ def load_dataset(
         initial_transform=initial_transform,
         extraction_transform=extraction_transform,
         reference_transform=reference_transform,
+        motion_candidate_pool=motion_candidate_pool,
         metadata=dataset_metadata,
     )
     return dataset, config, payload
@@ -253,6 +372,7 @@ def write_outputs(
     metrics_output: dict,
     algorithm_report: dict,
     evaluation_report: dict,
+    raw_payload: dict | None = None,
 ) -> dict:
     initial_guess_dir, calibrated_dir, diagnostics_dir = prepare_output_layout(
         output_dir
@@ -318,7 +438,19 @@ def write_outputs(
             diagnostics_dir / "holdout_motion_residuals.csv",
             evaluation_report.get("holdout_motion_per_sample", []),
         ),
+        "cloud_thickness_window_frames_csv": write_table_csv(
+            diagnostics_dir / "cloud_thickness_window_frames.csv",
+            evaluation_report.get("cloud_thickness_window_frames", []),
+        ),
     }
+    solver_window_ids = None
+    stages = algorithm_report.get("stages", {})
+    if isinstance(stages, dict):
+        planar_stage = stages.get("planar_stage", {})
+        if isinstance(planar_stage, dict):
+            raw_window_ids = planar_stage.get("used_window_ids")
+            if isinstance(raw_window_ids, list):
+                solver_window_ids = [int(window_id) for window_id in raw_window_ids]
     visualization_artifacts = build_visualization_artifacts(
         diagnostics_dir,
         dataset=dataset,
@@ -330,6 +462,7 @@ def write_outputs(
         motion_rows=evaluation_report.get("motion_per_sample", []),
         holdout_motion_rows=evaluation_report.get("holdout_motion_per_sample", []),
         observability=evaluation_report.get("observability", {}),
+        raw_payload=raw_payload or {},
         artifact_links={
             "acceptance_report": acceptance_artifacts["acceptance_report"],
             "metrics": str(output_dir / "metrics.yaml"),
@@ -340,7 +473,11 @@ def write_outputs(
             "holdout_motion_residuals_csv": table_artifacts[
                 "holdout_motion_residuals_csv"
             ],
+            "cloud_thickness_window_frames_csv": table_artifacts[
+                "cloud_thickness_window_frames_csv"
+            ],
         },
+        solver_window_ids=solver_window_ids,
     )
     standardized_data = {
         "schema_version": 1,
@@ -385,6 +522,7 @@ def write_outputs(
                 table_artifacts["ground_residuals_csv"],
                 table_artifacts["motion_residuals_csv"],
                 table_artifacts["holdout_motion_residuals_csv"],
+                table_artifacts["cloud_thickness_window_frames_csv"],
             ],
             "visual_artifacts": [
                 visualization_artifacts["review_report"],
@@ -424,6 +562,16 @@ def write_outputs(
                     else []
                 ),
                 *(
+                    [visualization_artifacts["registration_review_yaml"]]
+                    if "registration_review_yaml" in visualization_artifacts
+                    else []
+                ),
+                *(
+                    [visualization_artifacts["registration_review_csv"]]
+                    if "registration_review_csv" in visualization_artifacts
+                    else []
+                ),
+                *(
                     [visualization_artifacts["yaw_cost_scan"]]
                     if "yaw_cost_scan" in visualization_artifacts
                     else []
@@ -442,12 +590,22 @@ def write_outputs(
                 (
                     "Inspect trajectory_overlay.svg and "
                     "trajectory_position_gap_plot.svg to compare IMU and LiDAR "
-                    "odometry consistency."
+                    "BEV review trajectories across the sequence."
                 ),
                 (
                     "Open trajectory_overlay_cloud.ply in CloudCompare/Open3D to "
-                    "inspect stitched keyframe geometry when the raw record is "
-                    "still available."
+                    "inspect actual registered-object overlap: gray target "
+                    "geometry, blue IMU-predicted source geometry, and red "
+                    "LiDAR-registered source geometry."
+                ),
+                (
+                    "Inspect registration_review.yaml or registration_review.csv "
+                    "for per-window overlap ratios and nearest-neighbor tails."
+                ),
+                (
+                    "Inspect cloud_thickness_window_frames.csv and "
+                    "metrics.yaml fine_metrics.cloud_thickness for the holdout "
+                    "5s straight accel/brake stitched-cloud thickness gate."
                 ),
                 (
                     "Inspect yaw_cost_scan.svg for a sharp, well-supported yaw "
@@ -495,6 +653,9 @@ def write_outputs(
                 "holdout_motion_residuals_csv": table_artifacts[
                     "holdout_motion_residuals_csv"
                 ],
+                "cloud_thickness_window_frames_csv": table_artifacts[
+                    "cloud_thickness_window_frames_csv"
+                ],
                 "ground_residuals_plot": visualization_artifacts[
                     "ground_residuals_plot"
                 ],
@@ -524,6 +685,12 @@ def write_outputs(
                 ),
                 "trajectory_overlay_cloud": visualization_artifacts.get(
                     "trajectory_overlay_cloud"
+                ),
+                "registration_review_yaml": visualization_artifacts.get(
+                    "registration_review_yaml"
+                ),
+                "registration_review_csv": visualization_artifacts.get(
+                    "registration_review_csv"
                 ),
                 "holdout_motion_residuals_plot": visualization_artifacts.get(
                     "holdout_motion_residuals_plot"

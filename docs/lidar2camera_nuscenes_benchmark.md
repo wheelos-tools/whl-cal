@@ -27,6 +27,8 @@ Current in-repo methods:
 | --- | --- |
 | `identity` | baseline that keeps the perturbed input unchanged |
 | `edge_refine` | experimental targetless edge-based refinement path |
+| `direct_visual_refine` | experimental targetless direct-visual (NID-style) local refinement path |
+| `sensorscalib_line_refine` | experimental SensorsCalibration-style line-feature refinement path |
 | `silhouette_refine` | experimental targetless structure/silhouette edge refinement path |
 | `batch_hybrid_refine` | experimental multi-frame shared-extrinsic consensus search |
 | `oracle_gt` | sanity path that returns nuScenes ground truth exactly |
@@ -34,6 +36,10 @@ Current in-repo methods:
 The benchmark is intentionally conservative:
 
 - `edge_refine` is allowed to optimize only inside a bounded local search region
+- `direct_visual_refine` uses image↔projected-LiDAR direct information objectives
+  (NID-style) inside the same bounded local search region
+- `sensorscalib_line_refine` uses line-feature alignment inspired by
+  SensorsCalibration CRLF-style road-scene calibration
 - `silhouette_refine` adds LiDAR projected structure/silhouette edge comparison
 - `batch_hybrid_refine` uses multiple same-camera frames with a shared extrinsic
   update, a multistart coarse-search stage, and a coordinate-consensus refinement
@@ -118,6 +124,25 @@ the perturbed initial value?
 | `--visualization-max-range-m` | independent dense point range used only for visual overlays |
 | `--visualization-max-points` | maximum dense points used only for visual overlays |
 | `--overlay-point-radius-px` | rendered point radius for depth-colored overlays |
+| `--methods` | include `direct_visual_refine` to evaluate the new direct-visual candidate |
+
+## Split-directory comparison run (baseline vs SensorsCalibration-style)
+
+If you want two clean output directories for side-by-side review:
+
+```bash
+lidar2camera-nuscenes-split-benchmark \
+  --info-path /mnt/synology/nuScenes/OpenDataLab___nuScenes/raw/Trainval/train/nuscenes_infos_val.pkl \
+  --camera-names CAM_FRONT \
+  --sample-limit 4 \
+  --output-dir outputs/lidar2camera/nuscenes_split_benchmark
+```
+
+This writes:
+
+- `outputs/lidar2camera/nuscenes_split_benchmark/baseline_algorithms/`
+- `outputs/lidar2camera/nuscenes_split_benchmark/sensorscalibration_algorithms/`
+- `outputs/lidar2camera/nuscenes_split_benchmark/split_compare_summary.yaml`
 
 ## Outputs
 

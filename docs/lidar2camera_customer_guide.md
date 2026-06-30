@@ -172,8 +172,18 @@ lidar2camera-nuscenes-benchmark \
   --info-path /mnt/synology/nuScenes/OpenDataLab___nuScenes/raw/Trainval/train/nuscenes_infos_val.pkl \
   --camera-names CAM_FRONT \
   --sample-limit 8 \
-  --methods identity,edge_refine,silhouette_refine,batch_hybrid_refine,oracle_gt \
+  --methods identity,edge_refine,direct_visual_refine,silhouette_refine,batch_hybrid_refine,oracle_gt \
   --output-dir outputs/lidar2camera/nuscenes_benchmark
+```
+
+需要把“之前算法”和“SensorsCalibration 风格算法”拆成两个目录时，直接运行：
+
+```bash
+lidar2camera-nuscenes-split-benchmark \
+  --info-path /mnt/synology/nuScenes/OpenDataLab___nuScenes/raw/Trainval/train/nuscenes_infos_val.pkl \
+  --camera-names CAM_FRONT \
+  --sample-limit 4 \
+  --output-dir outputs/lidar2camera/nuscenes_split_benchmark
 ```
 
 You can also audit initial-value sensitivity explicitly:

@@ -59,6 +59,7 @@ class CalibrationDataset:
     initial_transform: np.ndarray
     extraction_transform: np.ndarray | None = None
     reference_transform: np.ndarray | None = None
+    motion_candidate_pool: list[MotionSample] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -68,7 +69,22 @@ class CalibrationConfig:
     min_motion_samples: int = 3
     min_motion_rotation_deg: float = 1.0
     loss: str = "huber"
+    solver_family: str = "baseline"
     planar_motion_policy: str = "auto"
+    probabilistic_weight_min: float = 0.25
+    probabilistic_weight_max: float = 4.0
+    probabilistic_observability_weight_min: float = 0.25
+    probabilistic_observability_weight_max: float = 3.0
+    imu_preintegration_translation_weight: float = 0.0
+    imu_preintegration_translation_scale_m: float = 0.08
+    imu_preintegration_min_confidence: float = 0.1
+    nhc_prior_mode: str = "off"
+    nhc_prior_weight: float = 1.0
+    nhc_prior_lateral_scale_m: float = 0.08
+    nhc_prior_vertical_scale_m: float = 0.05
+    nhc_prior_min_forward_translation_m: float = 0.1
+    solver_screen_min_registration_fitness: float | None = None
+    solver_screen_max_registration_inlier_rmse_m: float | None = None
     ground_normal_scale_rad: float = 0.02
     ground_height_scale_m: float = 0.05
     motion_rotation_scale_rad: float = 0.02
@@ -76,7 +92,8 @@ class CalibrationConfig:
     metrics_warning_rotation_deg: float = 0.3
     metrics_warning_translation_m: float = 0.05
     metrics_warning_height_m: float = 0.03
-    metrics_warning_condition_number: float = 1e4
+    metrics_fisher_min_eigenvalue: float = 1.0
+    metrics_fisher_max_condition_number: float = 1e4
     metrics_warning_registration_fitness: float = 0.55
     metrics_warning_registration_inlier_rmse_m: float = 0.25
     metrics_min_turn_count_per_direction: int = 1
@@ -108,3 +125,8 @@ class CalibrationConfig:
     metrics_holdout_max_registration_inlier_rmse_ratio: float = 1.5
     metrics_repeatability_warning_translation_m: float = 0.05
     metrics_repeatability_warning_rotation_deg: float = 0.3
+    metrics_cloud_thickness_target_duration_sec: float = 5.0
+    metrics_cloud_thickness_max_frames: int = 24
+    metrics_cloud_thickness_voxel_size_m: float = 0.2
+    metrics_cloud_thickness_production_m: float = 0.03
+    metrics_cloud_thickness_warning_m: float = 0.05

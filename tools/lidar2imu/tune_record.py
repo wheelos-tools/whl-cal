@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+# isort: off
 import argparse
 import csv
 import itertools
@@ -37,9 +38,9 @@ if REPO_ROOT not in sys.path:
 from lidar2imu.io import load_dataset, write_outputs  # noqa: E402
 from lidar2imu.models import CalibrationConfig  # noqa: E402
 from lidar2imu.pipeline import run_calibration  # noqa: E402
-from lidar2imu.record_converter import (  # noqa: E402
-    convert_record_to_standardized_samples,
-)
+from lidar2imu import record_converter as _record_converter  # noqa: E402
+
+# isort: on
 
 
 def _parse_csv_ints(value: str) -> list[int]:
@@ -63,6 +64,7 @@ def _trial_name(
     motion_frame_stride: int,
     min_registration_fitness: float,
     min_motion_rotation_deg: float,
+    solver_family: str,
     planar_motion_policy: str,
 ) -> str:
     return (
@@ -70,6 +72,7 @@ def _trial_name(
         f"__stride_{motion_frame_stride}"
         f"__fitness_{_slugify_float(min_registration_fitness)}"
         f"__minrot_{_slugify_float(min_motion_rotation_deg)}"
+        f"__solver_{solver_family}"
         f"__policy_{planar_motion_policy}"
     )
 
@@ -114,6 +117,7 @@ def _flatten_result(result: dict) -> dict:
         "motion_frame_stride": result.get("motion_frame_stride"),
         "min_registration_fitness": result.get("min_registration_fitness"),
         "min_motion_rotation_deg": result.get("min_motion_rotation_deg"),
+        "solver_family": result.get("solver_family"),
         "planar_motion_policy": result.get("planar_motion_policy"),
         "ground_selected": conversion.get("ground_selected"),
         "motion_selected": conversion.get("motion_selected"),
@@ -136,7 +140,7 @@ def _flatten_result(result: dict) -> dict:
         "left_turn_count": coarse.get("left_turn_count"),
         "right_turn_count": coarse.get("right_turn_count"),
         "turn_balance_ratio": coarse.get("turn_balance_ratio"),
-        "joint_condition_number": coarse.get("joint_condition_number"),
+        "fisher_condition_number": coarse.get("fisher_condition_number"),
         "final_x": translation.get("x"),
         "final_y": translation.get("y"),
         "final_z": translation.get("z"),
@@ -179,6 +183,7 @@ def _run_trial(
     motion_frame_stride: int,
     min_registration_fitness: float,
     min_motion_rotation_deg: float,
+    solver_family: str,
     planar_motion_policy: str,
 ) -> dict:
     trial_name = _trial_name(
@@ -186,6 +191,7 @@ def _run_trial(
         motion_frame_stride=motion_frame_stride,
         min_registration_fitness=min_registration_fitness,
         min_motion_rotation_deg=min_motion_rotation_deg,
+        solver_family=solver_family,
         planar_motion_policy=planar_motion_policy,
     )
     trial_output_dir = Path(args.output_dir) / trial_name
@@ -197,35 +203,40 @@ def _run_trial(
         "motion_frame_stride": motion_frame_stride,
         "min_registration_fitness": min_registration_fitness,
         "min_motion_rotation_deg": min_motion_rotation_deg,
+        "solver_family": solver_family,
         "planar_motion_policy": planar_motion_policy,
         "status": "conversion_failed",
     }
 
     try:
-        sample_path, diagnostics = convert_record_to_standardized_samples(
-            record_path=args.record_path,
-            output_dir=str(trial_output_dir),
-            lidar_topic=args.lidar_topic,
-            pose_topic=args.pose_topic,
-            imu_topic=args.imu_topic,
-            parent_frame=args.parent_frame,
-            child_frame=args.child_frame,
-            initial_transform_path=args.initial_transform,
-            identity_initial_transform=args.identity_initial_transform,
-            gravity_source=gravity_source,
-            ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
-            motion_pose_sync_threshold_ms=args.motion_pose_sync_threshold_ms,
-            imu_gravity_window_ms=args.imu_gravity_window_ms,
-            max_ground_samples=args.max_ground_samples,
-            max_motion_samples=args.max_motion_samples,
-            motion_frame_stride=motion_frame_stride,
-            plane_dist_thresh=args.plane_dist_thresh,
-            plane_normal_thresh_deg=args.plane_normal_thresh_deg,
-            registration_voxel_size=args.registration_voxel_size,
-            min_registration_fitness=min_registration_fitness,
-            calibration_loss=args.loss,
-            calibration_motion_rotation_deg=min_motion_rotation_deg,
-            calibration_planar_motion_policy=planar_motion_policy,
+        sample_path, diagnostics = (
+            _record_converter.convert_record_to_standardized_samples(
+                record_path=args.record_path,
+                output_dir=str(trial_output_dir),
+                lidar_topic=args.lidar_topic,
+                pose_topic=args.pose_topic,
+                imu_topic=args.imu_topic,
+                parent_frame=args.parent_frame,
+                child_frame=args.child_frame,
+                initial_transform_path=args.initial_transform,
+                identity_initial_transform=args.identity_initial_transform,
+                gravity_source=gravity_source,
+                ground_pose_sync_threshold_ms=args.ground_pose_sync_threshold_ms,
+                motion_pose_sync_threshold_ms=args.motion_pose_sync_threshold_ms,
+                imu_gravity_window_ms=args.imu_gravity_window_ms,
+                max_ground_samples=args.max_ground_samples,
+                max_motion_samples=args.max_motion_samples,
+                motion_frame_stride=motion_frame_stride,
+                motion_max_candidates_per_window=3,
+                plane_dist_thresh=args.plane_dist_thresh,
+                plane_normal_thresh_deg=args.plane_normal_thresh_deg,
+                registration_voxel_size=args.registration_voxel_size,
+                min_registration_fitness=min_registration_fitness,
+                calibration_loss=args.loss,
+                calibration_motion_rotation_deg=min_motion_rotation_deg,
+                calibration_solver_family=solver_family,
+                calibration_planar_motion_policy=planar_motion_policy,
+            )
         )
         result["conversion_summary"] = diagnostics.get("summary", {})
     except Exception as exc:
@@ -243,6 +254,7 @@ def _run_trial(
                 **config.__dict__,
                 "loss": args.loss,
                 "min_motion_rotation_deg": min_motion_rotation_deg,
+                "solver_family": solver_family,
                 "planar_motion_policy": planar_motion_policy,
             }
         )
@@ -321,7 +333,10 @@ def main() -> None:
     parser.add_argument(
         "--initial-transform",
         default=None,
-        help="Optional extrinsics YAML/JSON used as the initial lidar->parent transform.",
+        help=(
+            "Optional extrinsics YAML/JSON used as the initial lidar->parent "
+            "transform."
+        ),
     )
     parser.add_argument(
         "--identity-initial-transform",
@@ -347,6 +362,14 @@ def main() -> None:
         "--min-motion-rotation-values",
         default="1.0",
         help="Comma-separated minimum motion rotation thresholds to sweep.",
+    )
+    parser.add_argument(
+        "--solver-families",
+        default="baseline",
+        help=(
+            "Comma-separated solver families to sweep, e.g. "
+            "baseline,gril_staged,gril_prob,gril_prob_nhc."
+        ),
     )
     parser.add_argument(
         "--planar-motion-policies",
@@ -415,6 +438,7 @@ def main() -> None:
         args.min_registration_fitness_values
     )
     min_motion_rotation_values = _parse_csv_floats(args.min_motion_rotation_values)
+    solver_families = _parse_csv_strings(args.solver_families)
     planar_motion_policies = _parse_csv_strings(args.planar_motion_policies)
 
     results = []
@@ -423,12 +447,14 @@ def main() -> None:
         motion_frame_stride,
         min_registration_fitness,
         min_motion_rotation_deg,
+        solver_family,
         planar_motion_policy,
     ) in itertools.product(
         gravity_sources,
         motion_frame_strides,
         min_registration_fitness_values,
         min_motion_rotation_values,
+        solver_families,
         planar_motion_policies,
     ):
         trial_result = _run_trial(
@@ -437,6 +463,7 @@ def main() -> None:
             motion_frame_stride=motion_frame_stride,
             min_registration_fitness=min_registration_fitness,
             min_motion_rotation_deg=min_motion_rotation_deg,
+            solver_family=solver_family,
             planar_motion_policy=planar_motion_policy,
         )
         results.append(trial_result)
@@ -456,6 +483,7 @@ def main() -> None:
             "motion_frame_strides": motion_frame_strides,
             "min_registration_fitness_values": min_registration_fitness_values,
             "min_motion_rotation_values": min_motion_rotation_values,
+            "solver_families": solver_families,
             "planar_motion_policies": planar_motion_policies,
         },
         "results": ranked_results,

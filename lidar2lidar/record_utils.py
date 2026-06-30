@@ -24,17 +24,15 @@ import copy
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 
-from lidar2lidar.extrinsic_io import (
-    extrinsics_filename,
-    load_extrinsics_file,
-    save_extrinsics_yaml,
-)
+from lidar2lidar.extrinsic_io import (extrinsics_filename,
+                                      load_extrinsics_file,
+                                      save_extrinsics_yaml)
 from lidar2lidar.record_adapter import Record, ensure_record_available
 
 
@@ -60,6 +58,17 @@ class TransformEdge:
 def discover_record_files(input_path: str) -> list[str]:
     path = Path(input_path)
     if path.is_file():
+        if path.suffix and path.suffix[1:].isdigit():
+            family_prefix = path.stem
+            record_files = sorted(
+                str(child)
+                for child in path.parent.iterdir()
+                if child.is_file()
+                and child.name.startswith(f"{family_prefix}.")
+                and child.name[len(family_prefix) + 1 :].isdigit()
+            )
+            if record_files:
+                return record_files
         return [str(path)]
     if not path.is_dir():
         raise FileNotFoundError(f"Record path not found: {input_path}")
@@ -100,6 +109,40 @@ def resolve_topic_frame_id(topic: str, frame_id: str) -> str:
     if frame_id:
         return frame_id
     return topic_sensor_name(topic)
+
+
+GPS_TO_UNIX_OFFSET_NS = 315964782_000_000_000
+
+
+def _timestamp_field_to_ns(value: Any) -> int | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric) or numeric <= 0.0:
+        return None
+    return int(round(numeric * 1e9))
+
+
+def message_timestamp_ns(topic: str, msg: Any, fallback_timestamp_ns: int) -> int:
+    header = getattr(msg, "header", None)
+    measurement_timestamp_ns = _timestamp_field_to_ns(
+        getattr(msg, "measurement_time", None)
+    )
+    header_timestamp_ns = _timestamp_field_to_ns(getattr(header, "timestamp_sec", None))
+
+    if topic in {
+        "/apollo/sensor/gnss/best_pose",
+        "/apollo/sensor/gnss/heading",
+    }:
+        if measurement_timestamp_ns is not None:
+            return measurement_timestamp_ns + GPS_TO_UNIX_OFFSET_NS
+
+    if measurement_timestamp_ns is not None:
+        return measurement_timestamp_ns
+    if header_timestamp_ns is not None:
+        return header_timestamp_ns
+    return int(fallback_timestamp_ns)
 
 
 def get_topic_frame_ids(
@@ -145,11 +188,14 @@ def collect_pointcloud_metadata(
                     channel,
                     getattr(header, "frame_id", ""),
                 )
+                canonical_timestamp_ns = message_timestamp_ns(
+                    channel, msg, int(timestamp_ns)
+                )
                 metadata[channel].append(
                     PointCloudMeta(
                         topic=channel,
                         frame_id=frame_id,
-                        timestamp_ns=int(timestamp_ns),
+                        timestamp_ns=int(canonical_timestamp_ns),
                         record_path=record_file,
                     )
                 )
@@ -160,6 +206,66 @@ def collect_pointcloud_metadata(
     for metas in metadata.values():
         metas.sort(key=lambda item: item.timestamp_ns)
     return metadata
+
+
+def prefetch_pointcloud_cache(
+    metas: Iterable[PointCloudMeta],
+) -> dict[tuple[str, int], o3d.geometry.PointCloud]:
+    """Load required point clouds with one pass per (record_path, topic).
+
+    This avoids repeatedly reopening and rescanning long record files for each
+    point cloud query.
+    """
+    ensure_record_available()
+    cache: dict[tuple[str, int], o3d.geometry.PointCloud] = {}
+    pending_by_record_topic: dict[tuple[str, str], set[int]] = defaultdict(set)
+
+    for meta in metas:
+        cache_key = (str(meta.topic), int(meta.timestamp_ns))
+        if cache_key in cache:
+            continue
+        if meta.artifact_path:
+            artifact_path = Path(meta.artifact_path)
+            if artifact_path.exists():
+                cloud = o3d.io.read_point_cloud(str(artifact_path))
+                if cloud.is_empty():
+                    raise RuntimeError(
+                        f"Cached point cloud at {artifact_path} is empty or unreadable."
+                    )
+                cache[cache_key] = cloud
+                continue
+        pending_by_record_topic[(str(meta.record_path), str(meta.topic))].add(
+            int(meta.timestamp_ns)
+        )
+
+    for (record_path, topic), pending_timestamps in pending_by_record_topic.items():
+        if not pending_timestamps:
+            continue
+        with Record(record_path) as record:
+            for channel, msg, timestamp_ns in record.read_messages(topics=[topic]):
+                if channel != topic:
+                    continue
+                raw_timestamp_ns = int(timestamp_ns)
+                canonical_timestamp_ns = message_timestamp_ns(
+                    channel, msg, raw_timestamp_ns
+                )
+                if (
+                    canonical_timestamp_ns not in pending_timestamps
+                    and raw_timestamp_ns not in pending_timestamps
+                ):
+                    continue
+
+                cloud = pointcloud_message_to_open3d(msg)
+                if canonical_timestamp_ns in pending_timestamps:
+                    cache[(str(topic), int(canonical_timestamp_ns))] = cloud
+                    pending_timestamps.discard(canonical_timestamp_ns)
+                if raw_timestamp_ns in pending_timestamps:
+                    cache[(str(topic), int(raw_timestamp_ns))] = cloud
+                    pending_timestamps.discard(raw_timestamp_ns)
+                if not pending_timestamps:
+                    break
+
+    return cache
 
 
 def pointcloud_message_to_open3d(msg) -> o3d.geometry.PointCloud:
@@ -193,10 +299,15 @@ def load_pointcloud_from_meta(meta: PointCloudMeta) -> o3d.geometry.PointCloud:
     ensure_record_available()
     with Record(meta.record_path) as record:
         for channel, msg, timestamp_ns in record.read_messages(topics=[meta.topic]):
-            if channel == meta.topic and int(timestamp_ns) == meta.timestamp_ns:
+            message_timestamp = message_timestamp_ns(channel, msg, int(timestamp_ns))
+            if channel == meta.topic and (
+                int(timestamp_ns) == meta.timestamp_ns
+                or message_timestamp == meta.timestamp_ns
+            ):
                 return pointcloud_message_to_open3d(msg)
     raise RuntimeError(
-        f"Failed to reload point cloud from {meta.record_path} topic {meta.topic} at {meta.timestamp_ns}."
+        "Failed to reload point cloud from "
+        f"{meta.record_path} topic {meta.topic} at {meta.timestamp_ns}."
     )
 
 
@@ -425,7 +536,8 @@ def render_tf_tree(edges: Iterable[TransformEdge]) -> str:
     ):
         kind = "static" if edge.is_static else "dynamic"
         lines.append(
-            f"- [{kind}] {edge.parent_frame} -> {edge.child_frame} ({edge.source_topic})"
+            f"- [{kind}] {edge.parent_frame} -> "
+            f"{edge.child_frame} ({edge.source_topic})"
         )
     return "\n".join(lines)
 
