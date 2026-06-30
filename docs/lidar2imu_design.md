@@ -1,7 +1,7 @@
 ---
 audience: dev
 stability: stable
-P26-04-27
+P26-06-18
 ---
 
 
@@ -39,6 +39,8 @@ Main files:
 - `lidar2imu/cli.py`
 - `lidar2imu/pipeline.py`
 - `lidar2imu/algorithms.py`
+- `lidar2imu/solvers/`
+- `lidar2imu/evaluation/`
 - `lidar2imu/metrics.py`
 - `lidar2imu/io.py`
 
@@ -47,9 +49,40 @@ Main files:
 Builds standardized samples from Apollo record data, then optionally runs the
 solver.
 
-Main file:
+Main entrypoint:
 
 - `lidar2imu/record_converter.py`
+
+Supporting extraction modules:
+
+- `lidar2imu/extraction/timing.py`
+- `lidar2imu/extraction/ground.py`
+- `lidar2imu/extraction/motion_candidates.py`
+- `lidar2imu/extraction/motion_windows.py`
+- `lidar2imu/extraction/observability_screening.py`
+
+Supporting mapping / review modules:
+
+- `lidar2imu/mapping/submaps.py`
+- `lidar2imu/review/registration_objects.py`
+- `lidar2imu/review/front_end.py`
+- `lidar2imu/review/trajectory.py`
+- `lidar2imu/review/charts.py`
+- `lidar2imu/review/report.py`
+- `lidar2imu/review/io_utils.py`
+
+Supporting solver / evaluation modules:
+
+- `lidar2imu/solvers/ground.py`
+- `lidar2imu/solvers/planar.py`
+- `lidar2imu/solvers/joint.py`
+- `lidar2imu/solvers/robustness.py`
+- `lidar2imu/solvers/dataset_split.py`
+- `lidar2imu/evaluation/diagnostics.py`
+- `lidar2imu/evaluation/consistency.py`
+- `lidar2imu/evaluation/holdout.py`
+- `lidar2imu/evaluation/assessment.py`
+- `lidar2imu/evaluation/builder.py`
 
 The converter now supports two extraction inputs:
 
@@ -88,13 +121,66 @@ The solver consumes:
 
 The converter writes this schema to `standardized_samples.yaml`.
 
+Timestamp policy:
+
+- raw LiDAR samples use `measurement_time` when available
+- pose / IMU samples prefer `measurement_time` when available, then fall back to `header.timestamp_sec`
+- GNSS best_pose / heading `measurement_time` is converted from GPS epoch to Unix time
+- record write time is only a fallback when the message does not expose a better sensor timestamp
+
+An experimental `--estimate-pose-time-offset` path can estimate one global
+LiDAR-to-pose/IMU lag before extraction; `--pose-time-offset-estimator`
+supports `nearest_median` and `xcorr_angular_speed`. The timestamp-normalized
+baseline remains the default.
+
 In prepared-dataset mode, the converter reuses:
 
 - cached raw-LiDAR `pcd` frames
 - cached pose / IMU state
 - cached TF edges
 
+The converter and review path are being refactored so raw record scan, time
+alignment, ground sampling, motion-window construction, local submap building,
+and dense review-object reconstruction can evolve independently instead of
+accumulating inside one monolithic converter or visualizer file.
+
+Current extraction can optionally run a GRIL-style observability screen before
+final motion selection:
+
+- build sliding-window Fisher summaries (`H≈J^TΣ^-1J`) from registered motion
+  candidates
+- rank segments by min-eigen / condition / diversity-aware score
+- hard-gate on minimum eigenvalues and condition number; keep turn/heading as
+  advisory diagnostics
+- greedily merge passing segments by **incremental gain of total information
+  matrix capacity** (min-eigen gain + condition-number guard), then run the
+  existing global-diversity selector on that screened subset
+
+For raw record conversion, the current implementation now scans the record once
+per conversion bundle instead of re-reading TF, pointcloud metadata, pose, and
+IMU in separate passes. An optional `pycyber` backend can be selected with
+`WHL_CAL_RECORD_BACKEND=pycyber` when that environment is available.
+
 ## 4. Algorithm stages
+
+The calibrator now exposes four solver families:
+
+1. `solver_family=baseline`
+   - preserves the existing staged solve
+   - remains the default for `baseline` and `production` run profiles
+2. `solver_family=gril_staged`
+   - keeps the same ground-first decomposition
+   - adds an explicit screened planar stage before the final joint polish
+   - stays candidate-only until it repeatedly beats the baseline
+3. `solver_family=gril_prob`
+   - keeps `gril_staged` selection and decomposition
+   - applies information-weighted motion residuals from
+     overlap/fitness/excitation
+   - also folds extraction-stage observability Fisher metadata into covariance
+     weighting so solver residuals prefer better-conditioned segments
+4. `solver_family=gril_prob_nhc`
+   - keeps `gril_prob`
+   - enables NHC weak-motion prior gating when observability is poor
 
 ### Stage A: ground orientation
 
@@ -122,6 +208,13 @@ Solve `yaw` with the hand-eye rotation residual:
 
 - `R_A * R_IL = R_IL * R_B`
 
+For `gril_staged`, this stage first screens motion factors by excitation and
+registration quality before deciding whether planar DOFs stay free or fall back
+to `freeze_xyyaw`.
+
+`gril_prob` and `gril_prob_nhc` keep the same screened factor set, but solve the
+planar and joint residual stack with per-factor information weights.
+
 ### Stage D: motion translation
 
 Solve translation with the standard hand-eye translation equation:
@@ -136,6 +229,17 @@ Run robust least squares over:
 - ground height residuals
 - motion rotation residuals
 - motion translation residuals
+
+For `gril_prob_nhc`, this stage also adds gated nonholonomic residuals
+(`v_y≈0`, `v_z≈0`) when the staged policy indicates weak-motion observability.
+
+An optional IMU preintegration-style translation residual block can also be
+enabled in planar/joint solves (`imu_preintegration_translation_weight>0`) so
+high-frequency inertial motion priors participate in translation constraints.
+
+In the refactored path this final step is treated as a **light joint polish**:
+the staged result remains the primary decomposition, and the joint solve only
+polishes the accepted factor set instead of redefining the whole architecture.
 
 ## 5. Evaluation design
 
@@ -154,23 +258,23 @@ The solver writes:
 - `diagnostics/ground_residuals.csv`
 - `diagnostics/motion_residuals.csv`
 - `diagnostics/holdout_motion_residuals.csv`
+- `diagnostics/cloud_thickness_window_frames.csv`
 
 ### Coarse metrics
 
-Used as gate metrics for iteration:
+**Required release gates** after simplification:
 
-- `ground_normal_angle_p95_deg`
-- `ground_height_residual_p95_m`
-- `motion_rotation_residual_p95_deg`
-- `motion_translation_residual_p95_m`
-- `motion_angular_excitation_p95_deg`
-- `motion_registration_fitness_p05`
-- `motion_registration_inlier_rmse_p95`
-- `left_turn_count`
-- `right_turn_count`
-- `turn_balance_ratio`
-- `joint_condition_number`
-- `statuses`
+- `ground_sample_count > 0`
+- `motion_sample_count > 0`
+- `statuses.fisher_min_eigenvalue == pass`
+- `statuses.fisher_conditioning == pass`
+- `statuses.cloud_thickness == pass`
+
+Supporting coarse review surfaces (diagnostic, not required gates):
+
+- `fisher_min_eigenvalue`
+- `fisher_condition_number`
+- `statuses.fisher_observability`
 - `vehicle_motion_assessment`
 - `final_acceptance`
 
@@ -199,10 +303,14 @@ Every completed run should expose:
 - `diagnostics/status_summary.csv`
 - `diagnostics/visualization_index.yaml`
 
-The final acceptance decision combines ground support, motion registration,
-motion residuals, turn balance, observability, yaw cost-scan health,
-extraction/reference consistency, holdout generalization, and the existing
-`vehicle_motion_assessment.recommendation`. Non-`full_6dof_candidate`
+The final acceptance decision is intentionally reduced to two hard lines plus
+sample-count sanity checks:
+
+1. physical consistency from holdout stitched-cloud thickness
+2. Fisher/Hessian observability (weakest-direction information + conditioning)
+
+Residual families remain in diagnostics for root-cause analysis, but they are no
+longer the release verdict line by themselves. Non-`full_6dof_candidate`
 recommendations remain valid diagnostics, but they are not release-ready full
 6DoF calibration results.
 
@@ -214,7 +322,7 @@ This keeps the production review order stable:
    optimization.
 3. `metrics.yaml` and `acceptance_report.yaml` state the final conclusion.
 4. `visualization_index.yaml` points to residual CSVs, IMU-vs-LiDAR trajectory
-   overlays, stitched-keyframe point clouds, and observability outputs that
+   overlays, registered-object overlap clouds, and observability outputs that
    should be plotted or inspected.
 
 ### Observability semantics
@@ -279,6 +387,15 @@ Current default topic mapping:
     diversity.
 12. Export normalized samples.
 
+When `--motion-registration-mode` uses a submap path, the converter now keeps
+two submap builders separate:
+
+- `pose_only`: sparse support frames are merged only by pose-derived
+  anchor-relative transforms
+- `dense_scan_to_map_gicp`: sparse support frames still use pose-derived seeds,
+  but each support scan is locally refined against a growing local map before
+  the submap is exported for pair registration
+
 If a bag has no LiDAR-to-parent TF at all, the converter can also run with
 `--identity-initial-transform`, but that mode is exploratory only and should not
 be treated as a production prior.
@@ -324,6 +441,10 @@ The map-side modes keep the same selection / metrics framework:
 - `submap_to_submap`: symmetric pose-anchored local submap pair
 - `submap_to_map`: source local submap against a larger target local map
 
+The current `production` preset also upgrades the local submap builder to
+`dense_scan_to_map_gicp`, so calibration factors and review clouds are both
+driven by the same stronger local-map idea even without point-level deskew.
+
 The latest selector also uses a **coverage-aware global score** instead of only
 following the strongest local factor in every window. In practice this means:
 
@@ -347,6 +468,7 @@ To keep iteration disciplined, `lidar2imu` now distinguishes:
 - **production**
   - current release candidate
   - `submap_to_map`
+  - `dense_scan_to_map_gicp`
   - target local map widened enough to preserve long-horizon structure
   - `--planar-motion-policy auto`
   - automatic one-step re-extraction when extraction consistency warns

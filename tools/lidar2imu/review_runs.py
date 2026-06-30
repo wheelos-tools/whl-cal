@@ -173,6 +173,7 @@ def _load_run_row(metrics_path: Path) -> dict[str, Any]:
         "run_dir": str(run_dir),
         "metrics_path": str(metrics_path),
         "run_profile": summary.get("run_profile"),
+        "solver_family": summary.get("solver_family"),
         "recommendation": assessment.get("recommendation"),
         "applied_solver_planar_motion_policy": assessment.get(
             "applied_solver_planar_motion_policy"
@@ -180,7 +181,7 @@ def _load_run_row(metrics_path: Path) -> dict[str, Any]:
         "ground_support": assessment.get("ground_support"),
         "motion_registration_quality": assessment.get("motion_registration_quality"),
         "yaw_observability": assessment.get("yaw_observability"),
-        "joint_observability": assessment.get("joint_observability"),
+        "fisher_observability": assessment.get("fisher_observability"),
         "initial_prior_assessment": assessment.get("initial_prior_assessment"),
         "extraction_consistency": assessment.get("extraction_consistency"),
         "trusted_reference_consistency": assessment.get(
@@ -255,14 +256,16 @@ def _load_run_row(metrics_path: Path) -> dict[str, Any]:
         "turn_balance_ratio": coarse.get("turn_balance_ratio"),
         "left_turn_count": coarse.get("left_turn_count"),
         "right_turn_count": coarse.get("right_turn_count"),
-        "joint_condition_number": coarse.get("joint_condition_number"),
+        "fisher_condition_number": coarse.get("fisher_condition_number"),
         "status_ground_orientation": statuses.get("ground_orientation"),
         "status_ground_height": statuses.get("ground_height"),
         "status_motion_rotation": statuses.get("motion_rotation"),
         "status_motion_translation": statuses.get("motion_translation"),
         "status_motion_registration": statuses.get("motion_registration"),
         "status_turn_balance": statuses.get("turn_balance"),
-        "status_observability": statuses.get("observability"),
+        "status_fisher_min_eigenvalue": statuses.get("fisher_min_eigenvalue"),
+        "status_fisher_conditioning": statuses.get("fisher_conditioning"),
+        "status_fisher_observability": statuses.get("fisher_observability"),
         "status_initial_prior_nominal_range": statuses.get(
             "initial_prior_nominal_range"
         ),
@@ -475,7 +478,7 @@ def _svg_scatter_plot(
 def _render_summary_table(rows: list[dict[str, Any]]) -> str:
     header = (
         "<tr>"
-        "<th>run</th><th>recommendation</th><th>policy</th><th>extract</th>"
+        "<th>run</th><th>solver</th><th>recommendation</th><th>policy</th><th>extract</th>"
         "<th>reference</th><th>basin</th><th>6dof prior</th><th>holdout rep</th><th>holdout</th><th>prior</th><th>yaw ratio</th><th>plateau</th>"
         "<th>trans p95</th><th>fit p05</th><th>delta ref</th><th>delta ext</th>"
         "</tr>"
@@ -495,6 +498,7 @@ def _render_summary_table(rows: list[dict[str, Any]]) -> str:
         body_rows.append(
             "<tr>"
             f"<td>{html.escape(str(row.get('run_name') or '-'))}</td>"
+            f"<td>{html.escape(str(row.get('solver_family') or '-'))}</td>"
             f"<td>{_status_badge(row.get('recommendation'))}</td>"
             f"<td>{html.escape(str(row.get('applied_solver_planar_motion_policy') or '-'))}</td>"
             f"<td>{_status_badge(row.get('extraction_consistency'))}</td>"

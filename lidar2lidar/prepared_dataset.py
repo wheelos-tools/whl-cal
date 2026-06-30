@@ -14,13 +14,18 @@ import yaml
 from scipy.spatial.transform import Rotation as R
 
 from lidar2lidar.record_adapter import Record, ensure_record_available
-from lidar2lidar.record_utils import (PointCloudMeta, TransformEdge,
-                                      build_transform_graph,
-                                      collect_pointcloud_metadata,
-                                      discover_record_files, extract_tf_edges,
-                                      get_topic_frame_ids,
-                                      load_pointcloud_from_meta,
-                                      lookup_transform, topic_sensor_name)
+from lidar2lidar.record_utils import (
+    PointCloudMeta,
+    TransformEdge,
+    build_transform_graph,
+    discover_record_files,
+    load_pointcloud_from_meta,
+    lookup_transform,
+    message_timestamp_ns,
+    proto_transform_to_matrix,
+    resolve_topic_frame_id,
+    topic_sensor_name,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,18 @@ class ImuSample:
     timestamp_ns: int
     linear_acceleration: np.ndarray
     angular_velocity: np.ndarray
+
+
+@dataclass(frozen=True)
+class RecordBundle:
+    record_files: list[str]
+    lidar_topics: list[str]
+    topic_frame_ids: dict[str, str]
+    metadata_by_topic: dict[str, list[PointCloudMeta]]
+    tf_edges: list[TransformEdge]
+    pose_samples: list[PoseSample]
+    imu_samples: list[ImuSample]
+    localization_to_imu_source: str
 
 
 @dataclass(frozen=True)
@@ -72,6 +89,206 @@ def _pose_to_matrix(position, orientation) -> np.ndarray:
     return transform
 
 
+def _extract_imu_components(msg, imu_topic: str) -> tuple[np.ndarray, np.ndarray]:
+    linear_acceleration = getattr(msg, "linear_acceleration", None)
+    angular_velocity = getattr(msg, "angular_velocity", None)
+    if linear_acceleration is None or angular_velocity is None:
+        imu_pose = getattr(msg, "imu", None)
+        linear_acceleration = getattr(imu_pose, "linear_acceleration", None)
+        angular_velocity = getattr(imu_pose, "angular_velocity", None)
+    if linear_acceleration is None or angular_velocity is None:
+        raise RuntimeError(f"Unsupported IMU message layout on topic {imu_topic}.")
+    return (
+        np.array(
+            [
+                float(linear_acceleration.x),
+                float(linear_acceleration.y),
+                float(linear_acceleration.z),
+            ],
+            dtype=float,
+        ),
+        np.array(
+            [
+                float(angular_velocity.x),
+                float(angular_velocity.y),
+                float(angular_velocity.z),
+            ],
+            dtype=float,
+        ),
+    )
+
+
+def _build_pose_samples(
+    raw_pose_samples: list[tuple[int, np.ndarray]],
+    transform_localization_to_imu: np.ndarray,
+) -> list[PoseSample]:
+    gravity_world = np.array([0.0, 0.0, -9.81], dtype=float)
+    samples: list[PoseSample] = []
+    for timestamp_ns, transform_world_localization in sorted(
+        raw_pose_samples, key=lambda item: item[0]
+    ):
+        transform_world_imu = (
+            np.asarray(transform_world_localization, dtype=float)
+            @ transform_localization_to_imu
+        )
+        gravity_imu = transform_world_imu[:3, :3].T @ gravity_world
+        samples.append(
+            PoseSample(
+                timestamp_ns=int(timestamp_ns),
+                transform_world_localization=np.asarray(
+                    transform_world_localization, dtype=float
+                ),
+                transform_world_imu=transform_world_imu,
+                gravity_imu=gravity_imu,
+            )
+        )
+    return samples
+
+
+def collect_record_bundle(
+    record_path: str,
+    lidar_topics: list[str],
+    pose_topic: str,
+    imu_topic: str | None,
+    parent_frame: str,
+) -> RecordBundle:
+    ensure_record_available()
+    if not lidar_topics:
+        raise RuntimeError("At least one LiDAR topic is required.")
+
+    record_files = discover_record_files(record_path)
+    lidar_topics = list(dict.fromkeys(lidar_topics))
+    requested_topics = set(lidar_topics)
+    requested_topics.update({"/tf_static", "/tf"})
+    if pose_topic:
+        requested_topics.add(pose_topic)
+    if imu_topic:
+        requested_topics.add(imu_topic)
+
+    static_edges: dict[tuple[str, str], TransformEdge] = {}
+    dynamic_edges: dict[tuple[str, str], TransformEdge] = {}
+    topic_frame_ids: dict[str, str] = {}
+    metadata_by_topic: dict[str, list[PointCloudMeta]] = {
+        topic: [] for topic in lidar_topics
+    }
+    raw_pose_samples: list[tuple[int, np.ndarray]] = []
+    imu_samples: list[ImuSample] = []
+
+    for record_file in record_files:
+        with Record(record_file) as record:
+            for topic, msg, timestamp_ns in record.read_messages(
+                topics=tuple(requested_topics)
+            ):
+                if topic in ("/tf_static", "/tf"):
+                    for transform_stamped in msg.transforms:
+                        parent = getattr(transform_stamped.header, "frame_id", "")
+                        child = getattr(transform_stamped, "child_frame_id", "")
+                        if not parent or not child:
+                            continue
+                        edge = TransformEdge(
+                            parent_frame=parent,
+                            child_frame=child,
+                            transform=proto_transform_to_matrix(
+                                transform_stamped.transform
+                            ),
+                            source_topic=topic,
+                            timestamp_ns=int(timestamp_ns),
+                            is_static=(topic == "/tf_static"),
+                        )
+                        key = (parent, child)
+                        if edge.is_static:
+                            static_edges[key] = edge
+                        else:
+                            dynamic_edges[key] = edge
+                    continue
+
+                if topic in metadata_by_topic:
+                    header = getattr(msg, "header", None)
+                    frame_id = resolve_topic_frame_id(
+                        topic, getattr(header, "frame_id", "")
+                    )
+                    canonical_timestamp_ns = message_timestamp_ns(
+                        topic, msg, int(timestamp_ns)
+                    )
+                    topic_frame_ids.setdefault(topic, frame_id)
+                    metadata_by_topic[topic].append(
+                        PointCloudMeta(
+                            topic=topic,
+                            frame_id=frame_id,
+                            timestamp_ns=int(canonical_timestamp_ns),
+                            record_path=record_file,
+                        )
+                    )
+                    continue
+
+                if topic == pose_topic:
+                    pose = getattr(msg, "pose", None)
+                    if pose is None:
+                        continue
+                    canonical_timestamp_ns = message_timestamp_ns(
+                        topic, msg, int(timestamp_ns)
+                    )
+                    raw_pose_samples.append(
+                        (
+                            int(canonical_timestamp_ns),
+                            _pose_to_matrix(pose.position, pose.orientation),
+                        )
+                    )
+                    continue
+
+                if imu_topic is not None and topic == imu_topic:
+                    linear_acceleration, angular_velocity = _extract_imu_components(
+                        msg, imu_topic
+                    )
+                    canonical_timestamp_ns = message_timestamp_ns(
+                        topic, msg, int(timestamp_ns)
+                    )
+                    imu_samples.append(
+                        ImuSample(
+                            timestamp_ns=int(canonical_timestamp_ns),
+                            linear_acceleration=linear_acceleration,
+                            angular_velocity=angular_velocity,
+                        )
+                    )
+
+    tf_edges = list(static_edges.values())
+    tf_edges.extend(dynamic_edges.values())
+    tf_edges.sort(
+        key=lambda item: (item.parent_frame, item.child_frame, item.source_topic)
+    )
+
+    pose_samples: list[PoseSample] = []
+    localization_to_imu_source = "tf_graph"
+    if raw_pose_samples:
+        tf_graph = build_transform_graph(tf_edges)
+        localization_to_imu = lookup_transform(tf_graph, parent_frame, "localization")
+        if localization_to_imu is None:
+            raise RuntimeError(
+                f"Could not find transform from {parent_frame} to localization in "
+                f"{record_path}. Ensure the split record family includes the shard "
+                "carrying /tf_static."
+            )
+        pose_samples = _build_pose_samples(raw_pose_samples, localization_to_imu)
+
+    for topic in lidar_topics:
+        topic_frame_ids.setdefault(topic, "")
+        metadata_by_topic.setdefault(topic, [])
+        metadata_by_topic[topic].sort(key=lambda item: item.timestamp_ns)
+
+    imu_samples.sort(key=lambda item: item.timestamp_ns)
+
+    return RecordBundle(
+        record_files=record_files,
+        lidar_topics=lidar_topics,
+        topic_frame_ids=topic_frame_ids,
+        metadata_by_topic=metadata_by_topic,
+        tf_edges=tf_edges,
+        pose_samples=pose_samples,
+        imu_samples=imu_samples,
+        localization_to_imu_source=localization_to_imu_source,
+    )
+
+
 def collect_pose_samples(
     record_files: list[str], pose_topic: str, transform_localization_to_imu: np.ndarray
 ) -> list[PoseSample]:
@@ -81,7 +298,12 @@ def collect_pose_samples(
     for record_file in record_files:
         with Record(record_file) as record:
             for _, msg, timestamp_ns in record.read_messages(topics=[pose_topic]):
-                pose = msg.pose
+                pose = getattr(msg, "pose", None)
+                if pose is None:
+                    continue
+                canonical_timestamp_ns = message_timestamp_ns(
+                    pose_topic, msg, int(timestamp_ns)
+                )
                 transform_world_localization = _pose_to_matrix(
                     pose.position, pose.orientation
                 )
@@ -91,7 +313,7 @@ def collect_pose_samples(
                 gravity_imu = transform_world_imu[:3, :3].T @ gravity_world
                 samples.append(
                     PoseSample(
-                        timestamp_ns=int(timestamp_ns),
+                        timestamp_ns=int(canonical_timestamp_ns),
                         transform_world_localization=transform_world_localization,
                         transform_world_imu=transform_world_imu,
                         gravity_imu=gravity_imu,
@@ -107,35 +329,17 @@ def collect_imu_samples(record_files: list[str], imu_topic: str) -> list[ImuSamp
     for record_file in record_files:
         with Record(record_file) as record:
             for _, msg, timestamp_ns in record.read_messages(topics=[imu_topic]):
-                linear_acceleration = getattr(msg, "linear_acceleration", None)
-                angular_velocity = getattr(msg, "angular_velocity", None)
-                if linear_acceleration is None or angular_velocity is None:
-                    imu_pose = getattr(msg, "imu", None)
-                    linear_acceleration = getattr(imu_pose, "linear_acceleration", None)
-                    angular_velocity = getattr(imu_pose, "angular_velocity", None)
-                if linear_acceleration is None or angular_velocity is None:
-                    raise RuntimeError(
-                        f"Unsupported IMU message layout on topic {imu_topic}."
-                    )
+                linear_acceleration, angular_velocity = _extract_imu_components(
+                    msg, imu_topic
+                )
+                canonical_timestamp_ns = message_timestamp_ns(
+                    imu_topic, msg, int(timestamp_ns)
+                )
                 samples.append(
                     ImuSample(
-                        timestamp_ns=int(timestamp_ns),
-                        linear_acceleration=np.array(
-                            [
-                                float(linear_acceleration.x),
-                                float(linear_acceleration.y),
-                                float(linear_acceleration.z),
-                            ],
-                            dtype=float,
-                        ),
-                        angular_velocity=np.array(
-                            [
-                                float(angular_velocity.x),
-                                float(angular_velocity.y),
-                                float(angular_velocity.z),
-                            ],
-                            dtype=float,
-                        ),
+                        timestamp_ns=int(canonical_timestamp_ns),
+                        linear_acceleration=linear_acceleration,
+                        angular_velocity=angular_velocity,
                     )
                 )
     samples.sort(key=lambda item: item.timestamp_ns)
@@ -243,7 +447,6 @@ def build_prepared_rig_dataset(
 ) -> Path:
     if not lidar_topics:
         raise RuntimeError("At least one raw LiDAR topic is required.")
-    record_files = discover_record_files(record_path)
     reference_topic = reference_topic or lidar_topics[0]
     if reference_topic not in lidar_topics:
         raise RuntimeError(
@@ -258,18 +461,20 @@ def build_prepared_rig_dataset(
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     pointcloud_cache_dir.mkdir(parents=True, exist_ok=True)
 
-    tf_edges = extract_tf_edges(record_files)
-    tf_graph = build_transform_graph(tf_edges)
-    localization_to_imu = lookup_transform(tf_graph, parent_frame, "localization")
-    if localization_to_imu is None:
-        raise RuntimeError(
-            f"Could not find transform from {parent_frame} to localization."
-        )
-
-    topic_frame_ids = get_topic_frame_ids(record_files, lidar_topics)
-    raw_metadata_by_topic = collect_pointcloud_metadata(record_files, lidar_topics)
-    pose_samples = collect_pose_samples(record_files, pose_topic, localization_to_imu)
-    imu_samples = collect_imu_samples(record_files, imu_topic)
+    bundle = collect_record_bundle(
+        record_path=record_path,
+        lidar_topics=lidar_topics,
+        pose_topic=pose_topic,
+        imu_topic=imu_topic,
+        parent_frame=parent_frame,
+    )
+    record_files = bundle.record_files
+    tf_edges = bundle.tf_edges
+    topic_frame_ids = bundle.topic_frame_ids
+    raw_metadata_by_topic = bundle.metadata_by_topic
+    pose_samples = bundle.pose_samples
+    imu_samples = bundle.imu_samples
+    localization_to_imu_source = bundle.localization_to_imu_source
 
     reference_metas = raw_metadata_by_topic[reference_topic]
     if not reference_metas:
@@ -423,6 +628,7 @@ def build_prepared_rig_dataset(
             "pointcloud_cache_count": int(
                 sum(len(metas) for metas in sampled_metadata_by_topic.values())
             ),
+            "localization_to_imu_source": localization_to_imu_source,
         },
         "topics": topic_info_summary,
         "metadata_by_topic": {

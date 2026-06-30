@@ -11,10 +11,12 @@ import yaml
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as R
 
-from calibration_common.evaluation import (build_final_acceptance,
-                                           write_acceptance_artifacts,
-                                           write_paradigm_artifacts,
-                                           write_table_csv)
+from calibration_common.evaluation import (
+    build_final_acceptance,
+    write_acceptance_artifacts,
+    write_paradigm_artifacts,
+    write_table_csv,
+)
 from lidar2camera.metrics import transform_delta_metrics
 
 
@@ -85,6 +87,17 @@ class EdgeRefinementConfig:
     batch_global_seed_count: int = 10
     batch_global_topk: int = 2
     batch_refinement_maxiter: int = 18
+    direct_visual_bins: int = 24
+    direct_visual_min_valid_pixels: int = 400
+    direct_visual_signal_clip_percentile: float = 98.0
+    direct_visual_intensity_weight: float = 1.0
+    direct_visual_depth_weight: float = 0.6
+    sensorscalib_hough_threshold: int = 55
+    sensorscalib_min_line_length_px: int = 35
+    sensorscalib_max_line_gap_px: int = 16
+    sensorscalib_line_dilation_px: int = 3
+    sensorscalib_reverse_line_weight: float = 0.7
+    disable_update_guard_methods: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,7 @@ class NuScenesBenchmarkConfig:
     methods: tuple[str, ...] = (
         "identity",
         "edge_refine",
+        "direct_visual_refine",
         "silhouette_refine",
         "batch_hybrid_refine",
         "oracle_gt",
@@ -123,6 +137,11 @@ class EdgeAlignmentContext:
     image_edge_mask_dilated: np.ndarray
     image_gradient_magnitude: np.ndarray
     image_distance_transform: np.ndarray
+    image_line_mask: np.ndarray
+    image_line_distance_transform: np.ndarray
+    image_edge_pixel_count: int
+    image_line_pixel_count: int
+    image_line_segment_count: int
     camera_matrix: np.ndarray
     lidar_points_xyz: np.ndarray
     lidar_points_intensity: np.ndarray
@@ -374,6 +393,31 @@ def build_edge_alignment_context(
         > 0
     )
     distance_transform = cv2.distanceTransform(255 - edges, cv2.DIST_L2, 3)
+    line_segments = cv2.HoughLinesP(
+        edges,
+        rho=1.0,
+        theta=np.pi / 180.0,
+        threshold=int(config.sensorscalib_hough_threshold),
+        minLineLength=int(config.sensorscalib_min_line_length_px),
+        maxLineGap=int(config.sensorscalib_max_line_gap_px),
+    )
+    line_mask = np.zeros_like(edges, dtype=np.uint8)
+    line_segment_count = 0
+    if line_segments is not None:
+        line_segment_count = int(len(line_segments))
+        for segment in line_segments:
+            x1, y1, x2, y2 = segment[0]
+            cv2.line(
+                line_mask,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                255,
+                thickness=max(1, int(config.sensorscalib_line_dilation_px)),
+                lineType=cv2.LINE_AA,
+            )
+    else:
+        line_mask = edges.copy()
+    line_distance_transform = cv2.distanceTransform(255 - line_mask, cv2.DIST_L2, 3)
 
     raw_xyz, raw_intensity = _load_lidar_points(sample.lidar_path)
     finite_mask = np.all(np.isfinite(raw_xyz), axis=1) & np.isfinite(raw_intensity)
@@ -417,6 +461,11 @@ def build_edge_alignment_context(
         image_edge_mask_dilated=image_edge_mask_dilated,
         image_gradient_magnitude=gradient_magnitude,
         image_distance_transform=distance_transform,
+        image_line_mask=line_mask,
+        image_line_distance_transform=line_distance_transform,
+        image_edge_pixel_count=int(np.count_nonzero(edges)),
+        image_line_pixel_count=int(np.count_nonzero(line_mask)),
+        image_line_segment_count=line_segment_count,
         camera_matrix=camera_matrix,
         lidar_points_xyz=xyz,
         lidar_points_intensity=intensity,
@@ -511,6 +560,169 @@ def _rasterize_depth_projection(
     depth_image[xy[selected, 1], xy[selected, 0]] = depths[selected].astype(np.float32)
     occupancy[xy[selected, 1], xy[selected, 0]] = 255
     return depth_image, occupancy
+
+
+def _rasterize_depth_intensity_projection(
+    uv: np.ndarray,
+    depths: np.ndarray,
+    intensity: np.ndarray,
+    image_shape: tuple[int, int, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    depth_image = np.full((height, width), np.nan, dtype=np.float32)
+    intensity_image = np.full((height, width), np.nan, dtype=np.float32)
+    occupancy = np.zeros((height, width), dtype=np.uint8)
+    if uv.shape[0] == 0:
+        return depth_image, intensity_image, occupancy
+    xy = np.round(uv).astype(np.int32)
+    linear = xy[:, 1] * width + xy[:, 0]
+    order = np.argsort(depths)
+    ordered_linear = linear[order]
+    _, first_indices = np.unique(ordered_linear, return_index=True)
+    selected = order[first_indices]
+    depth_image[xy[selected, 1], xy[selected, 0]] = depths[selected].astype(np.float32)
+    intensity_image[xy[selected, 1], xy[selected, 0]] = intensity[selected].astype(
+        np.float32
+    )
+    occupancy[xy[selected, 1], xy[selected, 0]] = 255
+    return depth_image, intensity_image, occupancy
+
+
+def _normalize_signal_to_unit_interval(
+    values: np.ndarray,
+    *,
+    clip_percentile: float,
+) -> np.ndarray:
+    series = np.asarray(values, dtype=np.float64).reshape(-1)
+    finite = series[np.isfinite(series)]
+    if finite.size == 0:
+        return np.empty((0,), dtype=np.float64)
+    lower = float(np.min(finite))
+    upper = float(np.percentile(finite, clip_percentile))
+    if upper <= lower + 1e-12:
+        upper = lower + 1e-12
+    normalized = np.clip((finite - lower) / (upper - lower), 0.0, 1.0)
+    return normalized
+
+
+def _normalized_information_distance(
+    lhs_values: np.ndarray,
+    rhs_values: np.ndarray,
+    *,
+    bins: int,
+) -> float:
+    lhs = np.asarray(lhs_values, dtype=np.float64).reshape(-1)
+    rhs = np.asarray(rhs_values, dtype=np.float64).reshape(-1)
+    if lhs.size == 0 or rhs.size == 0 or lhs.size != rhs.size:
+        return 1e6
+    joint_hist, _, _ = np.histogram2d(
+        lhs,
+        rhs,
+        bins=int(bins),
+        range=((0.0, 1.0), (0.0, 1.0)),
+    )
+    total = float(np.sum(joint_hist))
+    if total <= 0.0:
+        return 1e6
+    pxy = joint_hist / total
+    px = np.sum(pxy, axis=1)
+    py = np.sum(pxy, axis=0)
+
+    def entropy(prob: np.ndarray) -> float:
+        active = prob[prob > 1e-12]
+        if active.size == 0:
+            return 0.0
+        return float(-np.sum(active * np.log(active)))
+
+    h_x = entropy(px)
+    h_y = entropy(py)
+    h_xy = entropy(pxy.reshape(-1))
+    if h_xy <= 1e-12:
+        return 1e6
+    mutual_information = h_x + h_y - h_xy
+    score = 1.0 - float(mutual_information / h_xy)
+    return float(max(score, 0.0))
+
+
+def _direct_visual_alignment_data_cost(
+    *,
+    transform: np.ndarray,
+    context: EdgeAlignmentContext,
+    config: EdgeRefinementConfig,
+) -> float:
+    uv, depths, depth_mask = _project_points(
+        transform,
+        context.lidar_points_xyz,
+        context.camera_matrix,
+        context.image_bgr.shape,
+        min_depth_m=config.min_camera_depth_m,
+    )
+    if uv.shape[0] < int(config.min_projected_points):
+        return 1e6
+    intensity = context.lidar_points_intensity[depth_mask]
+    depth_image, intensity_image, occupancy = _rasterize_depth_intensity_projection(
+        uv,
+        depths,
+        intensity,
+        context.image_bgr.shape,
+    )
+    valid = np.isfinite(depth_image) & np.isfinite(intensity_image) & (occupancy > 0)
+    if int(np.count_nonzero(valid)) < int(config.direct_visual_min_valid_pixels):
+        return 1e6
+
+    image_gray_values = context.image_gray[valid]
+    image_gradient_values = context.image_gradient_magnitude[valid]
+    lidar_intensity_values = intensity_image[valid]
+    lidar_inverse_depth = 1.0 / np.clip(
+        depth_image[valid], config.min_camera_depth_m, 1e6
+    )
+
+    clip_percentile = float(config.direct_visual_signal_clip_percentile)
+    image_gray_norm = _normalize_signal_to_unit_interval(
+        image_gray_values, clip_percentile=clip_percentile
+    )
+    image_gradient_norm = _normalize_signal_to_unit_interval(
+        image_gradient_values, clip_percentile=clip_percentile
+    )
+    lidar_intensity_norm = _normalize_signal_to_unit_interval(
+        lidar_intensity_values, clip_percentile=clip_percentile
+    )
+    lidar_inverse_depth_norm = _normalize_signal_to_unit_interval(
+        lidar_inverse_depth, clip_percentile=clip_percentile
+    )
+
+    valid_count = min(
+        image_gray_norm.size,
+        image_gradient_norm.size,
+        lidar_intensity_norm.size,
+        lidar_inverse_depth_norm.size,
+    )
+    if valid_count < int(config.direct_visual_min_valid_pixels):
+        return 1e6
+
+    image_gray_norm = image_gray_norm[:valid_count]
+    image_gradient_norm = image_gradient_norm[:valid_count]
+    lidar_intensity_norm = lidar_intensity_norm[:valid_count]
+    lidar_inverse_depth_norm = lidar_inverse_depth_norm[:valid_count]
+
+    bins = int(config.direct_visual_bins)
+    intensity_nid = _normalized_information_distance(
+        image_gray_norm,
+        lidar_intensity_norm,
+        bins=bins,
+    )
+    depth_nid = _normalized_information_distance(
+        image_gradient_norm,
+        lidar_inverse_depth_norm,
+        bins=bins,
+    )
+    if intensity_nid >= 1e6 or depth_nid >= 1e6:
+        return 1e6
+    return float(
+        float(config.direct_visual_intensity_weight) * float(intensity_nid)
+        + float(config.direct_visual_depth_weight) * float(depth_nid)
+    )
 
 
 def _projected_lidar_edge_diagnostics(
@@ -698,6 +910,95 @@ def _silhouette_alignment_data_cost(
     )
 
 
+def _direct_visual_alignment_cost(
+    params: np.ndarray,
+    *,
+    context: EdgeAlignmentContext,
+    initial_transform: np.ndarray,
+    config: EdgeRefinementConfig,
+) -> float:
+    delta = _delta_transform(params[:3], params[3:])
+    transform = np.asarray(initial_transform, dtype=float) @ delta
+    data_cost = _direct_visual_alignment_data_cost(
+        transform=transform,
+        context=context,
+        config=config,
+    )
+    if data_cost >= 1e6:
+        return 1e6
+    return float(
+        float(data_cost)
+        + float(config.rotation_prior_weight) * float(np.linalg.norm(params[:3]) ** 2)
+        + float(config.translation_prior_weight)
+        * float(np.linalg.norm(params[3:]) ** 2)
+    )
+
+
+def _sensorscalib_line_data_cost(
+    *,
+    transform: np.ndarray,
+    context: EdgeAlignmentContext,
+    config: EdgeRefinementConfig,
+) -> float:
+    diagnostics = _projected_lidar_edge_diagnostics(
+        transform,
+        context=context,
+        config=config,
+    )
+    if diagnostics is None:
+        return 1e6
+    uv = np.asarray(diagnostics["uv"], dtype=float)
+    depths = np.asarray(diagnostics["depths"], dtype=float)
+    intensity = np.asarray(diagnostics["intensity"], dtype=float)
+    lidar_edges = np.asarray(diagnostics["lidar_edges"], dtype=bool)
+    if int(np.count_nonzero(lidar_edges)) < int(config.min_edge_pixels):
+        return 1e6
+    forward_cost = _weighted_projected_point_edge_distance(
+        uv=uv,
+        depths=depths,
+        intensity=intensity,
+        image_distance_transform=context.image_line_distance_transform,
+    )
+    lidar_line_distance_transform = cv2.distanceTransform(
+        np.where(lidar_edges, 0, 255).astype(np.uint8),
+        cv2.DIST_L2,
+        3,
+    )
+    image_line_mask = context.image_line_mask > 0
+    if int(np.count_nonzero(image_line_mask)) < int(config.min_edge_pixels):
+        reverse_cost = float(np.max(lidar_line_distance_transform))
+    else:
+        reverse_cost = _trimmed_mean(lidar_line_distance_transform[image_line_mask])
+    return float(
+        float(forward_cost)
+        + float(config.sensorscalib_reverse_line_weight) * float(reverse_cost)
+    )
+
+
+def _sensorscalib_line_alignment_cost(
+    params: np.ndarray,
+    *,
+    context: EdgeAlignmentContext,
+    initial_transform: np.ndarray,
+    config: EdgeRefinementConfig,
+) -> float:
+    delta = _delta_transform(params[:3], params[3:])
+    transform = np.asarray(initial_transform, dtype=float) @ delta
+    data_cost = _sensorscalib_line_data_cost(
+        transform=transform,
+        context=context,
+        config=config,
+    )
+    if data_cost >= 1e6:
+        return 1e6
+    return float(
+        float(data_cost)
+        + float(config.rotation_prior_weight) * float(np.linalg.norm(params[:3]) ** 2)
+        + float(config.translation_prior_weight)
+        * float(np.linalg.norm(params[3:]) ** 2)
+    )
+
+
 def _batch_hybrid_alignment_cost(
     params: np.ndarray,
     *,
@@ -860,26 +1161,70 @@ def _run_local_refinement(
     projection_retention_ratio = float(
         final_projection_count / max(initial_projection_count, 1)
     )
-    accepted_update = (
-        float(initial_cost - best_result.fun) >= float(config.min_objective_improvement)
-        and applied_rotation_deg <= float(config.accepted_delta_rotation_deg)
-        and applied_translation_m <= float(config.accepted_delta_translation_m)
-        and projection_retention_ratio >= float(config.min_projection_retention_ratio)
+    raw_objective_after = float(best_result.fun)
+    objective_improvement_raw = float(initial_cost - raw_objective_after)
+    guard_improvement_pass = objective_improvement_raw >= float(
+        config.min_objective_improvement
+    )
+    guard_rotation_pass = applied_rotation_deg <= float(
+        config.accepted_delta_rotation_deg
+    )
+    guard_translation_pass = applied_translation_m <= float(
+        config.accepted_delta_translation_m
+    )
+    guard_projection_pass = projection_retention_ratio >= float(
+        config.min_projection_retention_ratio
+    )
+    guard_disabled = method_name in set(config.disable_update_guard_methods)
+    accepted_update = guard_disabled or (
+        guard_improvement_pass
+        and guard_rotation_pass
+        and guard_translation_pass
+        and guard_projection_pass
     )
     if not accepted_update:
         final_transform = np.asarray(initial_transform, dtype=float)
+    initial_lidar_diag = _projected_lidar_edge_diagnostics(
+        initial_transform,
+        context=context,
+        config=config,
+    )
+    final_lidar_diag = _projected_lidar_edge_diagnostics(
+        final_transform,
+        context=context,
+        config=config,
+    )
+    initial_lidar_edge_pixel_count = (
+        int(np.count_nonzero(np.asarray(initial_lidar_diag["lidar_edges"], dtype=bool)))
+        if initial_lidar_diag is not None
+        else 0
+    )
+    final_lidar_edge_pixel_count = (
+        int(np.count_nonzero(np.asarray(final_lidar_diag["lidar_edges"], dtype=bool)))
+        if final_lidar_diag is not None
+        else 0
+    )
     return {
         "method": method_name,
         "calibrated_transform": final_transform,
         "objective_before": float(initial_cost),
-        "objective_after": float(best_result.fun if accepted_update else initial_cost),
+        "objective_after": float(
+            raw_objective_after if accepted_update else initial_cost
+        ),
+        "raw_objective_after": float(raw_objective_after),
+        "objective_improvement_raw": float(objective_improvement_raw),
         "optimizer_success": bool(best_result.success),
         "optimizer_status": int(best_result.status),
         "optimizer_message": (
             str(best_result.message)
             if accepted_update
             else (
-                "fallback_to_initial_guess_due_to_delta_guard:" f"{best_result.message}"
+                "fallback_to_initial_guess_due_to_delta_guard:"
+                f"{best_result.message}"
+                f"|guard_improvement={guard_improvement_pass}"
+                f"|guard_rotation={guard_rotation_pass}"
+                f"|guard_translation={guard_translation_pass}"
+                f"|guard_projection={guard_projection_pass}"
             )
         ),
         "applied_delta_rotvec_rad": [float(value) for value in best_result.x[:3]],
@@ -888,6 +1233,16 @@ def _run_local_refinement(
         "applied_delta_rotation_deg_norm": applied_rotation_deg,
         "applied_delta_translation_m_norm": applied_translation_m,
         "projection_retention_ratio": projection_retention_ratio,
+        "guard_disabled": bool(guard_disabled),
+        "guard_improvement_pass": bool(guard_improvement_pass),
+        "guard_rotation_pass": bool(guard_rotation_pass),
+        "guard_translation_pass": bool(guard_translation_pass),
+        "guard_projection_pass": bool(guard_projection_pass),
+        "image_edge_pixel_count": int(context.image_edge_pixel_count),
+        "image_line_pixel_count": int(context.image_line_pixel_count),
+        "image_line_segment_count": int(context.image_line_segment_count),
+        "initial_lidar_edge_pixel_count": int(initial_lidar_edge_pixel_count),
+        "final_lidar_edge_pixel_count": int(final_lidar_edge_pixel_count),
     }
 
 
@@ -930,6 +1285,52 @@ def run_silhouette_refinement(
 
     return _run_local_refinement(
         method_name="silhouette_refine",
+        objective_fn=objective,
+        context=context,
+        initial_transform=initial_transform,
+        config=config,
+    )
+
+
+def run_direct_visual_refinement(
+    *,
+    context: EdgeAlignmentContext,
+    initial_transform: np.ndarray,
+    config: EdgeRefinementConfig,
+) -> dict[str, Any]:
+    def objective(params: np.ndarray) -> float:
+        return _direct_visual_alignment_cost(
+            params,
+            context=context,
+            initial_transform=initial_transform,
+            config=config,
+        )
+
+    return _run_local_refinement(
+        method_name="direct_visual_refine",
+        objective_fn=objective,
+        context=context,
+        initial_transform=initial_transform,
+        config=config,
+    )
+
+
+def run_sensorscalib_line_refinement(
+    *,
+    context: EdgeAlignmentContext,
+    initial_transform: np.ndarray,
+    config: EdgeRefinementConfig,
+) -> dict[str, Any]:
+    def objective(params: np.ndarray) -> float:
+        return _sensorscalib_line_alignment_cost(
+            params,
+            context=context,
+            initial_transform=initial_transform,
+            config=config,
+        )
+
+    return _run_local_refinement(
+        method_name="sensorscalib_line_refine",
         objective_fn=objective,
         context=context,
         initial_transform=initial_transform,
@@ -1639,7 +2040,13 @@ def _build_final_acceptance_for_benchmark(
     oracle = method_rows_by_name.get("oracle_gt") or {}
     identity = method_rows_by_name.get("identity") or {}
     candidate_method_name = "edge_refine"
-    for name in ("batch_hybrid_refine", "silhouette_refine", "edge_refine"):
+    for name in (
+        "batch_hybrid_refine",
+        "sensorscalib_line_refine",
+        "direct_visual_refine",
+        "silhouette_refine",
+        "edge_refine",
+    ):
         if name in method_rows_by_name:
             candidate_method_name = name
             break
@@ -2023,6 +2430,26 @@ def _run_method(
                 ground_truth_transform=ground_truth_transform,
             ),
         )
+    if method_name == "direct_visual_refine":
+        return run_direct_visual_refinement(
+            context=context,
+            initial_transform=initial_transform,
+            config=_benchmark_refinement_config(
+                config=config.edge_refinement,
+                initial_transform=initial_transform,
+                ground_truth_transform=ground_truth_transform,
+            ),
+        )
+    if method_name == "sensorscalib_line_refine":
+        return run_sensorscalib_line_refinement(
+            context=context,
+            initial_transform=initial_transform,
+            config=_benchmark_refinement_config(
+                config=config.edge_refinement,
+                initial_transform=initial_transform,
+                ground_truth_transform=ground_truth_transform,
+            ),
+        )
     if method_name == "silhouette_refine":
         return run_silhouette_refinement(
             context=context,
@@ -2244,6 +2671,10 @@ def run_nuscenes_benchmark(config: NuScenesBenchmarkConfig) -> dict[str, Any]:
                         ),
                         "objective_before": outcome.get("objective_before"),
                         "objective_after": outcome.get("objective_after"),
+                        "raw_objective_after": outcome.get("raw_objective_after"),
+                        "objective_improvement_raw": outcome.get(
+                            "objective_improvement_raw"
+                        ),
                         "objective_improvement": (
                             None
                             if outcome.get("objective_before") is None
@@ -2262,6 +2693,22 @@ def run_nuscenes_benchmark(config: NuScenesBenchmarkConfig) -> dict[str, Any]:
                         "context_count": outcome.get("context_count"),
                         "projection_retention_ratio": outcome.get(
                             "projection_retention_ratio"
+                        ),
+                        "guard_disabled": outcome.get("guard_disabled"),
+                        "guard_improvement_pass": outcome.get("guard_improvement_pass"),
+                        "guard_rotation_pass": outcome.get("guard_rotation_pass"),
+                        "guard_translation_pass": outcome.get("guard_translation_pass"),
+                        "guard_projection_pass": outcome.get("guard_projection_pass"),
+                        "image_edge_pixel_count": outcome.get("image_edge_pixel_count"),
+                        "image_line_pixel_count": outcome.get("image_line_pixel_count"),
+                        "image_line_segment_count": outcome.get(
+                            "image_line_segment_count"
+                        ),
+                        "initial_lidar_edge_pixel_count": outcome.get(
+                            "initial_lidar_edge_pixel_count"
+                        ),
+                        "final_lidar_edge_pixel_count": outcome.get(
+                            "final_lidar_edge_pixel_count"
                         ),
                         "applied_delta_rotation_deg_norm": outcome.get(
                             "applied_delta_rotation_deg_norm"
@@ -2326,6 +2773,8 @@ def run_nuscenes_benchmark(config: NuScenesBenchmarkConfig) -> dict[str, Any]:
                             comparison_path = comparison_file
                             if method_name in {
                                 "edge_refine",
+                                "direct_visual_refine",
+                                "sensorscalib_line_refine",
                                 "silhouette_refine",
                                 "batch_hybrid_refine",
                             }:

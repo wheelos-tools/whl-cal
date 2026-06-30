@@ -29,6 +29,11 @@ try:
 except ImportError:
     RecordReader = None
 
+try:
+    from lidar2lidar.pycyber_record_adapter import Record as PycyberRecordAdapter
+except ImportError:
+    PycyberRecordAdapter = None
+
 # isort: off
 from lidar2lidar import apollo_flatbuffer_messages as flat_messages  # noqa: E402
 from lidar2lidar import apollo_record_messages as record_messages  # noqa: E402
@@ -37,13 +42,42 @@ from lidar2lidar import apollo_record_messages as record_messages  # noqa: E402
 
 
 def ensure_record_available() -> None:
-    if RecordReader is None:
+    _select_record_backend()
+
+
+def _select_record_backend() -> str:
+    backend = os.environ.get("WHL_CAL_RECORD_BACKEND", "auto").strip().lower()
+    if backend not in {"auto", "cyber_record", "pycyber"}:
         raise RuntimeError(
-            (
-                "cyber_record is not installed. "
-                "Use `pip install -e .` or install `cyber_record`."
-            )
+            "Unsupported WHL_CAL_RECORD_BACKEND value: "
+            f"{backend!r}. Expected auto, cyber_record, or pycyber."
         )
+
+    if backend == "cyber_record":
+        if RecordReader is None:
+            raise RuntimeError(
+                "cyber_record is not installed. Use `pip install -e .` or install "
+                "cyber_record, or switch WHL_CAL_RECORD_BACKEND to pycyber."
+            )
+        return "cyber_record"
+
+    if backend == "pycyber":
+        if PycyberRecordAdapter is None:
+            raise RuntimeError(
+                "pycyber is not installed. Install pycyber and retry, or switch "
+                "WHL_CAL_RECORD_BACKEND to cyber_record."
+            )
+        return "pycyber"
+
+    if RecordReader is not None:
+        return "cyber_record"
+    if PycyberRecordAdapter is not None:
+        return "pycyber"
+
+    raise RuntimeError(
+        "Neither cyber_record nor pycyber is installed. Use `pip install -e .` "
+        "or install one of the record backends."
+    )
 
 
 def _normalize_topics(topics: Iterable[str] | None) -> set[str] | None:
@@ -58,9 +92,8 @@ def _normalize_type_name(type_name: str | None) -> str:
     return str(type_name).replace("::", ".").strip(".")
 
 
-class Record:
+class _CyberRecordAdapter:
     def __init__(self, file_name: str):
-        ensure_record_available()
         self._reader = RecordReader(file_name)
 
     def __enter__(self) -> "Record":
@@ -144,3 +177,66 @@ class Record:
     ) -> Iterator[tuple[str, object, int]]:
         for topic, payload, _, timestamp_ns in self._iter_messages(topics=topics):
             yield topic, self._decode_message(topic, payload), timestamp_ns
+
+
+class Record:
+    def __init__(self, file_name: str):
+        ensure_record_available()
+        backend = _select_record_backend()
+        self._backend_name = backend
+        self._impl = (
+            _CyberRecordAdapter(file_name)
+            if backend == "cyber_record"
+            else PycyberRecordAdapter(file_name)
+        )
+
+    def __enter__(self) -> "Record":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if hasattr(self._impl, "close"):
+            self._impl.close()
+        return False
+
+    def __iter__(self):
+        return self.read_messages()
+
+    def read_raw_messages(
+        self, topics: Iterable[str] | None = None
+    ) -> Iterator[tuple[str, bytes, str, int]]:
+        yield from self._impl.read_raw_messages(topics=topics)
+
+    def read_messages(
+        self, topics: Iterable[str] | None = None
+    ) -> Iterator[tuple[str, object, int]]:
+        yield from self._impl.read_messages(topics=topics)
+
+    def get_messagenumber(self, channel_name):
+        if hasattr(self._impl, "get_messagenumber"):
+            return self._impl.get_messagenumber(channel_name)
+        return 0
+
+    def get_messagetype(self, channel_name):
+        if hasattr(self._impl, "get_messagetype"):
+            return self._impl.get_messagetype(channel_name)
+        return ""
+
+    def get_protodesc(self, channel_name):
+        if hasattr(self._impl, "get_protodesc"):
+            return self._impl.get_protodesc(channel_name)
+        return b""
+
+    def get_headerstring(self):
+        if hasattr(self._impl, "get_headerstring"):
+            return self._impl.get_headerstring()
+        return ""
+
+    def get_channellist(self):
+        if hasattr(self._impl, "get_channellist"):
+            return self._impl.get_channellist()
+        return []
+
+    def reset(self):
+        if hasattr(self._impl, "reset"):
+            return self._impl.reset()
+        return None

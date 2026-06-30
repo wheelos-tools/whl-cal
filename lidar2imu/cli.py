@@ -34,7 +34,10 @@ logging.basicConfig(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="LiDAR-to-IMU calibration from curated ground and motion sample features."
+        description=(
+            "LiDAR-to-IMU calibration from curated ground and motion sample "
+            "features."
+        )
     )
     parser.add_argument(
         "--input", required=True, help="Path to a YAML or JSON sample dataset."
@@ -73,6 +76,35 @@ def main() -> None:
         help="How to handle weak planar observability during calibration.",
     )
     parser.add_argument(
+        "--solver-family",
+        default=None,
+        choices=["baseline", "gril_staged", "gril_prob", "gril_prob_nhc"],
+        help=(
+            "Calibration solver family. baseline keeps the current path; "
+            "gril_staged enables screened staged solving; gril_prob adds "
+            "information-weighted motion residuals; gril_prob_nhc adds "
+            "weak-motion NHC prior gating."
+        ),
+    )
+    parser.add_argument(
+        "--imu-preintegration-translation-weight",
+        type=float,
+        default=None,
+        help=(
+            "Optional weight for IMU preintegration translation residuals in "
+            "planar/joint stages."
+        ),
+    )
+    parser.add_argument(
+        "--imu-preintegration-translation-scale-m",
+        type=float,
+        default=None,
+        help=(
+            "Scale (meters) for IMU preintegration translation residuals in "
+            "planar/joint stages."
+        ),
+    )
+    parser.add_argument(
         "--metrics-holdout-every-n",
         type=int,
         default=None,
@@ -82,7 +114,10 @@ def main() -> None:
         "--metrics-holdout-repeat-count",
         type=int,
         default=None,
-        help="Number of holdout offsets to replay when building repeated-holdout stability and uncertainty summaries.",
+        help=(
+            "Number of holdout offsets to replay when building repeated-holdout "
+            "stability and uncertainty summaries."
+        ),
     )
     args = parser.parse_args()
 
@@ -98,6 +133,16 @@ def main() -> None:
         config_updates["min_motion_rotation_deg"] = args.min_motion_rotation_deg
     if args.planar_motion_policy is not None:
         config_updates["planar_motion_policy"] = args.planar_motion_policy
+    if args.solver_family is not None:
+        config_updates["solver_family"] = args.solver_family
+    if args.imu_preintegration_translation_weight is not None:
+        config_updates["imu_preintegration_translation_weight"] = (
+            args.imu_preintegration_translation_weight
+        )
+    if args.imu_preintegration_translation_scale_m is not None:
+        config_updates["imu_preintegration_translation_scale_m"] = (
+            args.imu_preintegration_translation_scale_m
+        )
     if args.metrics_holdout_every_n is not None:
         config_updates["metrics_holdout_every_n"] = args.metrics_holdout_every_n
     if args.metrics_holdout_repeat_count is not None:
@@ -111,7 +156,8 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logging.info(
-        "Running lidar2imu calibration with %d ground samples and %d candidate motion samples.",
+        "Running lidar2imu calibration with %d ground samples and %d "
+        "candidate motion samples.",
         len(dataset.ground_samples),
         len(dataset.motion_samples),
     )
@@ -140,6 +186,7 @@ def main() -> None:
             "stages": result["stages"],
         },
         evaluation_report=result["evaluation"],
+        raw_payload=raw_payload,
     )
     logging.info("Saved lidar2imu calibration outputs to %s", output_dir)
     logging.info("Manifest: %s", manifest)

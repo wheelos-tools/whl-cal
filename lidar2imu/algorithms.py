@@ -209,8 +209,69 @@ def _imu_up_vector(sample: GroundSample) -> np.ndarray:
     return -normalize_vector(sample.imu_gravity)
 
 
+def _ground_normal_residual(
+    predicted_up: np.ndarray,
+    target_up: np.ndarray,
+) -> np.ndarray:
+    """Cosine-distance vector form: ||p - t||^2 = 2 * (1 - p·t)."""
+    return np.asarray(predicted_up, dtype=float) - np.asarray(target_up, dtype=float)
+
+
 def _sample_weight(weight: float) -> float:
     return math.sqrt(max(float(weight), 1e-12))
+
+
+def _sample_metadata_weight(sample: MotionSample, key: str) -> float:
+    raw_value = sample.metadata.get(key, sample.weight)
+    try:
+        weight = float(raw_value)
+    except (TypeError, ValueError):
+        weight = float(sample.weight)
+    return _sample_weight(weight)
+
+
+def _rotation_weight(sample: MotionSample) -> float:
+    return _sample_metadata_weight(sample, "rotation_weight")
+
+
+def _translation_weight(sample: MotionSample) -> float:
+    return _sample_metadata_weight(sample, "translation_weight")
+
+
+def _preintegration_delta_translation(sample: MotionSample) -> np.ndarray | None:
+    raw_value = sample.metadata.get("imu_preintegration_delta_translation_m")
+    if raw_value is None:
+        return None
+    try:
+        value = np.asarray(raw_value, dtype=float).reshape(3)
+    except (TypeError, ValueError):
+        return None
+    if not np.all(np.isfinite(value)):
+        return None
+    return value
+
+
+def _preintegration_translation_weight(
+    sample: MotionSample,
+    config: CalibrationConfig | None,
+) -> float:
+    if config is None:
+        return 0.0
+    base_weight = float(config.imu_preintegration_translation_weight)
+    if base_weight <= 0.0:
+        return 0.0
+    confidence = sample.metadata.get("imu_preintegration_confidence", 1.0)
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        confidence_value = 1.0
+    if not math.isfinite(confidence_value):
+        confidence_value = 1.0
+    confidence_value = max(
+        confidence_value,
+        float(config.imu_preintegration_min_confidence),
+    )
+    return _sample_weight(base_weight * confidence_value)
 
 
 def solve_roll_pitch_from_ground(
@@ -221,7 +282,8 @@ def solve_roll_pitch_from_ground(
 ) -> tuple[np.ndarray, dict]:
     if len(samples) < config.min_ground_samples:
         raise ValueError(
-            f"Need at least {config.min_ground_samples} ground samples, got {len(samples)}."
+            "Need at least "
+            f"{config.min_ground_samples} ground samples, got {len(samples)}."
         )
 
     def residuals(params: np.ndarray) -> np.ndarray:
@@ -232,7 +294,8 @@ def solve_roll_pitch_from_ground(
             predicted_up = rotation @ sample.lidar_plane_normal
             target_up = _imu_up_vector(sample)
             values.extend(
-                _sample_weight(sample.weight) * np.cross(predicted_up, target_up)
+                _sample_weight(sample.weight)
+                * _ground_normal_residual(predicted_up, target_up)
             )
         return np.asarray(values, dtype=float)
 
@@ -337,7 +400,8 @@ def solve_yaw_from_motion(
 
     if len(filtered_samples) < config.min_motion_samples:
         raise ValueError(
-            f"Need at least {config.min_motion_samples} motion samples with angular excitation, "
+            "Need at least "
+            f"{config.min_motion_samples} motion samples with angular excitation, "
             f"got {len(filtered_samples)}."
         )
 
@@ -353,8 +417,7 @@ def solve_yaw_from_motion(
                 @ rotation.T
             )
             values.extend(
-                _sample_weight(sample.weight)
-                * R.from_matrix(rotation_error).as_rotvec()
+                _rotation_weight(sample) * R.from_matrix(rotation_error).as_rotvec()
             )
         return np.asarray(values, dtype=float)
 
@@ -427,6 +490,8 @@ def solve_translation_from_motion(
     rotation: np.ndarray,
     initial_translation: np.ndarray,
     locked_axes: tuple[bool, bool, bool] = (False, False, False),
+    nhc_prior: dict | None = None,
+    config: CalibrationConfig | None = None,
 ) -> tuple[np.ndarray, dict]:
     initial_translation = np.asarray(initial_translation, dtype=float).reshape(3)
     if not samples:
@@ -443,20 +508,98 @@ def solve_translation_from_motion(
             },
         }
 
-    design_rows = []
-    value_rows = []
+    motion_design_rows = []
+    motion_value_rows = []
+    preintegration_rows = []
     for sample in samples:
-        weight = _sample_weight(sample.weight)
-        design_rows.append(
+        weight = _translation_weight(sample)
+        motion_design_rows.append(
             weight * (sample.imu_delta_rotation - np.eye(3, dtype=float))
         )
-        value_rows.append(
+        motion_value_rows.append(
             weight
             * (rotation @ sample.lidar_delta_translation - sample.imu_delta_translation)
         )
+        preintegration_delta = _preintegration_delta_translation(sample)
+        preintegration_weight = _preintegration_translation_weight(sample, config)
+        if (
+            preintegration_delta is not None
+            and preintegration_weight > 0.0
+            and config is not None
+        ):
+            preintegration_scale_m = max(
+                float(config.imu_preintegration_translation_scale_m),
+                1e-6,
+            )
+            preintegration_rows.append(
+                {
+                    "sample": sample,
+                    "design": (preintegration_weight / preintegration_scale_m)
+                    * (sample.imu_delta_rotation - np.eye(3, dtype=float)),
+                    "value": (preintegration_weight / preintegration_scale_m)
+                    * (
+                        rotation @ sample.lidar_delta_translation - preintegration_delta
+                    ),
+                    "delta_translation": preintegration_delta,
+                    "weight": preintegration_weight,
+                    "scale_m": preintegration_scale_m,
+                }
+            )
+
+    nhc_enabled = bool(nhc_prior and nhc_prior.get("enabled", False))
+    nhc_rows = []
+    if nhc_enabled:
+        nhc_weight = _sample_weight(float(nhc_prior.get("weight", 1.0)))
+        lateral_scale_m = max(float(nhc_prior.get("lateral_scale_m", 0.08)), 1e-6)
+        vertical_scale_m = max(float(nhc_prior.get("vertical_scale_m", 0.05)), 1e-6)
+        min_forward_translation_m = max(
+            float(nhc_prior.get("min_forward_translation_m", 0.1)), 0.0
+        )
+        for sample in samples:
+            motion_matrix = sample.imu_delta_rotation - np.eye(3, dtype=float)
+            projected_lidar_translation = rotation @ sample.lidar_delta_translation
+            if abs(float(projected_lidar_translation[0])) < min_forward_translation_m:
+                continue
+            sample_weight = _translation_weight(sample) * nhc_weight
+            if sample_weight <= 0.0:
+                continue
+            lateral_design = (-sample_weight / lateral_scale_m) * motion_matrix[
+                1
+            ].reshape(1, 3)
+            lateral_value = (-sample_weight / lateral_scale_m) * np.array(
+                [projected_lidar_translation[1]], dtype=float
+            )
+            vertical_design = (-sample_weight / vertical_scale_m) * motion_matrix[
+                2
+            ].reshape(1, 3)
+            vertical_value = (-sample_weight / vertical_scale_m) * np.array(
+                [projected_lidar_translation[2]], dtype=float
+            )
+            nhc_rows.append(
+                {
+                    "sample": sample,
+                    "lateral_design": lateral_design,
+                    "lateral_value": lateral_value,
+                    "vertical_design": vertical_design,
+                    "vertical_value": vertical_value,
+                }
+            )
+
+    design_rows = list(motion_design_rows)
+    value_rows = list(motion_value_rows)
+    for row in preintegration_rows:
+        design_rows.append(np.asarray(row["design"], dtype=float))
+        value_rows.append(np.asarray(row["value"], dtype=float))
+    for row in nhc_rows:
+        design_rows.append(np.asarray(row["lateral_design"], dtype=float))
+        value_rows.append(np.asarray(row["lateral_value"], dtype=float))
+        design_rows.append(np.asarray(row["vertical_design"], dtype=float))
+        value_rows.append(np.asarray(row["vertical_value"], dtype=float))
 
     design_matrix = np.concatenate(design_rows, axis=0)
     value_vector = np.concatenate(value_rows, axis=0)
+    motion_design_matrix = np.concatenate(motion_design_rows, axis=0)
+    motion_value_vector = np.concatenate(motion_value_rows, axis=0)
     translation = initial_translation.copy()
     locked_indices = [index for index, locked in enumerate(locked_axes) if locked]
     free_indices = [index for index, locked in enumerate(locked_axes) if not locked]
@@ -471,8 +614,29 @@ def solve_translation_from_motion(
             reduced_design, reduced_value, rcond=None
         )
         translation[np.asarray(free_indices, dtype=int)] = solved_values
-    residual_vector = design_matrix @ translation - value_vector
+    residual_vector = motion_design_matrix @ translation - motion_value_vector
     residual_norms = np.linalg.norm(residual_vector.reshape(-1, 3), axis=1)
+    nhc_lateral_residuals = []
+    nhc_vertical_residuals = []
+    preintegration_residuals = []
+    for row in nhc_rows:
+        sample = row["sample"]
+        projected_imu_translation = (
+            rotation @ sample.lidar_delta_translation
+            - (sample.imu_delta_rotation - np.eye(3, dtype=float)) @ translation
+        )
+        nhc_lateral_residuals.append(abs(float(projected_imu_translation[1])))
+        nhc_vertical_residuals.append(abs(float(projected_imu_translation[2])))
+    for row in preintegration_rows:
+        sample = row["sample"]
+        preintegration_delta = np.asarray(row["delta_translation"], dtype=float)
+        projected_imu_translation = (
+            rotation @ sample.lidar_delta_translation
+            - (sample.imu_delta_rotation - np.eye(3, dtype=float)) @ translation
+        )
+        preintegration_residuals.append(
+            float(np.linalg.norm(projected_imu_translation - preintegration_delta))
+        )
     observability_matrix = (
         design_matrix[:, free_indices]
         if free_indices
@@ -494,6 +658,49 @@ def solve_translation_from_motion(
         "observability": observability_from_matrix(
             observability_matrix, expected_rank=len(free_indices)
         ),
+        "imu_preintegration": (
+            None
+            if not preintegration_rows
+            else {
+                "enabled": True,
+                "row_count": int(len(preintegration_rows) * 3),
+                "sample_count": int(len(preintegration_rows)),
+                "translation_scale_m": (
+                    None
+                    if config is None
+                    else float(config.imu_preintegration_translation_scale_m)
+                ),
+                "weight": (
+                    None
+                    if config is None
+                    else float(config.imu_preintegration_translation_weight)
+                ),
+                "residuals": {
+                    "translation_residual_m": summarize_values(preintegration_residuals)
+                },
+            }
+        ),
+        "nhc_prior": (
+            None
+            if not nhc_enabled
+            else {
+                "enabled": True,
+                "mode": nhc_prior.get("mode", "auto"),
+                "activation_reasons": list(nhc_prior.get("activation_reasons", [])),
+                "row_count": int(len(nhc_rows) * 2),
+                "sample_count": int(len(nhc_rows)),
+                "lateral_scale_m": float(nhc_prior.get("lateral_scale_m", 0.08)),
+                "vertical_scale_m": float(nhc_prior.get("vertical_scale_m", 0.05)),
+                "weight": float(nhc_prior.get("weight", 1.0)),
+                "min_forward_translation_m": float(
+                    nhc_prior.get("min_forward_translation_m", 0.1)
+                ),
+                "residuals": {
+                    "lateral_m": summarize_values(nhc_lateral_residuals),
+                    "vertical_m": summarize_values(nhc_vertical_residuals),
+                },
+            }
+        ),
     }
 
 
@@ -510,6 +717,7 @@ def refine_joint_solution(
         False,
         False,
     ),
+    nhc_prior: dict | None = None,
 ) -> tuple[np.ndarray, dict]:
     if not ground_samples:
         raise ValueError("Joint refinement requires at least one ground sample.")
@@ -519,6 +727,27 @@ def refine_joint_solution(
     component_names = ("yaw", "roll", "pitch", "x", "y", "z")
     reference_params = np.asarray(initial_params, dtype=float).reshape(6)
     active_indices = [index for index, locked in enumerate(locked_mask) if not locked]
+    nhc_enabled = bool(nhc_prior and nhc_prior.get("enabled", False))
+    nhc_weight = (
+        _sample_weight(float(nhc_prior.get("weight", 1.0))) if nhc_enabled else 1.0
+    )
+    nhc_lateral_scale_m = (
+        max(float(nhc_prior.get("lateral_scale_m", 0.08)), 1e-6) if nhc_enabled else 1.0
+    )
+    nhc_vertical_scale_m = (
+        max(float(nhc_prior.get("vertical_scale_m", 0.05)), 1e-6)
+        if nhc_enabled
+        else 1.0
+    )
+    nhc_min_forward_translation_m = (
+        max(float(nhc_prior.get("min_forward_translation_m", 0.1)), 0.0)
+        if nhc_enabled
+        else 0.0
+    )
+    preintegration_enabled = float(config.imu_preintegration_translation_weight) > 0.0
+    preintegration_scale_m = max(
+        float(config.imu_preintegration_translation_scale_m), 1e-6
+    )
 
     def expand_params(params: np.ndarray) -> np.ndarray:
         full = reference_params.copy()
@@ -539,7 +768,7 @@ def refine_joint_solution(
             target_up = _imu_up_vector(sample)
             values.extend(
                 _sample_weight(sample.weight)
-                * np.cross(predicted_up, target_up)
+                * _ground_normal_residual(predicted_up, target_up)
                 / config.ground_normal_scale_rad
             )
             if sample.imu_ground_height is not None:
@@ -560,7 +789,7 @@ def refine_joint_solution(
                 @ rotation.T
             )
             values.extend(
-                _sample_weight(sample.weight)
+                _rotation_weight(sample)
                 * R.from_matrix(rotation_error).as_rotvec()
                 / config.motion_rotation_scale_rad
             )
@@ -570,10 +799,46 @@ def refine_joint_solution(
                 rotation @ sample.lidar_delta_translation - sample.imu_delta_translation
             )
             values.extend(
-                _sample_weight(sample.weight)
+                _translation_weight(sample)
                 * translation_error
                 / config.motion_translation_scale_m
             )
+            if preintegration_enabled:
+                preintegration_delta = _preintegration_delta_translation(sample)
+                preintegration_weight = _preintegration_translation_weight(
+                    sample, config
+                )
+                if preintegration_delta is not None and preintegration_weight > 0.0:
+                    preintegration_error = (
+                        sample.imu_delta_rotation - np.eye(3, dtype=float)
+                    ) @ translation - (
+                        rotation @ sample.lidar_delta_translation - preintegration_delta
+                    )
+                    values.extend(
+                        preintegration_weight
+                        * preintegration_error
+                        / preintegration_scale_m
+                    )
+            if nhc_enabled:
+                projected_imu_translation = (
+                    rotation @ sample.lidar_delta_translation
+                    - (sample.imu_delta_rotation - np.eye(3, dtype=float)) @ translation
+                )
+                if (
+                    abs(float(sample.imu_delta_translation[0]))
+                    >= nhc_min_forward_translation_m
+                ):
+                    nhc_sample_weight = _translation_weight(sample) * nhc_weight
+                    values.append(
+                        nhc_sample_weight
+                        * float(projected_imu_translation[1])
+                        / nhc_lateral_scale_m
+                    )
+                    values.append(
+                        nhc_sample_weight
+                        * float(projected_imu_translation[2])
+                        / nhc_vertical_scale_m
+                    )
 
         return np.asarray(values, dtype=float)
 
@@ -592,6 +857,39 @@ def refine_joint_solution(
     transform = transform_from_components(
         yaw, roll, pitch, np.array([tx, ty, tz], dtype=float)
     )
+    nhc_lateral_residuals = []
+    nhc_vertical_residuals = []
+    preintegration_residuals = []
+    if nhc_enabled:
+        translation = np.array([tx, ty, tz], dtype=float)
+        rotation = transform[:3, :3]
+        for sample in motion_samples:
+            projected_imu_translation = (
+                rotation @ sample.lidar_delta_translation
+                - (sample.imu_delta_rotation - np.eye(3, dtype=float)) @ translation
+            )
+            if (
+                abs(float(sample.imu_delta_translation[0]))
+                < nhc_min_forward_translation_m
+            ):
+                continue
+            nhc_lateral_residuals.append(abs(float(projected_imu_translation[1])))
+            nhc_vertical_residuals.append(abs(float(projected_imu_translation[2])))
+    if preintegration_enabled:
+        translation = np.array([tx, ty, tz], dtype=float)
+        rotation = transform[:3, :3]
+        for sample in motion_samples:
+            preintegration_delta = _preintegration_delta_translation(sample)
+            preintegration_weight = _preintegration_translation_weight(sample, config)
+            if preintegration_delta is None or preintegration_weight <= 0.0:
+                continue
+            projected_imu_translation = (
+                rotation @ sample.lidar_delta_translation
+                - (sample.imu_delta_rotation - np.eye(3, dtype=float)) @ translation
+            )
+            preintegration_residuals.append(
+                float(np.linalg.norm(projected_imu_translation - preintegration_delta))
+            )
     return transform, {
         "success": bool(result.success),
         "message": result.message,
@@ -611,5 +909,40 @@ def refine_joint_solution(
         },
         "observability": observability_from_matrix(
             result.jac, expected_rank=len(active_indices)
+        ),
+        "imu_preintegration": (
+            None
+            if not preintegration_enabled
+            else {
+                "enabled": True,
+                "weight": float(config.imu_preintegration_translation_weight),
+                "translation_scale_m": float(
+                    config.imu_preintegration_translation_scale_m
+                ),
+                "sample_count": int(len(preintegration_residuals)),
+                "residuals": {
+                    "translation_residual_m": summarize_values(preintegration_residuals)
+                },
+            }
+        ),
+        "nhc_prior": (
+            None
+            if not nhc_enabled
+            else {
+                "enabled": True,
+                "mode": nhc_prior.get("mode", "auto"),
+                "activation_reasons": list(nhc_prior.get("activation_reasons", [])),
+                "weight": float(nhc_prior.get("weight", 1.0)),
+                "lateral_scale_m": float(nhc_prior.get("lateral_scale_m", 0.08)),
+                "vertical_scale_m": float(nhc_prior.get("vertical_scale_m", 0.05)),
+                "min_forward_translation_m": float(
+                    nhc_prior.get("min_forward_translation_m", 0.1)
+                ),
+                "sample_count": int(len(nhc_lateral_residuals)),
+                "residuals": {
+                    "lateral_m": summarize_values(nhc_lateral_residuals),
+                    "vertical_m": summarize_values(nhc_vertical_residuals),
+                },
+            }
         ),
     }
