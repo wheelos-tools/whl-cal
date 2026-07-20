@@ -1,0 +1,284 @@
+:root {
+  --bg: #101418;
+  --panel: #171c22;
+  --border: #2a323d;
+  --text: #e8edf3;
+  --muted: #9aa7b5;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --danger: #ef4444;
+  --success: #22c55e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  height: 100vh;
+}
+
+#sidebar {
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  padding: 16px;
+}
+
+header h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.subtitle {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.hint-text {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.panel {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.align-edge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.align-edge-list button {
+  width: 100%;
+  justify-content: center;
+}
+
+.align-edge-list button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.row, .button-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row {
+  margin-bottom: 8px;
+}
+
+.button-row {
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+input[type="number"],
+select {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0d1117;
+  color: var(--text);
+}
+
+#frame-index {
+  flex: 1;
+  min-width: 0;
+}
+
+button {
+  border: 1px solid var(--border);
+  background: #222933;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.active,
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+}
+
+.info-box {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: #0d1117;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.info-box.error {
+  color: #fecaca;
+}
+
+.info-box.success {
+  color: #bbf7d0;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.checkbox-row,
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.slider-row input {
+  flex: 1;
+}
+
+.visibility-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.visibility-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #0d1117;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.visibility-item input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.visibility-item .dot {
+  flex-shrink: 0;
+}
+
+.visibility-item.is-hidden {
+  opacity: 0.55;
+}
+
+.legend ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+}
+
+.dot.green { background: #00ff00; }
+.dot.red { background: #ff0000; }
+.dot.orange { background: #ffcc00; }
+.dot.blue { background: #0088ff; }
+
+#viewport {
+  position: relative;
+  min-width: 0;
+}
+
+#canvas-host {
+  width: 100%;
+  height: 100%;
+}
+
+#canvas-host canvas {
+  display: block;
+}
+
+#hint, #status-bar {
+  position: absolute;
+  left: 16px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+#hint {
+  bottom: 16px;
+}
+
+#status-bar {
+  top: 16px;
+}
+
+@media (max-width: 960px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  #sidebar {
+    max-height: 42vh;
+  }
+}

@@ -249,9 +249,12 @@ def compose_topic_transforms(
         source_topic = edge_result["source_topic"]
         relation_target = edge_result["target_topic"]
         transform = np.asarray(edge_result["best_run"]["transformation"], dtype=float)
-        adjacency[source_topic].append((relation_target, transform, edge_result))
-        adjacency[relation_target].append(
-            (source_topic, np.linalg.inv(transform), edge_result)
+        # Edge transform maps source -> target (p_target = transform @ p_source).
+        # topic_transforms[topic] maps points into the global target frame, so walking
+        # target -> source uses transform, and source -> target uses inv(transform).
+        adjacency[relation_target].append((source_topic, transform, edge_result))
+        adjacency[source_topic].append(
+            (relation_target, np.linalg.inv(transform), edge_result)
         )
         topics.add(source_topic)
         topics.add(relation_target)

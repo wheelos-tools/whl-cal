@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LiDAR 手动对齐</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header>
+        <h1>LiDAR 手动对齐</h1>
+        <p class="subtitle">左前为基准，拖拽右前 / 右后 / 左后进行对齐</p>
+      </header>
+
+      <section class="panel">
+        <h2>数据</h2>
+        <div class="row">
+          <label for="frame-index">可用帧</label>
+          <select id="frame-index"></select>
+          <button id="reload-btn" type="button">重新加载</button>
+        </div>
+        <div id="session-info" class="info-box">加载中…</div>
+      </section>
+
+      <section class="panel">
+        <h2>当前雷达</h2>
+        <select id="sensor-select"></select>
+        <div class="button-row">
+          <button id="mode-translate" class="active" type="button">平移</button>
+          <button id="mode-rotate" type="button">旋转</button>
+        </div>
+        <label class="slider-row">
+          点大小
+          <input id="point-size" type="range" min="0.02" max="0.25" step="0.01" value="0.08" />
+        </label>
+      </section>
+
+      <section class="panel">
+        <h2>显示控制</h2>
+        <div id="visibility-list" class="visibility-list"></div>
+        <div class="button-row">
+          <button id="show-all-btn" type="button">全部显示</button>
+          <button id="hide-all-btn" type="button">全部隐藏</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>数值微调 (m / deg)</h2>
+        <div class="grid-3">
+          <label>X<input id="tx" type="number" step="0.01" /></label>
+          <label>Y<input id="ty" type="number" step="0.01" /></label>
+          <label>Z<input id="tz" type="number" step="0.01" /></label>
+          <label>Yaw<input id="yaw" type="number" step="0.1" /></label>
+          <label>Pitch<input id="pitch" type="number" step="0.1" /></label>
+          <label>Roll<input id="roll" type="number" step="0.1" /></label>
+        </div>
+        <div class="button-row">
+          <button id="reset-sensor-btn" type="button">重置当前</button>
+          <button id="reset-all-btn" type="button">全部重置</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>自动对齐 (GICP)</h2>
+        <div id="align-edge-list" class="align-edge-list"></div>
+        <button id="align-all-btn" type="button">全部对齐 + 闭环优化</button>
+        <p class="hint-text">PCL GICP 仅配准当前加载帧；「全部对齐」含闭环优化</p>
+        <div id="auto-align-result" class="info-box"></div>
+      </section>
+
+      <section class="panel">
+        <h2>导出</h2>
+        <button id="export-btn" class="primary" type="button">生成外参 + 融合 PCD</button>
+        <div id="export-result" class="info-box"></div>
+      </section>
+
+      <section class="panel legend">
+        <h2>图例</h2>
+        <ul>
+          <li><span class="dot green"></span>左前 (固定)</li>
+          <li><span class="dot red"></span>左后</li>
+          <li><span class="dot orange"></span>右前</li>
+          <li><span class="dot blue"></span>右后</li>
+        </ul>
+      </section>
+    </aside>
+
+    <main id="viewport">
+      <div id="canvas-host"></div>
+      <div id="hint">鼠标左键旋转视角 · 滚轮缩放 · 选中雷达后拖拽 Gizmo 对齐</div>
+      <div id="status-bar"></div>
+    </main>
+  </div>
+
+  <script type="module" src="/static/app.js?v=20260719e"></script>
+</body>
+</html>
