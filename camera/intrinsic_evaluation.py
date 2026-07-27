@@ -13,6 +13,7 @@ from calibration_common.evaluation import (
     write_paradigm_artifacts,
     write_table_csv,
 )
+from camera.intrinsic_solver import normalize_distortion_model, project_points
 
 
 def float_list_summary(values):
@@ -116,15 +117,26 @@ def sample_image_size_report(sample_records, capture_runtime_info):
     return report
 
 
-def per_view_reprojection_report(objpoints, imgpoints, mtx, dist, sample_records, rvecs, tvecs):
+def per_view_reprojection_report(
+    objpoints,
+    imgpoints,
+    mtx,
+    dist,
+    sample_records,
+    rvecs,
+    tvecs,
+    distortion_model="plumb_bob",
+):
+    model = normalize_distortion_model(distortion_model)
     rows = []
     for index in range(len(objpoints)):
-        imgpts2, _ = cv2.projectPoints(
+        imgpts2, _ = project_points(
             objpoints[index],
             rvecs[index],
             tvecs[index],
             mtx,
             dist,
+            distortion_model=model,
         )
         observed = np.asarray(imgpoints[index], dtype=float).reshape(-1, 2)
         predicted = np.asarray(imgpts2, dtype=float).reshape(-1, 2)
@@ -145,11 +157,14 @@ def per_view_reprojection_report(objpoints, imgpoints, mtx, dist, sample_records
     return rows
 
 
-def distortion_monotonicity_report(mtx, dist, image_size_wh):
+def distortion_monotonicity_report(
+    mtx,
+    dist,
+    image_size_wh,
+    distortion_model="plumb_bob",
+):
+    model = normalize_distortion_model(distortion_model)
     coeffs = np.asarray(dist, dtype=float).reshape(-1)
-    k1 = float(coeffs[0]) if coeffs.size > 0 else 0.0
-    k2 = float(coeffs[1]) if coeffs.size > 1 else 0.0
-    k3 = float(coeffs[4]) if coeffs.size > 4 else 0.0
     width, height = int(image_size_wh[0]), int(image_size_wh[1])
     fx = float(mtx[0, 0]) if mtx is not None else 1.0
     fy = float(mtx[1, 1]) if mtx is not None else 1.0
@@ -160,15 +175,44 @@ def distortion_monotonicity_report(mtx, dist, image_size_wh):
         xn = (px - cx) / max(fx, 1e-6)
         yn = (py - cy) / max(fy, 1e-6)
         corner_radii.append(float(np.sqrt(xn**2 + yn**2)))
-    max_radius = max(max(corner_radii), 1.0)
-    sample_r = np.linspace(0.0, max_radius, 256)
-    derivative = 1.0 + 3.0 * k1 * sample_r**2 + 5.0 * k2 * sample_r**4 + 7.0 * k3 * sample_r**6
+    if model == "fisheye":
+        k1 = float(coeffs[0]) if coeffs.size > 0 else 0.0
+        k2 = float(coeffs[1]) if coeffs.size > 1 else 0.0
+        k3 = float(coeffs[2]) if coeffs.size > 2 else 0.0
+        k4 = float(coeffs[3]) if coeffs.size > 3 else 0.0
+        max_theta = float(max(np.arctan(corner_radii), default=1.0))
+        max_theta = max(max_theta, 1e-6)
+        sample_axis = np.linspace(0.0, max_theta, 256)
+        derivative = (
+            1.0
+            + 3.0 * k1 * sample_axis**2
+            + 5.0 * k2 * sample_axis**4
+            + 7.0 * k3 * sample_axis**6
+            + 9.0 * k4 * sample_axis**8
+        )
+        max_axis = max_theta
+        axis_name = "max_theta_rad"
+    else:
+        k1 = float(coeffs[0]) if coeffs.size > 0 else 0.0
+        k2 = float(coeffs[1]) if coeffs.size > 1 else 0.0
+        k3 = float(coeffs[4]) if coeffs.size > 4 else 0.0
+        max_radius = max(max(corner_radii), 1.0)
+        sample_axis = np.linspace(0.0, max_radius, 256)
+        derivative = (
+            1.0
+            + 3.0 * k1 * sample_axis**2
+            + 5.0 * k2 * sample_axis**4
+            + 7.0 * k3 * sample_axis**6
+        )
+        max_axis = max_radius
+        axis_name = "max_normalized_radius"
     min_derivative = float(np.min(derivative))
     return {
+        "distortion_model": model,
         "status": "pass" if min_derivative > 0.0 else "warning",
-        "max_normalized_radius": float(max_radius),
+        axis_name: float(max_axis),
         "min_radial_derivative": min_derivative,
-        "sample_count": int(sample_r.size),
+        "sample_count": int(sample_axis.size),
     }
 
 
@@ -229,7 +273,9 @@ def build_intrinsic_acceptance(
     per_view_report,
     coverage,
     monotonicity_report,
+    distortion_model="plumb_bob",
 ):
+    model = normalize_distortion_model(distortion_model)
     target_type = str((calibration_target or {}).get("type", "chessboard"))
     per_view_rms = [float(row["rms_px"]) for row in per_view_report]
     occupied_cell_target = max(4, min(6, int(min_total_samples)))
@@ -352,9 +398,13 @@ def build_intrinsic_acceptance(
             "status": monotonicity_report["status"],
             "severity": "required",
             "evidence": (
+                f"distortion_model={model}, "
                 "min_radial_derivative=" f"{float(monotonicity_report['min_radial_derivative'])}"
             ),
-            "action": "Treat non-monotonic radial distortion as calibration failure; verify capture mode and recollect broader views.",
+            "action": (
+                "Treat non-monotonic radial distortion as calibration failure; "
+                "verify lens-model choice, capture mode, and recollect broader views."
+            ),
         },
         {
             "name": "capture_mode_review",
@@ -393,6 +443,7 @@ def write_review_artifacts(
     per_view_report,
     coverage,
     monotonicity_report,
+    distortion_model="plumb_bob",
 ):
     output_path = Path(output_yaml_path)
     diagnostics_dir = output_path.with_name(f"{output_path.stem}_diagnostics")
@@ -410,6 +461,7 @@ def write_review_artifacts(
         per_view_report,
         coverage,
         monotonicity_report,
+        distortion_model=distortion_model,
     )
     acceptance_artifacts = write_acceptance_artifacts(diagnostics_dir, final_acceptance)
     standardized_data = {
