@@ -20,9 +20,10 @@ The organizing rule is:
 2. `knowledge_base/calibration_overview.md`
 3. `knowledge_base/validated_conclusions.md`
 4. `knowledge_base/engineering_index.md`
-5. `calibration_paradigm.md`
-6. `calibration_target_requirements.md`
-7. module detail notes:
+5. `knowledge_base/camera_intrinsic_experience.md`
+6. `calibration_paradigm.md`
+7. `calibration_target_requirements.md`
+8. module detail notes:
    - `lidar2imu_context.md`
    - `lidar2imu_customer_runbook.md`
    - `prepared_rig_dataset_context.md`
@@ -36,7 +37,7 @@ The organizing rule is:
    - `scan2map_context.md`
    - `scan2map_metrics_framework.md`
    - `lidar2camera_context.md`
-8. `knowledge_base/verification_points.md`
+9. `knowledge_base/verification_points.md`
 
 ## Directory structure
 
@@ -63,6 +64,9 @@ The organizing rule is:
   - commands
   - stable artifacts
   - current indexing / diagnostic surfaces
+- `knowledge_base/camera_intrinsic_experience.md`
+  - consolidated camera intrinsic operation rules and failure patterns
+  - lens-model policy (`plumb_bob` vs `fisheye`) and artifact review order
 
 ### Module detail notes
 
