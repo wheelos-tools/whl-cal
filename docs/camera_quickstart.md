@@ -75,7 +75,7 @@ capture:
   latest_frame_read_timeout_s: 0.25
   initial_ready_timeout_s: 10.0
   reconnect_sleep_s: 0.5
-distortion_model: plumb_bob
+distortion_model: plumb_bob  # or fisheye (equidistant)
 pattern_size: [11, 8]
 square_size: 0.025
 optimization:
@@ -96,6 +96,13 @@ auto_capture_settings:
   stability_threshold: 2.0
   stability_threshold_ratio: 0.02
 ```
+
+Model notes:
+
+- `plumb_bob` (`pinhole` / `opencv` / `radtan`) uses OpenCV pinhole calibration and radial/tangential distortion.
+- `fisheye` (`equidistant`) uses `cv2.fisheye` calibration/projection/undistortion.
+- Keep one lens model per run. Do not compare or merge intrinsics generated under different `distortion_model` values.
+- For `fisheye`, `undistortion_preview.alpha` maps to OpenCV fisheye `balance` (0~1).
 
 ## AprilGrid config (production recommendation)
 
@@ -362,7 +369,7 @@ stream from ever reaching a stable GOP.
 - average reprojection error < `1.0 px`
 - per-view reprojection p95 < `1.5 px`
 - image coverage spans multiple grid cells, not only the center
-- radial distortion remains monotonic over the image radius
+- radial distortion remains monotonic (for fisheye, this check is performed on the theta-domain model)
 
 Treat `radial_monotonicity: warning` as calibration failure, not as a cosmetic
 issue.

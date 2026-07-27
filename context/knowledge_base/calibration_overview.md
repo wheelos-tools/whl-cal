@@ -18,7 +18,7 @@ This means:
 | --- | --- | --- | --- |
 | `lidar2lidar` | metrics-first, real-bag validated | `scan2scan` is the production baseline; `scan2map` is conditional refinement | active and usable |
 | `lidar2imu` | metrics-first, real-bag validated | weak-planar bags should use `--planar-motion-policy auto`; trust `z/roll/pitch` before `x/y/yaw` on one-sided-turn bags | active and usable |
-| `camera` | metrics-first intrinsic workflow with diagnostics | capture-mode review + per-view reprojection + coverage + radial-monotonicity should drive intrinsic acceptance | active and usable |
+| `camera` | metrics-first intrinsic workflow with diagnostics | capture-mode review + per-view reprojection + coverage + radial-monotonicity + correct lens-model selection should drive intrinsic acceptance | active and usable |
 | `lidar2camera` | reference pipeline with screening / staged review artifacts | target-based reference calibration is the release baseline; learning-based remains experimental until repeatability is validated | active and usable |
 
 ## Target requirement summary
@@ -99,7 +99,7 @@ iterating on physical target observability rather than script structure.
 ### Current codebase state
 
 - `camera/intrinsic.py`
-  - chessboard-based intrinsic calibration with stable diagnostics / acceptance artifacts
+  - target-based intrinsic calibration (`chessboard` / `aprilgrid` / `charuco`) with `plumb_bob` and `fisheye` lens-model support plus stable diagnostics / acceptance artifacts
 - `lidar2camera/reference_pipeline.py`
   - checkerboard / reference-based LiDAR-camera calibration
 - `lidar2camera/learning_based.py`
