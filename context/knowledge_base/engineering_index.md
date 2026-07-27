@@ -8,7 +8,7 @@ This file is the compact index for the current engineering surfaces in the repo.
 | --- | --- | --- | --- |
 | `lidar2lidar` | `record_utils.py`, `scan2map_dataset.py`, `auto_calib.py` extraction paths | `auto_calib.py`, `scan2map_calib.py`, `temporal_calib.py` | `metrics.yaml`, `diagnostics/*.yaml` |
 | `lidar2imu` | `record_converter.py` | `pipeline.py`, `algorithms.py` | `metrics.py`, `diagnostics/*.yaml` |
-| `camera` | interactive/headless checkerboard sample collection in `camera/intrinsic.py` | chessboard intrinsic solve | calibration YAML + `*_diagnostics/` acceptance/data_quality/visualization artifacts |
+| `camera` | interactive/headless sample collection in `camera/intrinsic.py` | OpenCV intrinsic solve (`plumb_bob` + `fisheye`) | calibration YAML + `*_diagnostics/` acceptance/data_quality/visualization artifacts |
 | `lidar2camera` | raw image / PCD pair loading + extraction gating in `reference_pipeline.py` | `reference_pipeline.py`, `learning_based.py` | `metrics.yaml`, `diagnostics/*.yaml`, CSVs, heatmap/scatter/overlay review surfaces |
 
 ## Main commands
@@ -29,7 +29,8 @@ This file is the compact index for the current engineering surfaces in the repo.
 
 ### camera / lidar2camera
 
-- `python camera/intrinsic.py`
+- `camera-intrinsic-calibrate`
+- `python -m camera.cli`
 - `lidar2camera-calibrate`
 
 ## Environment note

@@ -57,47 +57,16 @@ So when someone asks "目前 lidar2camera 的方案是什么", the correct short
 
 ## 2. Camera intrinsic live-capture rule
 
-The most important operational rule for the intrinsic tool is now:
+The persistent intrinsic rule remains:
 
-- **do not use the display window size as the camera capture size**
+- **do not use display window size as capture resolution**
 
-The tool now separates:
+Detailed intrinsic operation guidance is now consolidated in:
 
-- `window_width` / `window_height`
-- `capture.force_resolution`
-- `capture.width`
-- `capture.height`
-- `capture.fourcc`
+- `context/knowledge_base/camera_intrinsic_experience.md`
+- `docs/camera_quickstart.md`
 
-Why this matters:
-
-- many cameras have native 4:3 sensor modes
-- forcing a 16:9 mode such as 1280x720 can trigger ISP or driver crop before the
-  3x3 guidance grid is drawn
-- if the live 3x3 grid already looks clipped, trust the capture diagnostics first
-  and disable forced capture resolution before collecting data
-
-The intrinsic YAML now records:
-
-- `capture_runtime`
-- `distortion_model`
-- `undistortion_preview`
-- `sample_quality`
-- `per_view_reprojection_summary`
-
-and its diagnostics directory now writes:
-
-- `acceptance_report.yaml`
-- `status_summary.csv`
-- `standardized_data.yaml`
-- `data_quality.yaml`
-- `visualization_index.yaml`
-- `per_view_reprojection.csv`
-- `sample_records.csv`
-- `image_coverage_heatmap.png`
-
-so field debugging can distinguish acquisition crop from undistortion ROI, and
-calibration review can move beyond average reprojection error.
+Use those as the single source to avoid duplicated camera-intrinsic notes in module contexts.
 
 ## 3. Current lidar2camera extraction contract
 

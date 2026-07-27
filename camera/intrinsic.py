@@ -54,6 +54,7 @@ from camera.intrinsic_solver import (
     build_undistortion_model,
     calibrate_camera,
     mean_reprojection_error,
+    normalize_distortion_model,
     undistort_for_preview,
 )
 from camera.intrinsic_targets import CalibrationTargetDetector
@@ -81,6 +82,10 @@ class CameraCalibrator:
             self.cfg = yaml.safe_load(f)
 
         self.ac_cfg = self.cfg["auto_capture_settings"]
+        self.distortion_model = normalize_distortion_model(
+            self.cfg.get("distortion_model", "plumb_bob")
+        )
+        self.cfg["distortion_model"] = self.distortion_model
         self.window_name = self.cfg.get("window_name", "Camera Calibrator")
         self.target_type = str(
             self.cfg.get("target_type", self.cfg.get("pattern_type", "chessboard"))
@@ -439,10 +444,16 @@ class CameraCalibrator:
             self.sample_records,
             rvecs,
             tvecs,
+            distortion_model=self.distortion_model,
         )
 
     def _distortion_monotonicity_report(self, image_size_wh):
-        return distortion_monotonicity_report(self.mtx, self.dist, image_size_wh)
+        return distortion_monotonicity_report(
+            self.mtx,
+            self.dist,
+            image_size_wh,
+            distortion_model=self.distortion_model,
+        )
 
     def _write_review_artifacts(
         self,
@@ -465,6 +476,7 @@ class CameraCalibrator:
             per_view_report=per_view_report,
             coverage=coverage,
             monotonicity_report=monotonicity_report,
+            distortion_model=self.distortion_model,
         )
 
     def run(self):
@@ -910,6 +922,7 @@ class CameraCalibrator:
             image_size_wh,
             self.cfg.get("undistortion_preview", {}) or {},
             alpha=alpha,
+            distortion_model=self.distortion_model,
         )
 
     def _undistort_for_preview(self, image, alpha=None):
@@ -919,6 +932,7 @@ class CameraCalibrator:
             self.dist,
             self.cfg.get("undistortion_preview", {}) or {},
             alpha=alpha,
+            distortion_model=self.distortion_model,
         )
 
     def _find_target(self, gray, frame_counter, detect_every_frame=False):
@@ -1049,8 +1063,9 @@ class CameraCalibrator:
             self.objpoints,
             self.imgpoints,
             (w, h),
+            distortion_model=self.distortion_model,
         )
-        if not ret:
+        if ret is None or not np.isfinite(float(ret)):
             print("[ERROR] Calibration failed.")
             return
         self.mtx, self.dist = mtx, dist
@@ -1074,6 +1089,7 @@ class CameraCalibrator:
             self.dist,
             rvecs,
             tvecs,
+            distortion_model=self.distortion_model,
         )
 
     def _build_result_canv(self, w, h):
@@ -1115,7 +1131,7 @@ class CameraCalibrator:
             image_height=h,
             calibration_target=self.target_detector.target_config(),
             camera_matrix=dict(rows=3, cols=3, data=self.mtx.tolist()),
-            distortion_model=str(self.cfg.get("distortion_model", "plumb_bob")),
+            distortion_model=self.distortion_model,
             distortion_coefficients=dict(
                 rows=1,
                 cols=int(distortion.size),
