@@ -88,7 +88,7 @@ def project_points(
     )
 
 
-def mean_reprojection_error(
+def reprojection_residuals(
     objpoints,
     imgpoints,
     camera_matrix,
@@ -97,12 +97,11 @@ def mean_reprojection_error(
     tvecs,
     distortion_model="plumb_bob",
 ):
-    """Return the mean per-view 2D reprojection RMS in pixels."""
-    total_error = 0.0
-    valid_view_count = 0
+    """Return one 2D residual array per calibrated view."""
+    residual_views = []
     for index in range(len(objpoints)):
         if len(objpoints[index]) == 0 or len(imgpoints[index]) == 0:
-            continue
+            raise ValueError(f"Calibration view {index} has no observed points.")
         projected_points, _ = project_points(
             objpoints[index],
             rvecs[index],
@@ -112,14 +111,48 @@ def mean_reprojection_error(
             distortion_model=distortion_model,
         )
         if projected_points is None:
-            continue
-        point_count = len(projected_points)
-        if point_count:
-            total_error += cv2.norm(
-                imgpoints[index], projected_points, cv2.NORM_L2
-            ) / np.sqrt(point_count)
-            valid_view_count += 1
-    return total_error / max(valid_view_count, 1)
+            raise ValueError(f"Projection failed for calibration view {index}.")
+        observed = np.asarray(imgpoints[index], dtype=float).reshape(-1, 2)
+        predicted = np.asarray(projected_points, dtype=float).reshape(-1, 2)
+        if observed.shape != predicted.shape or observed.size == 0:
+            raise ValueError(
+                f"Projection shape mismatch for calibration view {index}: "
+                f"observed={observed.shape}, predicted={predicted.shape}."
+            )
+        residual_views.append(predicted - observed)
+    return residual_views
+
+
+def reprojection_summary(residual_views):
+    """Aggregate 2D reprojection residuals without recomputing projections."""
+    nonempty_views = [view for view in residual_views if np.asarray(view).size]
+    if not nonempty_views:
+        return {
+            "global_rms_px": 0.0,
+            "mean_per_view_rms_px": 0.0,
+            "point_count": 0,
+            "view_count": 0,
+        }
+    point_counts = np.asarray(
+        [np.asarray(view).reshape(-1, 2).shape[0] for view in nonempty_views],
+        dtype=int,
+    )
+    squared_errors = [
+        np.sum(np.asarray(view, dtype=float).reshape(-1, 2) ** 2, axis=1)
+        for view in nonempty_views
+    ]
+    per_view_rms = np.asarray(
+        [float(np.sqrt(np.mean(errors))) for errors in squared_errors],
+        dtype=float,
+    )
+    return {
+        "global_rms_px": float(
+            np.sqrt(np.sum(np.concatenate(squared_errors)) / np.sum(point_counts))
+        ),
+        "mean_per_view_rms_px": float(np.mean(per_view_rms)),
+        "point_count": int(np.sum(point_counts)),
+        "view_count": int(len(nonempty_views)),
+    }
 
 
 def build_undistortion_model(

@@ -86,11 +86,12 @@ undistortion_preview:
   center_principal_point: false
 auto_capture_settings:
   grid_shape: [3, 3]
-  min_total_samples: 9
+  min_total_samples: 36
   pose_novelty_center_distance_ratio: 0.08
   pose_novelty_area_delta: 0.02
   pose_novelty_aspect_delta: 0.12
-  samples_per_grid: 1
+  samples_per_grid: 3
+  edge_corner_min_radius_ratio: 0.7
   delay_between_captures: 1.0
   stability_frames: 5
   stability_threshold: 2.0
@@ -103,6 +104,51 @@ Model notes:
 - `fisheye` (`equidistant`) uses `cv2.fisheye` calibration/projection/undistortion.
 - Keep one lens model per run. Do not compare or merge intrinsics generated under different `distortion_model` values.
 - For `fisheye`, `undistortion_preview.alpha` maps to OpenCV fisheye `balance` (0~1).
+
+## Production capture protocol
+
+Good intrinsic calibration comes from a deliberate capture set, not from collecting
+many similar frames. Use this procedure for chessboard, AprilGrid, and ChArUco
+sessions.
+
+### Before capture
+
+1. Use the exact production camera mode. Keep `capture.force_resolution: false`
+   unless the requested mode is verified native, and do not change resolution,
+   crop, focus, zoom, or exposure during the session.
+2. Mount the target flat and rigidly. Keep its full border visible; reject blur,
+   glare, occlusion, paper flex, and partial clipping immediately.
+3. Use a new `--session-name` for each attempt. Do not mix images from different
+   capture modes or lighting/focus states.
+
+### Required 36-view set
+
+1. Collect **three stable views in every 3x3 image-grid cell**: 27 views total.
+   The grid is a distribution aid, not the quality result.
+2. In the four corner cells, place the target so detected target corners enter
+   the corresponding outer image quadrant. Keep a small image margin; never crop
+   the target merely to reach the edge.
+3. Use the final nine views for genuinely new poses:
+   - three distance changes: one farther, one medium, one closer;
+   - four strong tilts: left, right, up, and down;
+   - two diagonal/rotated views.
+
+For every view, hold the target still until it is accepted. Translation alone is
+not a new pose: change scale or tilt. The live UI reports only progress; this
+protocol, not UI prompts, defines the collection standard.
+
+### Fast review and recollection
+
+Before promoting a result, inspect the existing `data_quality.yaml` and
+`acceptance_report.yaml` in this order:
+
+| Gate | Meaning | Correct response when it fails |
+| --- | --- | --- |
+| `sample_sufficiency` | insufficient views, per-cell redundancy, or outer-field support | recollect missing positions; do not tune the solver |
+| `capture_mode` | mixed, resized, or forced capture mode | recollect in one verified native mode |
+| `reprojection_fit` | residuals are high or have a long per-view tail | inspect affected images and recollect weak poses |
+| `reprojection_consistency` | solver cost disagrees with direct residuals | reject the run; inspect model and inputs |
+| `projection_validity` | distortion folds or is non-monotonic | reject the run and recollect wider edge coverage |
 
 ## AprilGrid config (production recommendation)
 
@@ -136,11 +182,12 @@ workflow:
   save_live_accepted_frames: true
 auto_capture_settings:
   grid_shape: [3, 3]
-  min_total_samples: 9
+  min_total_samples: 36
   pose_novelty_center_distance_ratio: 0.08
   pose_novelty_area_delta: 0.02
   pose_novelty_aspect_delta: 0.12
-  samples_per_grid: 1
+  samples_per_grid: 3
+  edge_corner_min_radius_ratio: 0.7
   delay_between_captures: 1.0
   stability_frames: 5
   stability_threshold: 2.0
@@ -152,17 +199,9 @@ Notes:
 - `tag_size` and `tag_spacing_ratio` must match your physically printed board.
 - `target_type: aprilgrid` switches detection and calibration away from chessboard corners.
 - Keep AprilGrid fully visible in enough poses; partial visibility is supported but too few tags per frame will be skipped.
-- Auto-capture now works in two stages instead of a single `3x3 == done` rule.
-- Stage 1 is spatial coverage: fill the image plane so the board appears across different image regions.
-- Stage 2 starts after coverage is full: keep the same session and collect additional novel poses until `min_total_samples` is reached.
-- `min_total_samples` is the minimum sample floor, not a synonym for coverage. A large close board can fill multiple cells in one shot, so coverage completion alone must not terminate collection.
-- Once coverage is complete, additional stable samples are accepted only when pose novelty passes the center / scale / aspect thresholds above. The UI now explicitly shows `collect N more novel poses` and the next recommended action.
-- When Stage 2 says you still need more novel poses, do not restart by default. Continue the same session and intentionally change one of these dimensions:
-- change distance: move closer or farther so the board size changes by roughly 15-25%
-- change tilt: tilt left/right or up/down by roughly 10-20 degrees
-- change center only after changing distance or tilt; translation alone is often too weak once coverage is already complete
-- Restart the session only if the accepted images are blurred / cropped / poorly detected, or if calibration finishes but the final quality gates still fail.
-- `9` is no longer the whole logic by itself. The current completion rule is: coverage complete, stable frames, novelty-gated acceptance for post-coverage samples, and sample count at or above `min_total_samples`; final trust still comes from the post-calibration quality gates.
+- Follow the production capture protocol above. The auto-capture state machine
+  enforces grid redundancy, outer-field support, and novelty, but it does not
+  replace target handling and pose discipline.
 - If live RTSP preview feels delayed, keep `capture.buffersize: 1`, increase `optimization.detection_interval`, or lower `optimization.resize_factor` before touching the display window size.
 - For AprilGrid, `optimization.resize_factor` is treated as a fast first-pass candidate; the detector still falls back to native resolution so lowering it should not silently disable detection on medium-size tags.
 - For unstable RTSP/H265 streams, keep `capture.warmup_frames` and `capture.reconnect_bad_frame_burst` enabled so startup corruption and short decode bursts do not abort the session.
@@ -366,13 +405,15 @@ stream from ever reaching a stable GOP.
 
 ## Acceptance baseline
 
-- average reprojection error < `1.0 px`
+- global reprojection RMS < `1.0 px`
 - per-view reprojection p95 < `1.5 px`
-- image coverage spans multiple grid cells, not only the center
+- every image-grid cell has the configured sample count and target corners reach all four outer image quadrants
 - radial distortion remains monotonic (for fisheye, this check is performed on the theta-domain model)
+- solver-reported RMS agrees with the RMS recomputed from all projected corners
 
-Treat `radial_monotonicity: warning` as calibration failure, not as a cosmetic
-issue.
+Treat radial monotonicity failure or reprojection-consistency failure as a rejected
+calibration, not as a cosmetic warning. Use native camera output
+(`capture.force_resolution: false`) for collection and deployment.
 
 ## Next docs
 

@@ -60,10 +60,11 @@ Read in this order:
 Primary signals:
 
 - capture resolution vs preview rendering mapping
-- average reprojection error
-- per-view reprojection long tail
-- image coverage breadth
-- radial monotonicity
+- `sample_sufficiency`: 36 views, grid redundancy, and outer-corner coverage
+- `capture_mode`: one native, unmodified image mode
+- `reprojection_fit`: global RMS and per-view tail
+- `reprojection_consistency`: solver RMS agrees with direct residuals
+- `projection_validity`: radial distortion is monotonic
 
 For the live-capture manifest, inspect these fields first:
 
@@ -166,7 +167,7 @@ Primary signals:
 
 | Module | Good first-pass baseline |
 | --- | --- |
-| `camera` | avg reprojection error < `1.0 px`; per-view reprojection p95 < `1.5 px`; image coverage spans multiple grid cells; no radial monotonicity warning |
+| `camera` | global reprojection RMS < `1.0 px`; per-view reprojection p95 < `1.5 px`; every grid cell meets its sample count and target corners cover all four outer quadrants; solver/recomputed RMS agree; radial distortion is monotonic |
 | `camera2camera` | `final_rms_px <= 1.0`; per-pair p95 <= `1.5 px`; holdout p95 <= `1.5 px`; epipolar p95 <= `1.0 px`; accepted pair ratio healthy; both image coverage and pose diversity pass |
 | `lidar2camera` | `final_rms_px <= 1.0`; per-pose p95 <= `1.5 px`; holdout p95 <= `1.5 px`; accepted pair ratio healthy; image coverage / pose diversity / board geometry pass |
 | `lidar2lidar` | `release_ready: true`; required relations connected; scene sufficiency and repeatability pass; overlays do not show ghosting / double edges |
