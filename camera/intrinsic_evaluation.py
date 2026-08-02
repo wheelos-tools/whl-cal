@@ -6,14 +6,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-
 from calibration_common.evaluation import (
     build_final_acceptance,
     write_acceptance_artifacts,
     write_paradigm_artifacts,
     write_table_csv,
 )
-from camera.intrinsic_solver import normalize_distortion_model, project_points
+
+from camera.intrinsic_sampling import edge_corner_coverage
+from camera.intrinsic_solver import normalize_distortion_model
 
 
 def float_list_summary(values):
@@ -30,14 +31,21 @@ def float_list_summary(values):
     }
 
 
-def coverage_metrics(sample_records, grid_shape=None):
+def coverage_metrics(
+    sample_records,
+    grid_shape=None,
+    samples_per_grid=1,
+    edge_corner_min_radius_ratio=0.7,
+):
     if not sample_records:
         return None
     if grid_shape is None:
         max_cell_x = 0
         max_cell_y = 0
         for record in sample_records:
-            occupied_grid_cells = record.get("occupied_grid_cells") or [record["grid_cell"]]
+            occupied_grid_cells = record.get("occupied_grid_cells") or [
+                record["grid_cell"]
+            ]
             for grid_cell in occupied_grid_cells:
                 max_cell_x = max(max_cell_x, int(grid_cell["x"]))
                 max_cell_y = max(max_cell_y, int(grid_cell["y"]))
@@ -70,10 +78,18 @@ def coverage_metrics(sample_records, grid_shape=None):
     return {
         "occupied_cell_count": int(occupied),
         "grid_counts": grid_counts,
+        "minimum_cell_count": int(
+            min((count for row in grid_counts for count in row), default=0)
+        ),
+        "required_samples_per_cell": int(samples_per_grid),
         "horizontal_span_ratio": float(max(center_x) - min(center_x)),
         "vertical_span_ratio": float(max(center_y) - min(center_y)),
         "edge_margin_px": float_list_summary(margins),
         "bbox_area_ratio": float_list_summary(areas),
+        "edge_corner_coverage": edge_corner_coverage(
+            sample_records,
+            min_radius_ratio=edge_corner_min_radius_ratio,
+        ),
         "per_sample": list(sample_records),
     }
 
@@ -87,7 +103,9 @@ def sample_image_size_report(sample_records, capture_runtime_info):
         sample_sizes.append(
             (int(image_size.get("width", 0)), int(image_size.get("height", 0)))
         )
-    unique_sizes = sorted({size for size in sample_sizes if size[0] > 0 and size[1] > 0})
+    unique_sizes = sorted(
+        {size for size in sample_sizes if size[0] > 0 and size[1] > 0}
+    )
     actual_capture = (capture_runtime_info or {}).get("actual_capture_resolution") or {}
     actual_size = (
         int(actual_capture.get("width", 0)),
@@ -109,7 +127,9 @@ def sample_image_size_report(sample_records, capture_runtime_info):
             "height": int(unique_sizes[0][1]),
         }
     if has_actual_size and len(unique_sizes) == 1:
-        report["matches_actual_capture_resolution"] = bool(unique_sizes[0] == actual_size)
+        report["matches_actual_capture_resolution"] = bool(
+            unique_sizes[0] == actual_size
+        )
         report["actual_capture_resolution"] = {
             "width": int(actual_size[0]),
             "height": int(actual_size[1]),
@@ -117,30 +137,10 @@ def sample_image_size_report(sample_records, capture_runtime_info):
     return report
 
 
-def per_view_reprojection_report(
-    objpoints,
-    imgpoints,
-    mtx,
-    dist,
-    sample_records,
-    rvecs,
-    tvecs,
-    distortion_model="plumb_bob",
-):
-    model = normalize_distortion_model(distortion_model)
+def per_view_reprojection_report(residual_views, sample_records):
     rows = []
-    for index in range(len(objpoints)):
-        imgpts2, _ = project_points(
-            objpoints[index],
-            rvecs[index],
-            tvecs[index],
-            mtx,
-            dist,
-            distortion_model=model,
-        )
-        observed = np.asarray(imgpoints[index], dtype=float).reshape(-1, 2)
-        predicted = np.asarray(imgpts2, dtype=float).reshape(-1, 2)
-        residuals = predicted - observed
+    for index, residuals in enumerate(residual_views):
+        residuals = np.asarray(residuals, dtype=float).reshape(-1, 2)
         point_errors = np.linalg.norm(residuals, axis=1)
         record = sample_records[index] if index < len(sample_records) else {}
         rows.append(
@@ -149,6 +149,7 @@ def per_view_reprojection_report(
                 "source": record.get("source"),
                 "source_path": record.get("source_path"),
                 "grid_cell": record.get("grid_cell"),
+                "point_count": int(point_errors.size),
                 "rms_px": float(np.sqrt(np.mean(np.sum(residuals**2, axis=1)))),
                 "p95_px": float(np.percentile(point_errors, 95)),
                 "max_px": float(np.max(point_errors)),
@@ -227,7 +228,7 @@ def build_heatmap_artifact(diagnostics_dir, coverage):
     if rows <= 0 or cols <= 0:
         return None
     cell_size = 120
-    image = np.full((rows * cell_size + 120, cols * cell_size + 120, 3), 245, np.uint8)
+    image = np.full((rows * cell_size + 170, cols * cell_size + 120, 3), 245, np.uint8)
     cv2.putText(
         image,
         "Intrinsic sample coverage",
@@ -258,6 +259,21 @@ def build_heatmap_artifact(diagnostics_dir, coverage):
                 (20, 20, 20),
                 2,
             )
+    edge = coverage.get("edge_corner_coverage") or {}
+    edge_text = (
+        "Outer corner quadrants: "
+        f"{edge.get('covered_quadrant_count', 0)}/{edge.get('required_quadrant_count', 4)}"
+        f" | max radius: {float(edge.get('max_observed_radius_ratio', 0.0)):.2f}"
+    )
+    cv2.putText(
+        image,
+        edge_text,
+        (30, rows * cell_size + 105),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        (30, 30, 30),
+        2,
+    )
     artifact = diagnostics_dir / "image_coverage_heatmap.png"
     cv2.imwrite(str(artifact), image)
     return str(artifact)
@@ -267,158 +283,128 @@ def build_intrinsic_acceptance(
     min_total_samples,
     sample_records,
     capture_runtime_info,
-    calibration_target,
-    imgpoints,
-    avg_error,
+    global_reprojection_rms,
+    solver_reported_rms,
     per_view_report,
     coverage,
     monotonicity_report,
     distortion_model="plumb_bob",
 ):
     model = normalize_distortion_model(distortion_model)
-    target_type = str((calibration_target or {}).get("type", "chessboard"))
     per_view_rms = [float(row["rms_px"]) for row in per_view_report]
-    occupied_cell_target = max(4, min(6, int(min_total_samples)))
-    target_points_per_sample = [int(np.asarray(points).shape[0]) for points in imgpoints]
+    per_view_point_counts = [int(row["point_count"]) for row in per_view_report]
+    recomputed_global_rms = None
+    if per_view_rms and sum(per_view_point_counts) > 0:
+        recomputed_global_rms = float(
+            np.sqrt(
+                np.average(
+                    np.square(np.asarray(per_view_rms, dtype=float)),
+                    weights=np.asarray(per_view_point_counts, dtype=float),
+                )
+            )
+        )
+    solver_rms_delta = (
+        None
+        if solver_reported_rms is None or recomputed_global_rms is None
+        else abs(float(solver_reported_rms) - float(recomputed_global_rms))
+    )
+    solver_rms_tolerance = (
+        None
+        if recomputed_global_rms is None
+        else max(0.05, 0.1 * float(recomputed_global_rms))
+    )
     image_size_report = sample_image_size_report(sample_records, capture_runtime_info)
-    if target_type == "aprilgrid":
-        min_points_per_sample = int(
-            (calibration_target or {}).get("min_points_per_frame", 16)
-        )
-    elif target_type == "charuco":
-        min_points_per_sample = int(
-            (calibration_target or {}).get("min_corners_per_frame", 12)
-        )
-    else:
-        min_points_per_sample = 0
+    coverage_ready = bool(
+        coverage is not None
+        and len(sample_records) >= int(min_total_samples)
+        and int(coverage["minimum_cell_count"])
+        >= int(coverage["required_samples_per_cell"])
+        and int(coverage["edge_corner_coverage"]["covered_quadrant_count"])
+        >= int(coverage["edge_corner_coverage"]["required_quadrant_count"])
+    )
+    reprojection_fit_ready = bool(
+        per_view_rms
+        and float(global_reprojection_rms) <= 1.0
+        and float(np.percentile(np.asarray(per_view_rms, dtype=float), 95)) <= 1.5
+    )
+    capture_mode_status = "pass"
+    if image_size_report is None or not bool(image_size_report.get("consistent")):
+        capture_mode_status = "fail"
+    elif image_size_report.get("matches_actual_capture_resolution") is False:
+        capture_mode_status = "fail"
+    elif bool((capture_runtime_info or {}).get("force_capture_resolution")):
+        capture_mode_status = "warning"
     gates = [
         {
-            "name": "sample_count",
-            "status": "pass" if len(sample_records) >= int(min_total_samples) else "fail",
-            "severity": "required",
-            "evidence": f"samples={len(sample_records)}, required={min_total_samples}",
-            "action": "Collect more valid calibration-target views before trusting the intrinsic result.",
-        },
-        {
-            "name": "image_coverage",
-            "status": (
-                "pass"
-                if coverage is not None
-                and int(coverage["occupied_cell_count"]) >= occupied_cell_target
-                and float(coverage["horizontal_span_ratio"]) >= 0.35
-                and float(coverage["vertical_span_ratio"]) >= 0.35
-                else "warning"
-            ),
+            "name": "sample_sufficiency",
+            "status": "pass" if coverage_ready else "fail",
             "severity": "required",
             "evidence": (
-                "occupied_cells="
-                f"{None if coverage is None else coverage['occupied_cell_count']}, "
-                "horizontal_span_ratio="
-                f"{None if coverage is None else coverage['horizontal_span_ratio']}, "
-                "vertical_span_ratio="
-                f"{None if coverage is None else coverage['vertical_span_ratio']}"
+                f"samples={len(sample_records)}/{min_total_samples}, "
+                "minimum_cell_count="
+                f"{None if coverage is None else coverage['minimum_cell_count']}/"
+                f"{None if coverage is None else coverage['required_samples_per_cell']}, "
+                "outer_quadrants="
+                f"{None if coverage is None else coverage['edge_corner_coverage']['covered_quadrant_count']}/4"
             ),
-            "action": "Collect target views across more image regions instead of clustering near the center.",
+            "action": "Recollect the documented 36-view pattern: three views per grid cell, all outer quadrants, then novel poses.",
         },
         {
-            "name": "feature_count_per_sample",
-            "status": (
-                "pass"
-                if target_type not in ("aprilgrid", "charuco")
-                else (
-                    "pass"
-                    if target_points_per_sample
-                    and float(np.percentile(np.asarray(target_points_per_sample, dtype=float), 20))
-                    >= float(min_points_per_sample)
-                    else "warning"
-                )
-            ),
-            "severity": "required" if target_type in ("aprilgrid", "charuco") else "advisory",
-            "evidence": (
-                "target_type="
-                f"{target_type}, points_per_sample_p20="
-                f"{None if not target_points_per_sample else float(np.percentile(np.asarray(target_points_per_sample, dtype=float), 20))}, "
-                f"min_required={min_points_per_sample}"
-            ),
-            "action": "Increase visible target features per frame and avoid heavy occlusion/crop during capture.",
-        },
-        {
-            "name": "avg_reprojection",
-            "status": "pass" if float(avg_error) <= 1.0 else "warning",
+            "name": "reprojection_fit",
+            "status": "pass" if reprojection_fit_ready else "warning",
             "severity": "required",
-            "evidence": f"avg_reprojection_error_px={float(avg_error)}",
-            "action": "Recheck board dimensions, image sharpness, and capture mode if average reprojection remains high.",
+            "evidence": (
+                "global_reprojection_rms_px="
+                f"{float(global_reprojection_rms)}"
+                ", per_view_rms_p95_px="
+                f"{None if not per_view_rms else float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))}"
+            ),
+            "action": "Inspect the per-view residual table; recollect blurred, unstable, or poorly posed views instead of tuning the solver.",
         },
         {
-            "name": "sample_image_size_consistency",
+            "name": "reprojection_consistency",
             "status": (
                 "pass"
-                if image_size_report is not None and bool(image_size_report.get("consistent"))
+                if solver_rms_delta is not None
+                and solver_rms_tolerance is not None
+                and solver_rms_delta <= solver_rms_tolerance
                 else "fail"
             ),
             "severity": "required",
             "evidence": (
+                f"solver_reported_rms_px={solver_reported_rms}, "
+                f"recomputed_global_rms_px={recomputed_global_rms}, "
+                f"tolerance_px={solver_rms_tolerance}"
+            ),
+            "action": "Reject the result when the solver-reported RMS and the residual-derived RMS disagree; inspect the lens model and calibration inputs.",
+        },
+        {
+            "name": "capture_mode",
+            "status": capture_mode_status,
+            "severity": "required",
+            "evidence": (
                 "unique_sample_sizes="
-                f"{None if image_size_report is None else image_size_report.get('unique_sample_sizes')}"
+                f"{None if image_size_report is None else image_size_report.get('unique_sample_sizes')}, "
+                "matches_capture="
+                f"{None if image_size_report is None else image_size_report.get('matches_actual_capture_resolution')}, "
+                "forced="
+                f"{bool((capture_runtime_info or {}).get('force_capture_resolution'))}"
             ),
-            "action": "Use one native camera mode per calibration run; do not mix images captured at different resolutions.",
+            "action": "Use one native capture mode for collection and deployment; do not mix image sizes.",
         },
         {
-            "name": "sample_vs_capture_resolution",
-            "status": (
-                "pass"
-                if image_size_report is None
-                or image_size_report.get("matches_actual_capture_resolution") in (None, True)
-                else "warning"
-            ),
-            "severity": "required",
-            "evidence": (
-                "matches_actual_capture_resolution="
-                f"{None if image_size_report is None else image_size_report.get('matches_actual_capture_resolution')}"
-            ),
-            "action": "Review whether saved accepted frames still match the camera's actual capture resolution before trusting the intrinsics.",
-        },
-        {
-            "name": "per_view_reprojection",
-            "status": (
-                "pass"
-                if per_view_rms
-                and float(np.percentile(np.asarray(per_view_rms, dtype=float), 95)) <= 1.5
-                else "warning"
-            ),
-            "severity": "required",
-            "evidence": (
-                "per_view_rms_p95_px="
-                f"{None if not per_view_rms else float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))}"
-            ),
-            "action": "Remove weak captures and recollect views with better feature sharpness and pose diversity.",
-        },
-        {
-            "name": "radial_monotonicity",
-            "status": monotonicity_report["status"],
+            "name": "projection_validity",
+            "status": ("fail" if monotonicity_report["status"] != "pass" else "pass"),
             "severity": "required",
             "evidence": (
                 f"distortion_model={model}, "
-                "min_radial_derivative=" f"{float(monotonicity_report['min_radial_derivative'])}"
+                "min_radial_derivative="
+                f"{float(monotonicity_report['min_radial_derivative'])}"
             ),
             "action": (
                 "Treat non-monotonic radial distortion as calibration failure; "
                 "verify lens-model choice, capture mode, and recollect broader views."
             ),
-        },
-        {
-            "name": "capture_mode_review",
-            "status": (
-                "pass"
-                if not (capture_runtime_info or {}).get("force_capture_resolution")
-                else "warning"
-            ),
-            "severity": "advisory",
-            "evidence": (
-                "force_capture_resolution="
-                f"{bool((capture_runtime_info or {}).get('force_capture_resolution'))}"
-            ),
-            "action": "Prefer native capture mode for intrinsic calibration to avoid hidden ISP crop before the 3x3 grid.",
         },
     ]
     return build_final_acceptance(
@@ -437,9 +423,9 @@ def write_review_artifacts(
     sample_records,
     capture_runtime_info,
     calibration_target,
-    imgpoints,
     comparison_view_path,
-    avg_error,
+    global_reprojection_rms,
+    solver_reported_rms,
     per_view_report,
     coverage,
     monotonicity_report,
@@ -448,16 +434,19 @@ def write_review_artifacts(
     output_path = Path(output_yaml_path)
     diagnostics_dir = output_path.with_name(f"{output_path.stem}_diagnostics")
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    per_view_csv = write_table_csv(diagnostics_dir / "per_view_reprojection.csv", per_view_report)
-    sample_records_csv = write_table_csv(diagnostics_dir / "sample_records.csv", sample_records)
+    per_view_csv = write_table_csv(
+        diagnostics_dir / "per_view_reprojection.csv", per_view_report
+    )
+    sample_records_csv = write_table_csv(
+        diagnostics_dir / "sample_records.csv", sample_records
+    )
     heatmap_path = build_heatmap_artifact(diagnostics_dir, coverage)
     final_acceptance = build_intrinsic_acceptance(
         min_total_samples,
         sample_records,
         capture_runtime_info,
-        calibration_target,
-        imgpoints,
-        avg_error,
+        global_reprojection_rms,
+        solver_reported_rms,
         per_view_report,
         coverage,
         monotonicity_report,
@@ -482,7 +471,8 @@ def write_review_artifacts(
         "status": final_acceptance["status"],
         "release_ready": final_acceptance["release_ready"],
         "quality_gates": final_acceptance["gates"],
-        "avg_reprojection_error_px": float(avg_error),
+        "global_reprojection_rms_px": float(global_reprojection_rms),
+        "solver_reported_rms_px": float(solver_reported_rms),
         "per_view_reprojection_summary": float_list_summary(
             [float(row["rms_px"]) for row in per_view_report]
         ),
@@ -517,11 +507,10 @@ def write_review_artifacts(
             ],
         },
         "manual_review": [
-            "Read diagnostics/data_quality.yaml before trusting average reprojection alone.",
-            "Inspect per_view_reprojection.csv for tail samples instead of only the mean.",
-            "Inspect image_coverage_heatmap.png to confirm the calibration target covered multiple image regions.",
-            "Confirm sample_image_sizes stays consistent and matches the actual capture resolution.",
-            "Treat radial_monotonicity warnings as calibration failure, not a cosmetic issue.",
+            "Read data_quality.yaml and acceptance_report.yaml before inspecting the preview.",
+            "Use per_view_reprojection.csv only to identify the images behind a failed fit gate.",
+            "Confirm image_coverage_heatmap.png has three views per cell and four outer quadrants.",
+            "Reject solver/residual disagreement or non-monotonic projection.",
         ],
     }
     paradigm_artifacts = write_paradigm_artifacts(

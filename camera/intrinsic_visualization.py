@@ -88,6 +88,7 @@ def draw_dynamic_ui(display, grid_coverage, grid_shape, feedback_text, progress)
     stage = str(progress.get("stage", "collect_coverage"))
     stage_label = {
         "collect_coverage": "Stage 1/2: cover more image regions",
+        "collect_edge_coverage": "Stage 1/2: cover the outer image field",
         "collect_diverse_samples": "Stage 2/2: coverage done, collect diverse poses",
         "ready_to_calibrate": "Ready: sample target met",
     }.get(stage, stage)
@@ -99,26 +100,19 @@ def draw_dynamic_ui(display, grid_coverage, grid_shape, feedback_text, progress)
     coverage_target = int(
         progress.get("coverage_target_cell_count", grid_coverage.size)
     )
-    guidance_summary = str(progress.get("guidance_summary") or "")
-    guidance_actions = list(progress.get("guidance_actions") or [])
-
     panel_lines = []
     if feedback_text:
         panel_lines.append((feedback_text, (0, 255, 255), 0.9))
     panel_lines.append((stage_label, (0, 255, 255), 0.8))
     panel_lines.append(
         (
-            "Diverse samples: "
+            "Samples: "
             f"{sample_count}/{required_samples} | Spatial coverage: "
             f"{coverage_count}/{coverage_target}",
             (0, 255, 255),
             0.8,
         )
     )
-    if guidance_summary:
-        panel_lines.append((guidance_summary, (0, 220, 255), 0.72))
-    for line in guidance_actions[:2]:
-        panel_lines.append((line, (180, 240, 255), 0.62))
 
     panel_x = 28
     panel_y = 24
