@@ -17,6 +17,41 @@ classifiers = [
   "Operating System :: OS Independent"
 ]
 dependencies = [
+  "numpy",
+  "scipy",
+  "pyyaml"
+]
+
+[project.optional-dependencies]
+camera = [
+  "opencv-python",
+  "pupil-apriltags"
+]
+camera2camera = [
+  "opencv-python",
+  "pupil-apriltags"
+]
+lidar2lidar = [
+  "click",
+  "flatbuffers",
+  "open3d",
+  "protobuf==3.19.4",
+  "cyber_record"
+]
+lidar2imu = [
+  "flatbuffers",
+  "open3d",
+  "protobuf==3.19.4",
+  "cyber_record"
+]
+lidar2camera = [
+  "flatbuffers",
+  "opencv-python",
+  "open3d",
+  "protobuf==3.19.4",
+  "cyber_record"
+]
+all = [
   "click",
   "flatbuffers",
   "numpy",

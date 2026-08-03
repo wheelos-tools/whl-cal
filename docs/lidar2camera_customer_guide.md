@@ -47,7 +47,7 @@ You need:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[lidar2camera]"
 ```
 
 ## 3. Production calibration quick start
