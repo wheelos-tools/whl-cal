@@ -40,7 +40,7 @@ last_tested: 2026-05-26
 cd /home/wfh/01code/whl-cal
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[lidar2imu]"
 ```
 
 ### 2. 准备标定数据

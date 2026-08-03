@@ -54,7 +54,7 @@ Do not use the repo root `.` as `--images-dir`. Use a dedicated dataset director
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install opencv-python numpy pyyaml
+pip install -e ".[camera]"
 ```
 
 ## Recommended capture-first config
@@ -262,7 +262,7 @@ Recommended practice:
 
 ## Quick runs
 
-Preferred entrypoint after `pip install -e .`:
+Preferred entrypoint after `pip install -e ".[camera]"`:
 
 ```bash
 camera-intrinsic-calibrate --config camera_config.yaml

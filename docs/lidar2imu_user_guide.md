@@ -53,7 +53,7 @@ P26-04-27
 cd /home/wfh/01code/whl-cal
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[lidar2imu]"
 ```
 
 ## 4. 先检查 bag 是否可用
