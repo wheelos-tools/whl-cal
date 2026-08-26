@@ -380,6 +380,7 @@ def perform_multistage_refinement(
     initial_transform: np.ndarray,
     preprocessing_params: dict,
     method: int,
+    preprocessing_cache: dict | None = None,
 ):
     """Refine the extrinsic transform with a voxel pyramid."""
     current_transform = initial_transform
@@ -397,8 +398,12 @@ def perform_multistage_refinement(
         )
         stage_params = dict(preprocessing_params)
         stage_params["voxel_size"] = voxel_size
-        source_stage = preprocess_point_cloud(source_cloud, **stage_params)
-        target_stage = preprocess_point_cloud(target_cloud, **stage_params)
+        source_stage = _preprocess_point_cloud_cached(
+            source_cloud, stage_params, preprocessing_cache
+        )
+        target_stage = _preprocess_point_cloud_cached(
+            target_cloud, stage_params, preprocessing_cache
+        )
 
         if len(source_stage.points) == 0 or len(target_stage.points) == 0:
             logging.error(
@@ -428,6 +433,22 @@ def perform_multistage_refinement(
     return final_result, final_source_stage, final_target_stage
 
 
+def _preprocess_point_cloud_cached(
+    cloud: o3d.geometry.PointCloud,
+    preprocessing_params: dict,
+    cache: dict | None,
+) -> o3d.geometry.PointCloud:
+    if cache is None:
+        return preprocess_point_cloud(cloud, **preprocessing_params)
+    params_key = tuple(
+        sorted((str(key), repr(value)) for key, value in preprocessing_params.items())
+    )
+    cache_key = (id(cloud), params_key)
+    if cache_key not in cache:
+        cache[cache_key] = preprocess_point_cloud(cloud, **preprocessing_params)
+    return cache[cache_key]
+
+
 def calibrate_lidar_extrinsic(
     source_cloud: o3d.geometry.PointCloud,
     target_cloud: o3d.geometry.PointCloud,
@@ -435,6 +456,7 @@ def calibrate_lidar_extrinsic(
     preprocessing_params: dict = None,
     method: int = 1,
     initial_transform: np.ndarray | None = None,
+    preprocessing_cache: dict | None = None,
 ):
     """Calibrate lidar extrinsic parameters using point cloud registration.
 
@@ -471,16 +493,18 @@ def calibrate_lidar_extrinsic(
         preprocessing_params.setdefault("wall_angle_threshold", 0.1)
         preprocessing_params.setdefault("max_wall_planes", 2)
 
-    logging.info("--- Step 1: Point Cloud Preprocessing ---")
-    source_preprocessed = preprocess_point_cloud(source_cloud, **preprocessing_params)
-    target_preprocessed = preprocess_point_cloud(target_cloud, **preprocessing_params)
-
-    if len(source_preprocessed.points) == 0 or len(target_preprocessed.points) == 0:
-        logging.error("Preprocessed point cloud is empty, calibration failed.")
-        return None, None, None
-
     initial_guess = None
     if initial_transform is None:
+        logging.info("--- Step 1: Point Cloud Preprocessing ---")
+        source_preprocessed = _preprocess_point_cloud_cached(
+            source_cloud, preprocessing_params, preprocessing_cache
+        )
+        target_preprocessed = _preprocess_point_cloud_cached(
+            target_cloud, preprocessing_params, preprocessing_cache
+        )
+        if len(source_preprocessed.points) == 0 or len(target_preprocessed.points) == 0:
+            logging.error("Preprocessed point cloud is empty, calibration failed.")
+            return None, None, None
         logging.info("--- Step 2: FPFH Feature Extraction ---")
         source_fpfh = compute_fpfh_features(
             source_preprocessed, preprocessing_params["voxel_size"]
@@ -533,6 +557,7 @@ def calibrate_lidar_extrinsic(
             initial_guess_transform,
             preprocessing_params,
             method,
+            preprocessing_cache,
         )
     )
     if registration_result is None:
@@ -544,25 +569,16 @@ def calibrate_lidar_extrinsic(
         return None, initial_guess_transform, registration_result
 
     logging.info("\n--- Final Calibration Metrics ---")
-    eval_params = dict(preprocessing_params)
-    eval_params["voxel_size"] = build_refinement_stage_voxels(
-        preprocessing_params["voxel_size"]
-    )[-1]
-    source_eval = preprocess_point_cloud(source_cloud, **eval_params)
-    target_eval = preprocess_point_cloud(target_cloud, **eval_params)
-    source_points = np.asarray(source_eval.points)
-    target_points = np.asarray(target_eval.points)
-    source_points_h = np.hstack((source_points, np.ones((source_points.shape[0], 1))))
-    source_points_transformed = (final_extrinsic_transform @ source_points_h.T).T[:, :3]
-    tree = o3d.geometry.KDTreeFlann(target_eval)
+    source_eval = source_final_stage
+    target_eval = target_final_stage
     max_icp_corr_dist = 0.4
-    matched_count = sum(
-        1
-        for p in source_points_transformed
-        if tree.search_knn_vector_3d(p, 1)[0] > 0
-        and np.linalg.norm(p - target_points[tree.search_knn_vector_3d(p, 1)[1][0]])
-        < max_icp_corr_dist
+    evaluation_result = o3d.pipelines.registration.evaluate_registration(
+        source_eval,
+        target_eval,
+        max_icp_corr_dist,
+        final_extrinsic_transform,
     )
+    matched_count = len(evaluation_result.correspondence_set)
     logging.info(
         "Fine registration matched points (within %.2f m): %d",
         max_icp_corr_dist,

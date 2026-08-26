@@ -10,13 +10,19 @@ import yaml
 from lidar2imu.mapping.overlap import point_cloud_overlap_metrics
 from lidar2imu.models import CalibrationDataset
 from lidar2imu.review.io_utils import write_csv_rows, write_point_cloud
-from lidar2imu.review.registration_objects import build_registration_object_review
+
+# isort: off
+from lidar2imu.review.registration_objects import (
+    build_registration_object_review,
+)
 from lidar2imu.review.trajectory import (
     TrajectoryNode,
     review_motion_candidates,
 )
+
+# isort: on
 from lidar2lidar.extrinsic_io import matrix_from_transform_dict
-from lidar2lidar.record_utils import PointCloudMeta, load_pointcloud_from_meta
+from lidar2lidar.record_utils import PointCloudMeta, prefetch_pointcloud_cache
 
 
 def local_pose_in_parent(
@@ -155,6 +161,7 @@ def build_registration_review_artifacts(
                 dense_nodes_by_timestamp[int(record["timestamp_ns"])] = TrajectoryNode(
                     timestamp_ns=int(record["timestamp_ns"]),
                     record_path=str(record["record_path"]),
+                    artifact_path=record.get("artifact_path"),
                     imu_pose=imu_anchor_pose
                     @ local_pose_in_parent(
                         record["initial_transform"], final_transform
@@ -171,6 +178,7 @@ def build_registration_review_artifacts(
             dense_nodes_by_timestamp[int(record["timestamp_ns"])] = TrajectoryNode(
                 timestamp_ns=int(record["timestamp_ns"]),
                 record_path=str(record["record_path"]),
+                artifact_path=record.get("artifact_path"),
                 imu_pose=end_imu_anchor_pose
                 @ local_pose_in_parent(record["initial_transform"], final_transform),
                 lidar_pose=end_lidar_anchor_pose
@@ -409,20 +417,29 @@ def load_node_clouds(
     if not lidar_topic:
         return []
 
-    node_clouds = []
+    metas = []
     for node in nodes:
-        if not node.record_path:
+        if not node.record_path and not node.artifact_path:
             return []
-        if not Path(node.record_path).exists():
+        if node.artifact_path and not Path(node.artifact_path).exists():
             return []
-        cloud = load_pointcloud_from_meta(
+        if not node.artifact_path and not Path(str(node.record_path)).exists():
+            return []
+        metas.append(
             PointCloudMeta(
                 topic=str(lidar_topic),
                 frame_id=dataset.child_frame,
                 timestamp_ns=int(node.timestamp_ns),
-                record_path=str(node.record_path),
+                record_path=str(node.record_path or ""),
+                artifact_path=node.artifact_path,
             )
         )
+    cloud_cache = prefetch_pointcloud_cache(metas)
+    node_clouds = []
+    for node, meta in zip(nodes, metas):
+        cloud = cloud_cache.get((str(meta.topic), int(meta.timestamp_ns)))
+        if cloud is None:
+            continue
         if cloud.is_empty():
             continue
         cloud = cloud.voxel_down_sample(0.20)

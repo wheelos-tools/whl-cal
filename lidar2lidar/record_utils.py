@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import bisect
 import copy
+import struct
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,9 +31,14 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 
-from lidar2lidar.extrinsic_io import (extrinsics_filename,
-                                      load_extrinsics_file,
-                                      save_extrinsics_yaml)
+# isort: off
+from lidar2lidar.extrinsic_io import (
+    extrinsics_filename,
+    load_extrinsics_file,
+    save_extrinsics_yaml,
+)
+
+# isort: on
 from lidar2lidar.record_adapter import Record, ensure_record_available
 
 
@@ -145,6 +151,142 @@ def message_timestamp_ns(topic: str, msg: Any, fallback_timestamp_ns: int) -> in
     return int(fallback_timestamp_ns)
 
 
+def _read_protobuf_varint(payload: memoryview, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(payload) and shift < 70:
+        byte = int(payload[offset])
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, offset
+        shift += 7
+    raise ValueError("Invalid protobuf varint.")
+
+
+def _skip_protobuf_value(payload: memoryview, offset: int, wire_type: int) -> int:
+    if wire_type == 0:
+        _, offset = _read_protobuf_varint(payload, offset)
+        return offset
+    if wire_type == 1:
+        next_offset = offset + 8
+        if next_offset > len(payload):
+            raise ValueError("Truncated protobuf fixed64 value.")
+        return next_offset
+    if wire_type == 2:
+        size, offset = _read_protobuf_varint(payload, offset)
+        next_offset = offset + size
+        if next_offset > len(payload):
+            raise ValueError("Truncated protobuf length-delimited value.")
+        return next_offset
+    if wire_type == 5:
+        next_offset = offset + 4
+        if next_offset > len(payload):
+            raise ValueError("Truncated protobuf fixed32 value.")
+        return next_offset
+    raise ValueError(f"Unsupported protobuf wire type: {wire_type}.")
+
+
+def _protobuf_header_metadata(payload: memoryview) -> tuple[float | None, str]:
+    timestamp_sec = None
+    frame_id = ""
+    offset = 0
+    while offset < len(payload):
+        tag, offset = _read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if field_number == 1 and wire_type == 1:
+            timestamp_sec = float(struct.unpack_from("<d", payload, offset)[0])
+        elif field_number == 9 and wire_type == 2:
+            size, value_offset = _read_protobuf_varint(payload, offset)
+            frame_id = bytes(payload[value_offset : value_offset + size]).decode(
+                "utf-8"
+            )
+        offset = _skip_protobuf_value(payload, offset, wire_type)
+    return timestamp_sec, frame_id
+
+
+def pointcloud_protobuf_metadata(
+    payload_bytes: bytes, fallback_timestamp_ns: int
+) -> tuple[int, str]:
+    """Read PointCloud timing/frame metadata without decoding repeated points."""
+    payload = memoryview(payload_bytes)
+    measurement_time = None
+    header_timestamp = None
+    header_frame_id = ""
+    frame_id = ""
+    offset = 0
+    while offset < len(payload):
+        tag, offset = _read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if field_number == 1 and wire_type == 2:
+            size, value_offset = _read_protobuf_varint(payload, offset)
+            header_timestamp, header_frame_id = _protobuf_header_metadata(
+                payload[value_offset : value_offset + size]
+            )
+        elif field_number == 2 and wire_type == 2:
+            size, value_offset = _read_protobuf_varint(payload, offset)
+            frame_id = bytes(payload[value_offset : value_offset + size]).decode(
+                "utf-8"
+            )
+        elif field_number == 5 and wire_type == 1:
+            measurement_time = float(struct.unpack_from("<d", payload, offset)[0])
+        offset = _skip_protobuf_value(payload, offset, wire_type)
+
+    timestamp_ns = _timestamp_field_to_ns(measurement_time)
+    if timestamp_ns is None:
+        timestamp_ns = _timestamp_field_to_ns(header_timestamp)
+    if (
+        timestamp_ns is not None
+        and abs(int(timestamp_ns) - int(fallback_timestamp_ns))
+        > 7 * 24 * 60 * 60 * 1_000_000_000
+    ):
+        raise ValueError("PointCloud sensor timestamp is implausible.")
+    return (
+        int(fallback_timestamp_ns if timestamp_ns is None else timestamp_ns),
+        frame_id or header_frame_id,
+    )
+
+
+def pointcloud_protobuf_xyz_array(payload_bytes: bytes) -> np.ndarray:
+    """Decode PointXYZIT coordinates without constructing protobuf objects."""
+    payload = memoryview(payload_bytes)
+    points = []
+    offset = 0
+    while offset < len(payload):
+        tag, offset = _read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if field_number != 4 or wire_type != 2:
+            offset = _skip_protobuf_value(payload, offset, wire_type)
+            continue
+
+        size, point_offset = _read_protobuf_varint(payload, offset)
+        point_end = point_offset + size
+        if point_end > len(payload):
+            raise ValueError("Truncated PointXYZIT message.")
+        xyz = [np.nan, np.nan, np.nan]
+        nested_offset = point_offset
+        while nested_offset < point_end:
+            point_tag, nested_offset = _read_protobuf_varint(payload, nested_offset)
+            point_field = point_tag >> 3
+            point_wire_type = point_tag & 0x07
+            if 1 <= point_field <= 3 and point_wire_type == 5:
+                xyz[point_field - 1] = struct.unpack_from("<f", payload, nested_offset)[
+                    0
+                ]
+            nested_offset = _skip_protobuf_value(
+                payload, nested_offset, point_wire_type
+            )
+        points.append(xyz)
+        offset = point_end
+
+    if not points:
+        return np.empty((0, 3), dtype=np.float64)
+    return np.asarray(points, dtype=np.float64)
+
+
 def get_topic_frame_ids(
     record_files: Iterable[str], topics: Iterable[str]
 ) -> dict[str, str]:
@@ -242,20 +384,39 @@ def prefetch_pointcloud_cache(
         if not pending_timestamps:
             continue
         with Record(record_path) as record:
-            for channel, msg, timestamp_ns in record.read_messages(topics=[topic]):
+            for (
+                channel,
+                payload,
+                type_name,
+                timestamp_ns,
+            ) in record.read_raw_messages(topics=[topic]):
                 if channel != topic:
                     continue
                 raw_timestamp_ns = int(timestamp_ns)
-                canonical_timestamp_ns = message_timestamp_ns(
-                    channel, msg, raw_timestamp_ns
-                )
+                try:
+                    canonical_timestamp_ns, _ = pointcloud_protobuf_metadata(
+                        payload, raw_timestamp_ns
+                    )
+                except (UnicodeDecodeError, ValueError, struct.error):
+                    msg = record.decode_message(channel, payload, type_name)
+                    canonical_timestamp_ns = message_timestamp_ns(
+                        channel, msg, raw_timestamp_ns
+                    )
                 if (
                     canonical_timestamp_ns not in pending_timestamps
                     and raw_timestamp_ns not in pending_timestamps
                 ):
                     continue
 
-                cloud = pointcloud_message_to_open3d(msg)
+                try:
+                    points = pointcloud_protobuf_xyz_array(payload)
+                    cloud = o3d.geometry.PointCloud()
+                    cloud.points = o3d.utility.Vector3dVector(
+                        points[np.isfinite(points).all(axis=1)]
+                    )
+                except (ValueError, struct.error):
+                    msg = record.decode_message(channel, payload, type_name)
+                    cloud = pointcloud_message_to_open3d(msg)
                 if canonical_timestamp_ns in pending_timestamps:
                     cache[(str(topic), int(canonical_timestamp_ns))] = cloud
                     pending_timestamps.discard(canonical_timestamp_ns)

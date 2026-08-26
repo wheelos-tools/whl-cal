@@ -13,6 +13,7 @@ from lidar2lidar.extrinsic_io import matrix_from_transform_dict
 class TrajectoryNode:
     timestamp_ns: int
     record_path: str | None
+    artifact_path: str | None
     imu_pose: np.ndarray
     lidar_pose: np.ndarray
 
@@ -44,6 +45,7 @@ def trajectory_nodes(
         TrajectoryNode(
             timestamp_ns=int(ordered_samples[0].start_timestamp_ns),
             record_path=ordered_samples[0].metadata.get("record_path_start"),
+            artifact_path=ordered_samples[0].metadata.get("artifact_path_start"),
             imu_pose=imu_pose.copy(),
             lidar_pose=lidar_pose.copy(),
         )
@@ -62,6 +64,7 @@ def trajectory_nodes(
             TrajectoryNode(
                 timestamp_ns=int(sample.end_timestamp_ns),
                 record_path=sample.metadata.get("record_path_end"),
+                artifact_path=sample.metadata.get("artifact_path_end"),
                 imu_pose=imu_pose.copy(),
                 lidar_pose=lidar_pose.copy(),
             )
@@ -95,6 +98,7 @@ def trajectory_cloud_nodes(
             TrajectoryNode(
                 timestamp_ns=int(sample.start_timestamp_ns),
                 record_path=sample.metadata.get("record_path_start"),
+                artifact_path=sample.metadata.get("artifact_path_start"),
                 imu_pose=anchor.copy(),
                 lidar_pose=anchor.copy(),
             )
@@ -112,6 +116,7 @@ def trajectory_cloud_nodes(
             TrajectoryNode(
                 timestamp_ns=int(sample.end_timestamp_ns),
                 record_path=sample.metadata.get("record_path_end"),
+                artifact_path=sample.metadata.get("artifact_path_end"),
                 imu_pose=anchor @ np.linalg.inv(imu_delta),
                 lidar_pose=anchor @ np.linalg.inv(lidar_delta_in_imu),
             )
@@ -197,6 +202,7 @@ def review_trajectory_nodes(
         TrajectoryNode(
             timestamp_ns=int(review_candidates[0].get("start_timestamp_ns", 0)),
             record_path=review_candidates[0].get("record_path_start"),
+            artifact_path=review_candidates[0].get("artifact_path_start"),
             imu_pose=imu_pose.copy(),
             lidar_pose=lidar_pose.copy(),
         )
@@ -211,6 +217,7 @@ def review_trajectory_nodes(
             TrajectoryNode(
                 timestamp_ns=int(candidate.get("end_timestamp_ns", 0)),
                 record_path=candidate.get("record_path_end"),
+                artifact_path=candidate.get("artifact_path_end"),
                 imu_pose=imu_pose.copy(),
                 lidar_pose=lidar_pose.copy(),
             )

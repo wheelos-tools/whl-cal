@@ -62,6 +62,7 @@ def scan_review_object_descriptor(meta: Any, *, point_count: int | None = None) 
                 "meta_index": None,
                 "timestamp_ns": int(meta.timestamp_ns),
                 "record_path": meta.record_path,
+                "artifact_path": getattr(meta, "artifact_path", None),
                 "pose_sync_dt_ms": None,
                 "point_count": None if point_count is None else int(point_count),
                 "transform_anchor_support": transform_dict_from_matrix(np.eye(4)),
@@ -244,6 +245,8 @@ def serialize_motion_review_candidate(
         "pose_topic": pose_topic,
         "record_path_start": candidate["start_meta"].record_path,
         "record_path_end": candidate["end_meta"].record_path,
+        "artifact_path_start": candidate["start_meta"].artifact_path,
+        "artifact_path_end": candidate["end_meta"].artifact_path,
         "imu_delta": transform_dict_from_matrix(candidate["imu_delta"]),
         "lidar_delta": transform_dict_from_matrix(candidate["lidar_delta"]),
         "source_registration_object": copy.deepcopy(
@@ -334,10 +337,14 @@ def select_window_candidates(
     stride_best: dict[int, dict] = {}
     for candidate in ranked:
         stride_best.setdefault(int(candidate["stride"]), candidate)
-    for stride in sorted(
-        stride_best,
-        key=lambda value: -_candidate_information_score(stride_best[value]),
-    ):
+    stride_order = sorted(stride_best)
+    if stride_order:
+        shortest_stride = stride_order.pop(0)
+        stride_order.sort(
+            key=lambda value: -_candidate_information_score(stride_best[value])
+        )
+        stride_order.insert(0, shortest_stride)
+    for stride in stride_order:
         candidate = stride_best[stride]
         candidate_id = candidate_identity(candidate)
         if candidate_id in selected_ids:

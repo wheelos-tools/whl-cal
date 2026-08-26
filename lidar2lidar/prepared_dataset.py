@@ -5,6 +5,7 @@ from __future__ import annotations
 import bisect
 import logging
 import re
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,18 +15,23 @@ import yaml
 from scipy.spatial.transform import Rotation as R
 
 from lidar2lidar.record_adapter import Record, ensure_record_available
+
+# isort: off
 from lidar2lidar.record_utils import (
     PointCloudMeta,
     TransformEdge,
     build_transform_graph,
     discover_record_files,
-    load_pointcloud_from_meta,
     lookup_transform,
     message_timestamp_ns,
+    pointcloud_protobuf_metadata,
+    prefetch_pointcloud_cache,
     proto_transform_to_matrix,
     resolve_topic_frame_id,
     topic_sensor_name,
 )
+
+# isort: on
 
 
 @dataclass(frozen=True)
@@ -176,9 +182,34 @@ def collect_record_bundle(
 
     for record_file in record_files:
         with Record(record_file) as record:
-            for topic, msg, timestamp_ns in record.read_messages(
+            for topic, payload, type_name, timestamp_ns in record.read_raw_messages(
                 topics=tuple(requested_topics)
             ):
+                if topic in metadata_by_topic:
+                    try:
+                        canonical_timestamp_ns, raw_frame_id = (
+                            pointcloud_protobuf_metadata(payload, int(timestamp_ns))
+                        )
+                    except (UnicodeDecodeError, ValueError, struct.error):
+                        msg = record.decode_message(topic, payload, type_name)
+                        header = getattr(msg, "header", None)
+                        raw_frame_id = getattr(header, "frame_id", "")
+                        canonical_timestamp_ns = message_timestamp_ns(
+                            topic, msg, int(timestamp_ns)
+                        )
+                    frame_id = resolve_topic_frame_id(topic, raw_frame_id)
+                    topic_frame_ids.setdefault(topic, frame_id)
+                    metadata_by_topic[topic].append(
+                        PointCloudMeta(
+                            topic=topic,
+                            frame_id=frame_id,
+                            timestamp_ns=int(canonical_timestamp_ns),
+                            record_path=record_file,
+                        )
+                    )
+                    continue
+
+                msg = record.decode_message(topic, payload, type_name)
                 if topic in ("/tf_static", "/tf"):
                     for transform_stamped in msg.transforms:
                         parent = getattr(transform_stamped.header, "frame_id", "")
@@ -200,25 +231,6 @@ def collect_record_bundle(
                             static_edges[key] = edge
                         else:
                             dynamic_edges[key] = edge
-                    continue
-
-                if topic in metadata_by_topic:
-                    header = getattr(msg, "header", None)
-                    frame_id = resolve_topic_frame_id(
-                        topic, getattr(header, "frame_id", "")
-                    )
-                    canonical_timestamp_ns = message_timestamp_ns(
-                        topic, msg, int(timestamp_ns)
-                    )
-                    topic_frame_ids.setdefault(topic, frame_id)
-                    metadata_by_topic[topic].append(
-                        PointCloudMeta(
-                            topic=topic,
-                            frame_id=frame_id,
-                            timestamp_ns=int(canonical_timestamp_ns),
-                            record_path=record_file,
-                        )
-                    )
                     continue
 
                 if topic == pose_topic:
@@ -406,12 +418,11 @@ def _deserialize_tf_edge(payload: dict) -> TransformEdge:
 
 
 def _export_cloud(
-    meta: PointCloudMeta,
+    cloud: o3d.geometry.PointCloud,
     output_path: Path,
     *,
     voxel_size: float | None,
 ) -> dict:
-    cloud = load_pointcloud_from_meta(meta)
     if voxel_size is not None and voxel_size > 0.0:
         cloud = cloud.voxel_down_sample(float(voxel_size))
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,7 +461,8 @@ def build_prepared_rig_dataset(
     reference_topic = reference_topic or lidar_topics[0]
     if reference_topic not in lidar_topics:
         raise RuntimeError(
-            f"Reference topic {reference_topic} must be one of the prepared LiDAR topics."
+            f"Reference topic {reference_topic} must be one of the prepared "
+            "LiDAR topics."
         )
 
     output_path = Path(output_dir)
@@ -461,6 +473,7 @@ def build_prepared_rig_dataset(
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     pointcloud_cache_dir.mkdir(parents=True, exist_ok=True)
 
+    logging.info("Scanning record metadata and state once for prepared dataset.")
     bundle = collect_record_bundle(
         record_path=record_path,
         lidar_topics=lidar_topics,
@@ -500,12 +513,11 @@ def build_prepared_rig_dataset(
     sampled_metadata_by_topic: dict[str, list[PointCloudMeta]] = {
         topic: [] for topic in lidar_topics
     }
-    cached_by_key: dict[tuple[str, int], dict] = {}
-    synchronized_snapshots = []
-
+    planned_snapshots = []
+    export_requests: dict[tuple[str, int], tuple[PointCloudMeta, Path]] = {}
     for snapshot_index, reference_meta in enumerate(sampled_reference):
-        snapshot_topics = {}
         snapshot_metas: dict[str, PointCloudMeta] = {}
+        snapshot_deltas: dict[str, int] = {}
         valid_snapshot = True
         for topic in lidar_topics:
             meta, delta_ns = _nearest_meta(
@@ -518,14 +530,63 @@ def build_prepared_rig_dataset(
                 valid_snapshot = False
                 break
             key = (meta.topic, int(meta.timestamp_ns))
-            cached_payload = cached_by_key.get(key)
-            if cached_payload is None:
+            if key not in export_requests:
                 topic_dir = pointcloud_cache_dir / _sanitize_topic(topic)
                 file_path = topic_dir / f"{snapshot_index:05d}_{meta.timestamp_ns}.pcd"
-                cached_payload = _export_cloud(
-                    meta, file_path, voxel_size=export_voxel_size
+                export_requests[key] = (meta, file_path)
+            snapshot_metas[topic] = meta
+            snapshot_deltas[topic] = int(delta_ns or 0)
+        if not valid_snapshot:
+            continue
+        planned_snapshots.append(
+            {
+                "reference_timestamp_ns": int(reference_meta.timestamp_ns),
+                "metas": snapshot_metas,
+                "deltas": snapshot_deltas,
+            }
+        )
+
+    cached_by_key: dict[tuple[str, int], dict] = {}
+    requests_by_record: dict[str, list[tuple[PointCloudMeta, Path]]] = {}
+    for meta, file_path in export_requests.values():
+        requests_by_record.setdefault(str(meta.record_path), []).append(
+            (meta, file_path)
+        )
+    logging.info(
+        "Batch-loading %d point clouds from %d record files.",
+        len(export_requests),
+        len(requests_by_record),
+    )
+    for record_index, (record_path, requests) in enumerate(
+        requests_by_record.items(), start=1
+    ):
+        logging.info(
+            "Loading record %d/%d once: %s (%d point clouds).",
+            record_index,
+            len(requests_by_record),
+            record_path,
+            len(requests),
+        )
+        clouds = prefetch_pointcloud_cache(meta for meta, _ in requests)
+        for meta, file_path in requests:
+            key = (str(meta.topic), int(meta.timestamp_ns))
+            cloud = clouds.get(key)
+            if cloud is None:
+                raise RuntimeError(
+                    "Failed to batch-load point cloud from "
+                    f"{meta.record_path} topic {meta.topic} at {meta.timestamp_ns}."
                 )
-                cached_by_key[key] = cached_payload
+            cached_by_key[key] = _export_cloud(
+                cloud, file_path, voxel_size=export_voxel_size
+            )
+
+    synchronized_snapshots = []
+    for planned_snapshot in planned_snapshots:
+        snapshot_topics = {}
+        snapshot_metas = {}
+        for topic, meta in planned_snapshot["metas"].items():
+            key = (meta.topic, int(meta.timestamp_ns))
+            cached_payload = cached_by_key[key]
             cached_meta = PointCloudMeta(
                 topic=meta.topic,
                 frame_id=meta.frame_id,
@@ -539,18 +600,18 @@ def build_prepared_rig_dataset(
                 "frame_id": cached_meta.frame_id,
                 "record_path": cached_meta.record_path,
                 "artifact_path": cached_meta.artifact_path,
-                "sync_dt_ms": float((delta_ns or 0) / 1e6),
+                "sync_dt_ms": float(planned_snapshot["deltas"][topic] / 1e6),
                 "point_count": int(cached_payload["point_count"]),
             }
-        if not valid_snapshot:
-            continue
         for topic, meta in snapshot_metas.items():
             sampled_metadata_by_topic[topic].append(meta)
         synchronized_snapshots.append(
             {
                 "snapshot_index": int(len(synchronized_snapshots)),
                 "reference_topic": reference_topic,
-                "reference_timestamp_ns": int(reference_meta.timestamp_ns),
+                "reference_timestamp_ns": int(
+                    planned_snapshot["reference_timestamp_ns"]
+                ),
                 "topics": snapshot_topics,
             }
         )
@@ -702,7 +763,12 @@ def load_prepared_rig_dataset(dataset_yaml: str) -> PreparedRigDataset:
             transform_world_imu=np.asarray(transform_world_imu, dtype=float),
             gravity_imu=np.asarray(gravity_imu, dtype=float),
         )
-        for timestamp_ns, transform_world_localization, transform_world_imu, gravity_imu in zip(
+        for (
+            timestamp_ns,
+            transform_world_localization,
+            transform_world_imu,
+            gravity_imu,
+        ) in zip(
             state["pose_timestamps_ns"],
             state["pose_transform_world_localization"],
             state["pose_transform_world_imu"],

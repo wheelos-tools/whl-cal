@@ -255,6 +255,9 @@ class Record:
 
         return payload
 
+    def decode_message(self, topic: str, payload: bytes, type_name: str = ""):
+        return self._decode_message(topic, payload)
+
     def _iter_messages(
         self, topics: Iterable[str] | None = None
     ) -> Iterator[tuple[str, object, int]]:
