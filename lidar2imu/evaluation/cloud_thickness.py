@@ -7,7 +7,15 @@ import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 
 from lidar2imu.algorithms import summarize_values
-from lidar2imu.models import CalibrationConfig, CalibrationDataset, MotionSample
+
+# isort: off
+from lidar2imu.models import (
+    CalibrationConfig,
+    CalibrationDataset,
+    MotionSample,
+)
+
+# isort: on
 from lidar2lidar.record_utils import PointCloudMeta, load_pointcloud_from_meta
 
 
@@ -306,6 +314,7 @@ def evaluate_cloud_thickness(
             {
                 "timestamp_ns": int(first_sample.start_timestamp_ns),
                 "record_path": str(first_record_path),
+                "artifact_path": first_sample.metadata.get("artifact_path_start"),
                 "imu_pose": imu_pose.copy(),
             }
         )
@@ -320,6 +329,7 @@ def evaluate_cloud_thickness(
                 {
                     "timestamp_ns": int(sample.end_timestamp_ns),
                     "record_path": str(record_path_end),
+                    "artifact_path": sample.metadata.get("artifact_path_end"),
                     "imu_pose": imu_pose.copy(),
                 }
             )
@@ -358,6 +368,7 @@ def evaluate_cloud_thickness(
             frame_id=str(calibration_dataset.child_frame),
             timestamp_ns=int(entry["timestamp_ns"]),
             record_path=str(entry["record_path"]),
+            artifact_path=entry.get("artifact_path"),
         )
         try:
             cloud = load_pointcloud_from_meta(meta)

@@ -803,6 +803,8 @@ def convert_record_to_standardized_samples(
     ground_samples = []
     ground_diagnostics = []
     ground_indices = _uniform_indices(len(lidar_metas), max_ground_samples)
+    ground_prefetch_metas = [lidar_metas[index] for index in ground_indices]
+    cloud_cache.update(prefetch_pointcloud_cache(ground_prefetch_metas))
     ground_sync_threshold_ns = int(ground_pose_sync_threshold_ms * 1e6)
     imu_window_ns = int(imu_gravity_window_ms * 1e6)
 
@@ -1032,6 +1034,7 @@ def convert_record_to_standardized_samples(
         raise ValueError("map_support_stride must be >= 1.")
     if map_min_support_frames < 1:
         raise ValueError("map_min_support_frames must be >= 1.")
+    motion_timing_diagnostics = {}
     motion_candidates = _build_motion_candidates(
         lidar_metas=lidar_metas,
         pose_samples=pose_samples,
@@ -1039,6 +1042,7 @@ def convert_record_to_standardized_samples(
         pose_time_offset_ns=pose_time_offset_ns,
         sync_threshold_ns=motion_sync_threshold_ns,
         base_stride=motion_frame_stride,
+        timing_diagnostics=motion_timing_diagnostics,
     )
     motion_windows = _build_motion_windows(
         motion_candidates=motion_candidates,
@@ -1084,7 +1088,15 @@ def convert_record_to_standardized_samples(
     prefetch_target_cloud_count = int(len(prefetch_meta_indices))
     prefetch_loaded_cloud_count = 0
     if prefetch_meta_indices:
-        prefetch_metas = [lidar_metas[index] for index in sorted(prefetch_meta_indices)]
+        prefetch_metas = [
+            lidar_metas[index]
+            for index in sorted(prefetch_meta_indices)
+            if (
+                lidar_metas[index].topic,
+                int(lidar_metas[index].timestamp_ns),
+            )
+            not in cloud_cache
+        ]
         prefetched_cloud_cache = prefetch_pointcloud_cache(prefetch_metas)
         cloud_cache.update(prefetched_cloud_cache)
         prefetch_loaded_cloud_count = int(len(prefetched_cloud_cache))
@@ -1100,6 +1112,7 @@ def convert_record_to_standardized_samples(
     }
     alignment_cache: dict[int, dict] = {}
     submap_cache = {}
+    registration_preprocessing_cache = {}
 
     for window in motion_windows:
         window_diagnostic = {
@@ -1268,6 +1281,7 @@ def convert_record_to_standardized_samples(
                 preprocessing_params=preprocessing_params,
                 method=2,
                 initial_transform=lidar_initial_guess,
+                preprocessing_cache=registration_preprocessing_cache,
             )
             if lidar_delta is None or registration_result is None:
                 diagnostic["reason"] = "registration_failed"
@@ -1969,6 +1983,8 @@ def convert_record_to_standardized_samples(
                 "metadata": {
                     "record_path_start": candidate["start_meta"].record_path,
                     "record_path_end": candidate["end_meta"].record_path,
+                    "artifact_path_start": candidate["start_meta"].artifact_path,
+                    "artifact_path_end": candidate["end_meta"].artifact_path,
                     "lidar_topic": lidar_topic,
                     "pose_topic": pose_topic,
                     "window_id": int(candidate["window_id"]),
@@ -2296,6 +2312,9 @@ def convert_record_to_standardized_samples(
             "ground_selected": len(ground_samples),
             "motion_selected": len(motion_samples),
             "motion_candidate_count": len(motion_candidates),
+            "motion_rejected_frame_gap": int(
+                motion_timing_diagnostics.get("rejected_frame_gap_count", 0)
+            ),
             "motion_window_count": len(motion_windows),
             "motion_valid_window_count": int(
                 sum(1 for window in motion_windows if window["valid"])
@@ -2384,6 +2403,12 @@ def convert_record_to_standardized_samples(
             "motion_selected": len(motion_samples),
             "ground_attempted": len(ground_indices),
             "motion_attempted": len(motion_candidates),
+            "motion_rejected_frame_gap": int(
+                motion_timing_diagnostics.get("rejected_frame_gap_count", 0)
+            ),
+            "lidar_median_frame_delta_ms": motion_timing_diagnostics.get(
+                "median_frame_delta_ms"
+            ),
             "motion_rejected_low_fitness": motion_rejected_low_fitness,
             "motion_rejected_low_overlap": int(motion_rejected_low_overlap),
             "motion_registered_candidate_count": len(motion_registered_candidates),
@@ -2496,6 +2521,7 @@ def convert_record_to_standardized_samples(
         "ground": ground_diagnostics,
         "motion_windows": motion_window_diagnostics,
         "motion": motion_diagnostics,
+        "motion_timing": motion_timing_diagnostics,
         "motion_selection": {
             "strategy": motion_selection_strategy,
             "registration_mode": motion_registration_mode,
@@ -2690,6 +2716,65 @@ def _refresh_calibration_manifest_paths(calibration_dir: Path) -> None:
         yaml.safe_dump(manifest, file, sort_keys=False)
 
 
+def _write_calibration_skipped_report(
+    calibration_dir: Path,
+    diagnostics: dict,
+    config: CalibrationConfig,
+) -> dict | None:
+    summary = diagnostics["summary"]
+    reasons = []
+    if int(summary["ground_selected"]) < int(config.min_ground_samples):
+        reasons.append("ground_sample_count_below_minimum")
+    if int(summary["motion_selected"]) < int(config.min_motion_samples):
+        reasons.append("motion_sample_count_below_minimum")
+    if not reasons:
+        return None
+
+    report = {
+        "module": "lidar2imu",
+        "status": "skipped",
+        "release_ready": False,
+        "recommendation": "review_extraction_before_solver",
+        "reasons": reasons,
+        "counts": {
+            "ground_selected": int(summary["ground_selected"]),
+            "motion_selected": int(summary["motion_selected"]),
+        },
+        "thresholds": {
+            "min_ground_samples": int(config.min_ground_samples),
+            "min_motion_samples": int(config.min_motion_samples),
+        },
+        "artifacts": {
+            "standardized_samples": str(
+                calibration_dir.parent / "standardized_samples.yaml"
+            ),
+            "conversion_diagnostics": str(
+                calibration_dir.parent / "conversion_diagnostics.yaml"
+            ),
+        },
+    }
+    diagnostics_dir = calibration_dir / "diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    report_path = diagnostics_dir / "calibration_skipped.yaml"
+    with open(report_path, "w", encoding="utf-8") as file:
+        yaml.safe_dump(report, file, sort_keys=False)
+    logging.warning(
+        "Skipping solver because extraction is insufficient: %s. Report: %s",
+        ", ".join(reasons),
+        report_path,
+    )
+    return {
+        "module": "lidar2imu",
+        "parent_frame": None,
+        "child_frame": None,
+        "artifacts": {
+            "calibration_skipped": str(report_path),
+            "standardized_samples": report["artifacts"]["standardized_samples"],
+            "conversion_diagnostics": report["artifacts"]["conversion_diagnostics"],
+        },
+    }
+
+
 def _run_conversion_and_calibration(
     args: argparse.Namespace,
     output_dir: Path,
@@ -2817,6 +2902,17 @@ def _run_conversion_and_calibration(
         "planar_motion_policy": args.planar_motion_policy,
     }
     config = CalibrationConfig(**{**config.__dict__, **config_updates})
+    skipped_manifest = _write_calibration_skipped_report(
+        calibration_output_dir, diagnostics, config
+    )
+    if skipped_manifest is not None:
+        return {
+            "sample_path": sample_path,
+            "diagnostics": diagnostics,
+            "result": None,
+            "manifest": skipped_manifest,
+            "calibration_skipped": True,
+        }
     result = run_calibration(
         dataset, config=config, output_dir=str(calibration_output_dir)
     )
@@ -3511,6 +3607,8 @@ def main() -> None:
         extraction_transform_path=args.extraction_transform,
         identity_initial_transform=args.identity_initial_transform,
     )
+    if first_pass.get("calibration_skipped"):
+        return
 
     pass_summaries = [
         _build_reextract_pass_summary(

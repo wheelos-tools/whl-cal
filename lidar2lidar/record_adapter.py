@@ -29,12 +29,12 @@ try:
 except ImportError:
     RecordReader = None
 
+# isort: off
 try:
     from lidar2lidar.pycyber_record_adapter import Record as PycyberRecordAdapter
 except ImportError:
     PycyberRecordAdapter = None
 
-# isort: off
 from lidar2lidar import apollo_flatbuffer_messages as flat_messages  # noqa: E402
 from lidar2lidar import apollo_record_messages as record_messages  # noqa: E402
 
@@ -164,6 +164,9 @@ class _CyberRecordAdapter:
 
         return None
 
+    def decode_message(self, topic: str, payload: bytes, type_name: str = ""):
+        return self._decode_message(topic, payload)
+
     def read_raw_messages(
         self, topics: Iterable[str] | None = None
     ) -> Iterator[tuple[str, bytes, str, int]]:
@@ -210,6 +213,11 @@ class Record:
         self, topics: Iterable[str] | None = None
     ) -> Iterator[tuple[str, object, int]]:
         yield from self._impl.read_messages(topics=topics)
+
+    def decode_message(self, topic: str, payload: bytes, type_name: str = ""):
+        if hasattr(self._impl, "decode_message"):
+            return self._impl.decode_message(topic, payload, type_name)
+        return self._impl._decode_message(topic, payload)
 
     def get_messagenumber(self, channel_name):
         if hasattr(self._impl, "get_messagenumber"):

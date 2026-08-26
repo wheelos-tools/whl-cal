@@ -5,14 +5,19 @@ from typing import Any
 
 import numpy as np
 import open3d as o3d
-from scipy.spatial.transform import Rotation as R, Slerp
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 from lidar2lidar.extrinsic_io import matrix_from_transform_dict
+
+# isort: off
 from lidar2lidar.record_utils import (
     PointCloudMeta,
     collect_pointcloud_metadata,
     load_pointcloud_from_meta,
 )
+
+# isort: on
 
 
 def _registration_object_cache_key(
@@ -127,8 +132,15 @@ def _load_review_scan_cloud(
     lidar_topic: str,
     frame_id: str,
     scan_cache: dict[tuple[Any, ...], o3d.geometry.PointCloud],
+    artifact_path: str | None = None,
 ) -> o3d.geometry.PointCloud:
-    cache_key = (str(lidar_topic), str(frame_id), int(timestamp_ns), str(record_path))
+    cache_key = (
+        str(lidar_topic),
+        str(frame_id),
+        int(timestamp_ns),
+        str(record_path),
+        str(artifact_path or ""),
+    )
     if cache_key not in scan_cache:
         cloud = load_pointcloud_from_meta(
             PointCloudMeta(
@@ -136,6 +148,7 @@ def _load_review_scan_cloud(
                 frame_id=str(frame_id),
                 timestamp_ns=int(timestamp_ns),
                 record_path=str(record_path),
+                artifact_path=artifact_path,
             )
         )
         if not cloud.is_empty():
@@ -169,6 +182,7 @@ def _dense_review_entries(
             {
                 "timestamp_ns": int(record.get("timestamp_ns", 0)),
                 "record_path": str(record_path),
+                "artifact_path": record.get("artifact_path"),
                 "initial_transform": (
                     matrix_from_transform_dict(initial_transform_payload)
                     if isinstance(initial_transform_payload, dict)
@@ -180,6 +194,7 @@ def _dense_review_entries(
             {
                 "timestamp_ns": int(record.get("timestamp_ns", 0)),
                 "record_path": str(record_path),
+                "artifact_path": record.get("artifact_path"),
                 "initial_transform": (
                     matrix_from_transform_dict(refined_transform_payload)
                     if isinstance(refined_transform_payload, dict)
@@ -200,11 +215,26 @@ def _dense_review_entries(
     dense_half_window_ns = _review_dense_half_window_ns(
         descriptor, sparse_initial_records
     )
-    metas = _load_review_topic_metadata(
-        sorted(set(record_paths)),
-        lidar_topic=str(lidar_topic),
-        metadata_cache=metadata_cache,
-    )
+    artifact_records = [
+        record for record in sparse_initial_records if record.get("artifact_path")
+    ]
+    if artifact_records:
+        metas = [
+            PointCloudMeta(
+                topic=str(lidar_topic),
+                frame_id=str(frame_id),
+                timestamp_ns=int(record["timestamp_ns"]),
+                record_path=str(record["record_path"]),
+                artifact_path=str(record["artifact_path"]),
+            )
+            for record in artifact_records
+        ]
+    else:
+        metas = _load_review_topic_metadata(
+            sorted(set(record_paths)),
+            lidar_topic=str(lidar_topic),
+            metadata_cache=metadata_cache,
+        )
     dense_metas = [
         meta
         for meta in metas
@@ -218,6 +248,7 @@ def _dense_review_entries(
                 frame_id=str(frame_id),
                 timestamp_ns=int(record["timestamp_ns"]),
                 record_path=str(record["record_path"]),
+                artifact_path=record.get("artifact_path"),
             )
             for record in sparse_initial_records
         ]
@@ -233,6 +264,7 @@ def _dense_review_entries(
             lidar_topic=str(lidar_topic),
             frame_id=str(frame_id),
             scan_cache=scan_cache,
+            artifact_path=meta.artifact_path,
         )
         if cloud.is_empty():
             continue
@@ -240,6 +272,7 @@ def _dense_review_entries(
             {
                 "timestamp_ns": int(meta.timestamp_ns),
                 "record_path": str(meta.record_path),
+                "artifact_path": meta.artifact_path,
                 "initial_transform": _interpolate_sparse_local_transform(
                     sparse_initial_records, int(meta.timestamp_ns)
                 ),
@@ -310,6 +343,7 @@ def _descriptor_support_records(descriptor: dict[str, Any]) -> list[dict[str, An
             {
                 "timestamp_ns": int(record.get("timestamp_ns", 0)),
                 "record_path": str(record_path),
+                "artifact_path": record.get("artifact_path"),
                 "point_count": (
                     None
                     if record.get("point_count") is None
@@ -383,6 +417,7 @@ def _support_scene_records(
             lidar_topic=str(lidar_topic),
             frame_id=str(frame_id),
             scan_cache=scan_cache,
+            artifact_path=record.get("artifact_path"),
         )
         if cloud.is_empty():
             continue
@@ -442,8 +477,12 @@ def build_registration_object_review(
     )
     if entries:
         scene_records = _dense_scene_records(entries, anchor_index)
-        refinement_mode = "dense_interpolated_scene"
-        review_input_mode = "dense_support_pose_interpolation"
+        if any(record.get("artifact_path") for record in support_records):
+            refinement_mode = "prepared_sparse_scene"
+            review_input_mode = "prepared_artifact_support"
+        else:
+            refinement_mode = "dense_interpolated_scene"
+            review_input_mode = "dense_support_pose_interpolation"
     else:
         scene_records = _support_scene_records(
             support_records,

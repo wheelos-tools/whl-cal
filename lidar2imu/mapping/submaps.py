@@ -7,8 +7,14 @@ import numpy as np
 import open3d as o3d
 
 from lidar2imu.extraction.timing import nearest_sample, shift_timestamp_ns
-from lidar2imu.local_mapping import (LocalMapBuildConfig,
-                                     build_bidirectional_local_map)
+
+# isort: off
+from lidar2imu.local_mapping import (
+    LocalMapBuildConfig,
+    build_bidirectional_local_map,
+)
+
+# isort: on
 from lidar2lidar.extrinsic_io import transform_dict_from_matrix
 from lidar2lidar.prepared_dataset import PoseSample
 from lidar2lidar.record_utils import load_pointcloud_from_meta
@@ -75,6 +81,7 @@ def _serialize_support_record(
         "meta_index": int(entry["meta_index"]),
         "timestamp_ns": int(record["timestamp_ns"]),
         "record_path": str(record["record_path"]),
+        "artifact_path": entry.get("artifact_path"),
         "pose_sync_dt_ms": float(entry["pose_sync_dt_ms"]),
         "point_count": int(entry["point_count"]),
         "initial_transform_anchor_support": transform_dict_from_matrix(
@@ -132,6 +139,7 @@ def _pose_only_submap(
                 "meta_index": int(entry["meta_index"]),
                 "timestamp_ns": int(entry["timestamp_ns"]),
                 "record_path": str(entry["record_path"]),
+                "artifact_path": entry.get("artifact_path"),
                 "pose_sync_dt_ms": float(entry["pose_sync_dt_ms"]),
                 "point_count": int(entry["point_count"]),
                 "initial_transform_anchor_support": transform_dict_from_matrix(
@@ -236,6 +244,7 @@ def build_local_lidar_submap(
                 "meta_index": int(support_index),
                 "timestamp_ns": int(lidar_metas[support_index].timestamp_ns),
                 "record_path": lidar_metas[support_index].record_path,
+                "artifact_path": lidar_metas[support_index].artifact_path,
                 "pose_sync_dt_ms": float(support_alignment["pose_sync_dt_ms"]),
                 "point_count": int(len(support_cloud.points)),
                 "initial_transform": np.asarray(
