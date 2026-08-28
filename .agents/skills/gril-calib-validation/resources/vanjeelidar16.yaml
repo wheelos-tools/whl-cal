@@ -1,0 +1,79 @@
+common:
+    lid_topic: "/velodyne_points"
+    imu_topic: "/imu/data"
+
+preprocess:
+    lidar_type: 2
+    scan_line: 16
+    blind: 0.5
+    feature_extract_en: false
+
+calibration:
+    cut_frame: true
+    cut_frame_num: 3
+    orig_odom_freq: 10
+    mean_acc_norm: 9.81
+    imu_sensor_height: 0.527
+    verbose: true
+    data_accum_length: 350
+    x_accumulate: 0.001
+    y_accumulate: 0.001
+    z_accumulate: 0.99
+    trans_IL_x: -0.34
+    trans_IL_y: 0.0
+    trans_IL_z: -0.59
+    set_boundary: true
+    bound_th: 0.5
+    gyro_factor: 13.0
+    acc_factor: 1.0
+    ground_factor: 5.0
+
+mapping:
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    gyr_cov: 0.5
+    acc_cov: 0.5
+    det_range: 100.0
+    ground_cov: 100.0
+
+publish:
+    path_en: true
+    scan_publish_en: false
+    dense_publish_en: false
+    scan_bodyframe_pub_en: false
+
+pcd_save:
+    pcd_save_en: false
+    interval: -1
+
+trajectory_save:
+    traj_save_en: true
+    traj_file_path: "/data/lidar_trajectory.txt"
+
+patchworkpp:
+    sensor_height: 1.117
+    mode: "czm"
+    verbose: false
+    visualize: false
+    num_iter: 3
+    num_lpr: 20
+    num_min_pts: 10
+    th_seeds: 0.3
+    th_dist: 0.125
+    th_seeds_v: 0.25
+    th_dist_v: 0.1
+    max_r: 5.0
+    min_r: 1.0
+    uprightness_thr: 0.707
+    adaptive_seed_selection_margin: -1.2
+    czm:
+        num_zones: 4
+        num_sectors_each_zone: [16, 32, 54, 32]
+        mum_rings_each_zone: [2, 4, 4, 4]
+        elevation_thresholds: [0.1, 0.2, 0.4, 0.6]
+        flatness_thresholds: [0.0, 0.0, 0.0, 0.0]
+    enable_RNR: true
+    enable_RVPF: true
+    enable_TGR: true
+    RNR_ver_angle_thr: -15.0
+    RNR_intensity_thr: 0.2
