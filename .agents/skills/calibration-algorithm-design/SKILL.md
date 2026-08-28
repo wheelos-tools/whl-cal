@@ -185,6 +185,8 @@ References:
 
 ## In this repository, start from these precedents
 
-- `.github/copilot-instructions.md`
+- `AGENTS.md`
+- `.agents/knowledge/architecture.md`
+- `.agents/knowledge/conventions.md`
 - `docs/calibration_methodology.md`
 - `docs/calibration_review_guide.md`
