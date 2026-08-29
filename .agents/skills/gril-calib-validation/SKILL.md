@@ -40,9 +40,13 @@ The command:
 5. rejects the run if the conversion contract fails
 6. runs GRIL twice
 7. exports each result, trajectory, raw log, and aligned state sequence
+   together with the pre-calibration `GRIL_batch_trace_v1.txt`
 8. creates the LiDAR/GNSS trajectory comparison
 9. runs reference-free dynamics and yaw-time holdout checks
 10. builds an independent IMU/GNSS-odometry submap with point-thickness metrics
+
+The supplied runner delays playback after topic advertisement so the frozen
+reference cannot silently miss the first bag messages while subscribers connect.
 
 Use alternate topics and frames when required:
 

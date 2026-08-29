@@ -22,8 +22,10 @@ Use this page as the navigation hub for the repo's calibration workflows.
 
 - LiDAR-to-LiDAR (scan2scan / scan2map):
   [docs/lidar2lidar_quickstart.md](lidar2lidar_quickstart.md)
-- LiDAR-to-IMU (record conversion + staged solver):
+- LiDAR-to-IMU (record conversion + staged solver + GRIL native route):
   [docs/lidar2imu_quickstart.md](lidar2imu_quickstart.md)
+- GRIL ROS-free migration and reference A/B:
+  [docs/gril_ros_free_migration.md](gril_ros_free_migration.md)
 - Camera intrinsic:
   [docs/camera_quickstart.md](camera_quickstart.md)
 - Camera-to-camera:
@@ -40,7 +42,8 @@ Use this page as the navigation hub for the repo's calibration workflows.
 | Need | Open this doc first |
 | --- | --- |
 | I have an Apollo bag with multiple LiDARs and need inter-LiDAR extrinsics | `docs/lidar2lidar_quickstart.md` |
-| I have an Apollo bag and need LiDAR↔IMU extrinsics | `docs/lidar2imu_quickstart.md` |
+| I have an Apollo record/bag and need LiDAR↔IMU extrinsics, including the current GRIL native flow | `docs/lidar2imu_quickstart.md` |
+| I need to reproduce or review the ROS-free GRIL migration (not run a production release) | `docs/gril_ros_free_migration.md` |
 | I need camera intrinsic calibration from live capture or exported images | `docs/camera_quickstart.md` |
 | I need camera↔camera extrinsics from paired image directories | `docs/camera2camera_quickstart.md` |
 | I need LiDAR↔Camera extrinsics from paired image / PCD files | `docs/lidar2camera_quickstart.md` |

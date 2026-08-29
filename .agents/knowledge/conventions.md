@@ -21,5 +21,4 @@ Read before adding APIs, artifacts, transforms, metrics, tests, or documentation
 - Output review contract: `docs/calibration_review_guide.md`
 - Documentation responsibilities: `docs/docs_vs_context.md`
 - Lint versions and CI entrypoint: `.github/workflows/lint-format.yml`
-- Lint implementation: `scripts/ci/apollo_lint.sh`
 - User-facing command inventory: `docs/quickstart_index.md`

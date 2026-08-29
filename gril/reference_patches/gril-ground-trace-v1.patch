@@ -1,0 +1,62 @@
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -137,6 +137,7 @@
+ ofstream fout_result;
+ ofstream fout_preprocess_trace;
+ ofstream fout_frontend_cv_trace;
++ofstream fout_ground_trace;
+ int frontend_cv_package_count = 0;
+ 
+ vector<BoxPointType> cub_needrm;
+@@ -274,6 +275,25 @@
+     fout_frontend_cv_trace << "end_package\n";
+ }
+ 
++void write_ground_trace_cloud(
++        const char *label,
++        const pcl::PointCloud<pcl::PointXYZI> &cloud) {
++    fout_ground_trace << label << " " << cloud.size() << "\n";
++    for (const auto &point : cloud.points)
++        fout_ground_trace << "point "
++                          << point.x << " " << point.y << " " << point.z << " "
++                          << point.intensity << "\n";
++}
++
++void write_ground_trace(uint64_t timestamp_ns) {
++    if (scan_count > 21)
++        return;
++    fout_ground_trace << "scan " << scan_count << " " << timestamp_ns << "\n";
++    write_ground_trace_cloud("ground", ground_points);
++    write_ground_trace_cloud("nonground", non_ground_points);
++    fout_ground_trace << "end_scan\n";
++}
++
+ boost::shared_ptr<PatchWorkpp<pcl::PointXYZI>> PatchworkppGroundSeg;
+ 
+ // visualize ground segmenation result
+@@ -529,6 +549,7 @@
+         pcl::fromROSMsg(*msg, curr_points);
+ 
+         PatchworkppGroundSeg->estimate_ground(curr_points, ground_points, non_ground_points, time_taken);
++        write_ground_trace(msg->header.stamp.toNSec());
+ 
+         pub_cloud.publish(cloud2msg(curr_points));
+         pub_ground.publish(cloud2msg(ground_points));
+@@ -1037,6 +1058,9 @@
+     fout_frontend_cv_trace << setprecision(17);
+     fout_frontend_cv_trace << "GRIL_FRONTEND_CV_TRACE 1\n";
+     fout_frontend_cv_trace << "config " << gyr_cov << " " << acc_cov << "\n";
++    fout_ground_trace.open(RESULT_FILE_DIR("GRIL_ground_trace_v1.txt"), ios::out);
++    fout_ground_trace << setprecision(17);
++    fout_ground_trace << "GRIL_GROUND_TRACE 1\n";
+     if (fout_out)
+         cout << "~~~~" << ROOT_DIR << " file opened" << endl;
+     else
+@@ -1546,5 +1570,6 @@
+ 
+     fout_preprocess_trace << "END\n";
+     fout_frontend_cv_trace << "END\n";
++    fout_ground_trace << "END\n";
+     return 0;
+ }
+\ No newline at end of file
