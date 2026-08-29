@@ -9,6 +9,7 @@ workflows.
 | --- | --- | --- |
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
 | `lidar2imu` | real-bag validated | keep `--profile baseline` as regression reference; use `--profile production` as the current map-side production candidate |
+| `gril` | research-only ROS-free source build; full A/B gate fails | use the native command only for controlled reproduction/A/B work; its final yaw discrepancy is `0.406964 deg` versus a `0.2 deg` gate, so no installer, distribution, or production release is approved ([release gate](docs/gril_ros_free_migration.md)) |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
 | `camera2camera` | target-based stereo baseline exists | use the checkerboard paired-image pipeline as the current production baseline; add ChArUco next |
 | `lidar2camera` | target-based industrial baseline exists | use the target-based pipeline as the current production baseline; keep targetless paths experimental |
@@ -89,6 +90,8 @@ lidar2lidar-topics "$RECORD_DIR"
   [docs/lidar2lidar_quickstart.md](docs/lidar2lidar_quickstart.md)
 - LiDAR-to-IMU:
   [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
+- GRIL ROS-free migration:
+  [docs/gril_ros_free_migration.md](docs/gril_ros_free_migration.md)
 - Camera intrinsic:
   [docs/camera_quickstart.md](docs/camera_quickstart.md)
 - Camera-to-camera:

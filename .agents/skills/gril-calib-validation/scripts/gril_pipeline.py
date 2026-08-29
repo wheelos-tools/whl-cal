@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -17,6 +18,18 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 PINNED_REVISION = "c09b01a05ec83bc0a361941acf897109aaecf0a6"
 DEFAULT_REPOSITORY = "https://github.com/Taeyoung96/GRIL-Calib.git"
 DEFAULT_IMAGE = "gril-calib-validation:2026-08"
+REFERENCE_FRONTEND_TRACE_PATCH = (
+    SKILL_DIR.parents[2]
+    / "gril/reference_patches/gril-full-frontend-reference-trace-v2.patch"
+)
+REFERENCE_PATCHES = (
+    SKILL_DIR / "patches/gril-validation.patch",
+    SKILL_DIR.parents[2] / "gril/reference_patches/gril-batch-trace-v1.patch",
+    SKILL_DIR.parents[2] / "gril/reference_patches/gril-preprocess-trace-v1.patch",
+    SKILL_DIR.parents[2] / "gril/reference_patches/gril-frontend-cv-trace-v1.patch",
+    SKILL_DIR.parents[2] / "gril/reference_patches/gril-ground-trace-v1.patch",
+    REFERENCE_FRONTEND_TRACE_PATCH,
+)
 
 
 def run(command: list[str], **kwargs) -> None:
@@ -41,6 +54,97 @@ def paths(workspace: Path) -> tuple[Path, Path]:
     return workspace / "GRIL-Calib", workspace / "catkin_ws"
 
 
+def apply_patch(repository: Path, patch: Path) -> None:
+    check = subprocess.run(
+        ["git", "-C", str(repository), "apply", "--check", str(patch)]
+    )
+    if check.returncode == 0:
+        run(["git", "-C", str(repository), "apply", str(patch)])
+        return
+    run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "apply",
+            "--reverse",
+            "--check",
+            str(patch),
+        ]
+    )
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def trace_event_counts(path: Path) -> dict[str, int]:
+    labels = (
+        "package",
+        "propagated",
+        "downsample",
+        "map_init",
+        "ekf_iteration",
+        "iteration_updated",
+        "updated",
+        "map_stats",
+        "motion_start",
+        "calibration_push",
+        "sufficiency",
+        "calibration_applied",
+        "end_package",
+    )
+    counts = {label: 0 for label in labels}
+    with path.open() as stream:
+        for line in stream:
+            label = line.partition(" ")[0]
+            if label in counts:
+                counts[label] += 1
+    return counts
+
+
+def write_reference_trace_manifest(output: Path, repository: Path, bag: Path) -> None:
+    traces = []
+    for run_dir in sorted(output.glob("run_*")):
+        trace = run_dir / "GRIL_full_frontend_reference_trace_v2.txt"
+        if not trace.exists():
+            raise FileNotFoundError(
+                f"Reference frontend trace was not exported: {trace}"
+            )
+        traces.append(
+            {
+                "run": run_dir.name,
+                "path": str(trace),
+                "sha256": sha256(trace),
+                "schema": "GRIL_FULL_FRONTEND_REFERENCE_TRACE 2",
+                "event_counts": trace_event_counts(trace),
+            }
+        )
+    manifest = {
+        "schema": "GRIL_REFERENCE_FRONTEND_TRACE_ARCHIVE 1",
+        "source_revision": subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "source_revision_expected": PINNED_REVISION,
+        "source_archive_sha256": hashlib.sha256(
+            subprocess.check_output(
+                ["git", "-C", str(repository), "archive", "--format=tar", "HEAD"]
+            )
+        ).hexdigest(),
+        "patches": [
+            {"path": str(patch), "sha256": sha256(patch)} for patch in REFERENCE_PATCHES
+        ],
+        "input_bag": {"path": str(bag), "sha256": sha256(bag)},
+        "traces": traces,
+    }
+    with (output / "reference_frontend_trace_manifest.yaml").open("w") as stream:
+        yaml.safe_dump(manifest, stream, sort_keys=False)
+
+
 def setup(arguments) -> None:
     workspace = arguments.workspace.resolve()
     repository, catkin_ws = paths(workspace)
@@ -50,24 +154,8 @@ def setup(arguments) -> None:
     run(["git", "-C", str(repository), "fetch", "--all", "--tags"])
     run(["git", "-C", str(repository), "checkout", "--detach", PINNED_REVISION])
 
-    patch = SKILL_DIR / "patches/gril-validation.patch"
-    check = subprocess.run(
-        ["git", "-C", str(repository), "apply", "--check", str(patch)]
-    )
-    if check.returncode == 0:
-        run(["git", "-C", str(repository), "apply", str(patch)])
-    else:
-        run(
-            [
-                "git",
-                "-C",
-                str(repository),
-                "apply",
-                "--reverse",
-                "--check",
-                str(patch),
-            ]
-        )
+    for patch in REFERENCE_PATCHES:
+        apply_patch(repository, patch)
     shutil.copy2(
         SKILL_DIR / "resources/vanjeelidar16.yaml",
         repository / "config/velodyne16.yaml",
@@ -186,6 +274,7 @@ def calibrate(arguments) -> None:
             str(arguments.runs),
         ]
     )
+    write_reference_trace_manifest(output, repository, bag)
 
 
 def parse_result(path: Path) -> tuple[list[float], list[float], float]:

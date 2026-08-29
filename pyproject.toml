@@ -25,6 +25,7 @@ dependencies = [
   "protobuf==3.19.4",
   "cyber_record",
   "pupil-apriltags",
+  "rosbags>=0.11,<0.12",
   "scipy",
   "pyyaml"
 ]
@@ -39,6 +40,9 @@ where = ["."]
 [tool.setuptools.package-data]
 lidar2lidar = ["conf/*.yaml", "conf/*.md"]
 
+[tool.isort]
+profile = "black"
+
 [project.scripts]
 camera-intrinsic-calibrate = "camera.cli:main"
 lidar2lidar-calibrate = "lidar2lidar.cli:main"
@@ -52,6 +56,7 @@ lidar2imu-calibrate = "lidar2imu.cli:main"
 lidar2imu-convert-record = "lidar2imu.record_converter:main"
 lidar2imu-tune-record = "tools.lidar2imu.tune_record:main"
 lidar2imu-review-runs = "tools.lidar2imu.review_runs:main"
+gril-migrate = "gril.cli:main"
 lidar2camera-calibrate = "lidar2camera.cli:main"
 camera2camera-calibrate = "camera2camera.cli:main"
 lidar2camera-extract-record = "lidar2camera.record_export:main"

@@ -1,3 +1,6 @@
+max_iteration: 5
+cube_side_length: 1000
+
 common:
     lid_topic: "/velodyne_points"
     imu_topic: "/imu/data"
@@ -6,6 +9,7 @@ preprocess:
     lidar_type: 2
     scan_line: 16
     blind: 0.5
+    point_filter_num: 3
     feature_extract_en: false
 
 calibration:
@@ -58,6 +62,8 @@ patchworkpp:
     num_iter: 3
     num_lpr: 20
     num_min_pts: 10
+    max_flatness_storage: 1000
+    max_elevation_storage: 1000
     th_seeds: 0.3
     th_dist: 0.125
     th_seeds_v: 0.25
