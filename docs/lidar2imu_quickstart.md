@@ -1,292 +1,137 @@
 ---
-audience: user
-stability: stable
-P26-05-25
+audience: customer
+stability: review-only
 ---
 
-# LiDAR-to-IMU quick start
+# LiDAR-to-IMU calibration
 
-## Requirements
+The delivered container runs the ROS-free native GRIL pipeline. It includes the
+record adapter, reviewed Vanjee-16 configuration, native frontend, and batch
+solver. The customer does not install ROS, Python, Ceres, Eigen, or PCL.
 
-- Python 3.8 or newer
-- Apollo record containing LiDAR, pose, IMU, and `/tf_static`
-- a reasonable initial `lidar -> imu` transform
-- motion with left/right turns, acceleration/braking, and flat-road segments
+## 1. Get the image
 
-For collection guidance, see
-[apollo_data_collection.md](apollo_data_collection.md). For algorithm tuning,
-see [lidar2imu_design.md](lidar2imu_design.md).
-
-## Install
+Use the exact version supplied with the release:
 
 ```bash
-python3.8 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+docker pull <registry>/whl-cal-lidar2imu:<version>
+export WHL_LIDAR2IMU_IMAGE=<registry>/whl-cal-lidar2imu:<version>
 ```
 
-## Run from an Apollo record
-
-There are now two LiDAR-to-IMU paths in this repository:
-
-- **`lidar2imu` staged solver**: the existing Python pipeline and current
-  regression/production profiles.
-- **GRIL native route**: the ROS-free migration of the original GRIL pipeline.
-  Use this when you specifically want GRIL behavior from Apollo records.
-
-Use the stable `lidar2imu` scan-to-scan baseline first when you are comparing
-against the existing in-repo solver:
-
-Current recommendation: **keep the staged solver**. GRIL is the desired
-algorithm family for reproduction work, but the available same-repository
-evidence does not prove it is a stronger production replacement yet.
-
-| Method | Current evidence | Decision |
-| --- | --- | --- |
-| `lidar2imu --profile baseline` / `production` | Runs end-to-end, but current real-bag artifacts still report `warning` and `release_ready: false` for full 6-DoF acceptance. | Keep as the regression/reference surface. |
-| `lidar2imu --solver-family gril_staged` / `gril_prob*` | Candidate staged variants also report `warning` / `release_ready: false` on the available artifacts. | Keep candidate-only; do not promote by name. |
-| `gril-migrate run-native` | Reproduces GRIL components and emits a full native result without ROS; full A/B review is not review-ready on the current 0827 evidence. | Use for GRIL reproduction and A/B, not as a production replacement. |
-
-Do not delete `lidar2imu` staged/baseline code until GRIL wins on the same
-dataset matrix with the same post-run review contract: final result comparison,
-repeatability, trajectory/holdout evidence, and physical validation. A single
-friendly run or solver convergence is not enough.
+For an offline delivery package:
 
 ```bash
-lidar2imu-convert-record \
-  --record-path /path/to/record \
-  --lidar-topic /apollo/sensor/your_lidar/PointCloud2 \
-  --pose-topic /apollo/localization/pose \
-  --imu-topic /apollo/sensor/gnss/imu \
-  --output-dir outputs/lidar2imu/run01 \
-  --profile baseline \
-  --calibrate
+docker load -i whl-cal-lidar2imu-<version>.tar
+export WHL_LIDAR2IMU_IMAGE=whl-cal-lidar2imu:<version>
 ```
 
-If the bag does not contain the static transform, add:
+Record the immutable image digest together with every calibration result.
 
-```bash
---initial-transform /path/to/lidar_imu_extrinsics.yaml
+## 2. Prepare data
+
+Place one Apollo record or all continuous split records from the same capture in
+one directory:
+
+```text
+capture/
+├── capture.record.00000
+├── capture.record.00001
+└── capture.record.00002
 ```
 
-## Run the ROS-free GRIL route from an Apollo record
+The default topics are:
 
-Use this path when the target algorithm is **GRIL**, not the current
-`lidar2imu` staged solver. The native GRIL implementation lives in
-`third_party/gril_native`; Python only converts the record into the canonical
-dataset, writes native inputs/configs, invokes the C++ executable, and assembles
-review artifacts.
-
-Build the native GRIL executable first:
-
-```bash
-cmake -S third_party/gril_native -B third_party/gril_native/build
-cmake --build third_party/gril_native/build
-ctest --test-dir third_party/gril_native/build --output-on-failure
+```text
+LiDAR: /apollo/sensor/vanjeelidar/up/PointCloud2
+IMU:   /apollo/sensor/gnss/imu
 ```
 
-If the host Eigen is not the reviewed `3.3.7` frontend version, configure with:
+The default sensor profile expects a 16-line Vanjee LiDAR. Do not silently use
+it for another sensor model or installation.
+
+## 3. Run calibration
 
 ```bash
-cmake -S third_party/gril_native -B third_party/gril_native/build \
-  -DGRIL_PINNED_EIGEN_INCLUDE_DIR=/path/to/eigen-3.3.7
-```
+mkdir -p "$PWD/lidar2imu-output"
 
-Run GRIL directly from one or more Apollo records:
-
-```bash
-gril-migrate run-native-frontend \
-  --input /path/to/capture.record.00000 \
-  --input /path/to/capture.record.00001 \
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$PWD/capture",dst=/data,readonly \
+  --mount type=bind,src="$PWD/lidar2imu-output",dst=/output \
+  "$WHL_LIDAR2IMU_IMAGE" \
+  --input /data \
   --input-type record \
-  --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
-  --imu-topic /apollo/sensor/gnss/imu \
-  --scan-lines 16 \
-  --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
-  --executable third_party/gril_native/build/gril_native_full_frontend \
-  --output-dir outputs/gril/native_run01
+  --output-dir /output
 ```
 
-`gril-migrate run-native` is an alias for the same complete native command.
-For repeated runs, split extraction from execution:
+For alternate topics:
 
 ```bash
-gril-migrate prepare \
-  --input /path/to/capture.record.00000 \
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$PWD/capture",dst=/data,readonly \
+  --mount type=bind,src="$PWD/lidar2imu-output",dst=/output \
+  "$WHL_LIDAR2IMU_IMAGE" \
+  --input /data \
   --input-type record \
-  --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
+  --output-dir /output \
+  --lidar-topic /apollo/sensor/lidar/PointCloud2 \
   --imu-topic /apollo/sensor/gnss/imu \
-  --scan-lines 16 \
-  --output-dir outputs/gril/datasets/run01
-
-gril-migrate run-native \
-  --input outputs/gril/datasets/run01/dataset.yaml \
-  --input-type canonical \
-  --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
-  --executable third_party/gril_native/build/gril_native_full_frontend \
-  --output-dir outputs/gril/native_run01
+  --scan-lines 16
 ```
 
-The native run writes:
+ROS1 bag and canonical datasets are selected with `--input-type bag` and
+`--input-type canonical`.
 
-- `GRIL_Calib_result.txt`
-- `GRIL_batch_trace_v1.txt`
-- `GRIL_full_frontend_trace_v1.txt`
-- `manifest.yaml`
-- `dataset/input_contract.yaml` when the input was a record or bag
+## 4. Read the result
 
-This command does **not** apply quality gates during algorithm execution. GRIL's
-own `data_sufficiency_assess` still decides when to call `LI_Calibration`; all
-review gates are post-run evidence.
+```text
+lidar2imu-output/
+├── customer_summary.yaml
+├── GRIL_Calib_result.txt
+├── manifest.yaml
+├── dataset/
+├── GRIL_full_frontend_trace_v1.txt
+└── GRIL_batch_trace_v1.txt
+```
 
-### Review GRIL A/B evidence
+Customer review order:
 
-When a frozen ROS reference run and a repeated native run are available, assemble
-the migration review:
+1. `customer_summary.yaml`: complete rotation, translation, time offset, and
+   current verdict.
+2. `GRIL_Calib_result.txt`: native solver result.
+3. Published trajectory and accumulated-point-cloud review artifacts when the
+   release workflow supplies them.
+
+The current native GRIL customer verdict is intentionally `review_required`.
+Solver completion does not prove horizontal lever-arm or yaw/time accuracy.
+
+## Release status
+
+The container is ready for local and controlled review. External customer
+distribution remains blocked until:
+
+1. native/reference rotation equivalence is accepted;
+2. independent physical trajectory and point-cloud holdout accepts the result;
+3. GRIL/LI-Init and transitive dependency license provenance is approved.
+
+## Developer build
+
+The Docker build consumes the validated bundle under
+`docker/lidar2imu/runtime/`; it does not download or rebuild native
+dependencies. Maintainers create that ignored bundle from the approved cache:
 
 ```bash
-gril-migrate review-full \
-  --reference-trace-archive outputs/gril/reference/reference_frontend_trace_manifest.yaml \
-  --reference-result outputs/gril/reference/run_1/GRIL_Calib_result.txt \
-  --reference-config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
-  --candidate-manifest outputs/gril/native_run01/manifest.yaml \
-  --repeat-manifest outputs/gril/native_run01_repeat/manifest.yaml \
-  --evidence outputs/gril/native_run01/validation_evidence.yaml \
-  --output-dir outputs/gril/native_run01_review
+python docker/lidar2imu/prepare_cached_runtime.py \
+  --frontend /path/to/cache/gril_native_full_frontend \
+  --batch /path/to/cache/gril_native_batch \
+  --library-prefix /path/to/cache/runtime-prefix
+
+docker build -f docker/lidar2imu/Dockerfile \
+  --network=none \
+  -t whl-cal-lidar2imu:<version> .
 ```
 
-Interpret the review in this order:
-
-1. `input.verdict` and `canonical_array_hashes_verified`
-2. component evidence for preprocessing, sync, CV propagation, Patchwork++, and
-   isolated odometry/EKF
-3. `result_equivalence` for final rotation, translation, and time offset
-4. `native_repeatability`
-5. physical holdout verdict
-
-The current 0827 evidence is intentionally strict:
-
-- component-level GRIL reproduction passes
-- final native output is generated without ROS
-- native repeatability passes
-- full A/B is **not review-ready** because the rotation/yaw delta is
-  `0.406964 deg`, above the `0.2 deg` migration gate
-- translation and time offset pass their gates
-- the original GRIL/reference path is also not a production-quality physical
-  calibration on that capture, so do not treat a failed `<0.2 deg` A/B as proof
-  that native alone is wrong
-
-This means the current conclusion is **inconclusive for replacement**:
-GRIL-native is operationally useful for reproducing and studying GRIL, but it
-has not beaten the staged solver strongly enough to remove the staged solver
-from the repository.
-
-The remaining full-state mismatch is caused by upstream ikd-tree's unconfigured
-pthread background rebuild scheduling. Do not hide it with fixed sleeps,
-thread serialization, or disabling rebuilds: that would create a deterministic
-candidate, not an equivalent GRIL reproduction. If production needs a
-deterministic GRIL-derived candidate, gate it as a new method and compare it
-against the frozen GRIL reference and independent physical holdouts.
-
-## Recommended fast path
-
-For repeated runs, build a prepared dataset once:
-
-```bash
-lidar2lidar-rig-dataset \
-  --record-path /path/to/record \
-  --output-dir outputs/prepared/run01 \
-  --lidar-topics /apollo/sensor/your_lidar/PointCloud2 \
-  --reference-topic /apollo/sensor/your_lidar/PointCloud2 \
-  --export-voxel-size 0.05
-```
-
-Then calibrate from cached PCD, pose, and IMU artifacts:
-
-```bash
-lidar2imu-convert-record \
-  --prepared-dataset-yaml \
-    outputs/prepared/run01/diagnostics/prepared_rig_dataset.yaml \
-  --lidar-topic /apollo/sensor/your_lidar/PointCloud2 \
-  --output-dir outputs/lidar2imu/run01 \
-  --profile baseline \
-  --calibrate
-```
-
-Prepared mode avoids repeatedly scanning the raw record during extraction,
-registration review, trajectory visualization, and cloud-thickness evaluation.
-
-## Run from standardized samples
-
-```bash
-lidar2imu-calibrate \
-  --input outputs/lidar2imu/run01/standardized_samples.yaml \
-  --output-dir outputs/lidar2imu/run01_replay
-```
-
-This is the fastest path for solver-only A/B tests.
-
-## Check the result
-
-Read the conclusion first:
-
-```bash
-python - <<'PY'
-import yaml
-
-path = "outputs/lidar2imu/run01/calibration/metrics.yaml"
-with open(path, "r") as stream:
-    metrics = yaml.safe_load(stream)
-
-print(metrics["summary"]["final_acceptance_status"])
-print(metrics["summary"]["release_ready"])
-print(metrics["final_acceptance"]["recommendation"])
-PY
-```
-
-Required production conditions:
-
-- `summary.final_acceptance_status: pass`
-- `summary.release_ready: true`
-- Fisher eigenvalue and conditioning gates pass
-- holdout cloud-thickness gate passes
-
-Open the visual report:
-
-```bash
-xdg-open outputs/lidar2imu/run01/calibration/diagnostics/review_report.html
-```
-
-Key artifacts:
-
-- `calibrated_tf.yaml`: calibrated transform
-- `metrics.yaml`: acceptance result and metrics
-- `diagnostics/data_quality.yaml`: extraction quality
-- `diagnostics/registration_review.yaml`: per-window registration quality
-- `diagnostics/trajectory_overlay.svg`: IMU/LiDAR trajectory comparison
-- `diagnostics/trajectory_overlay_cloud.ply`: geometric overlay
-
-Do not accept a run only because the solver converged. If
-`freeze_xyyaw` was applied, only `z/roll/pitch` should be treated as usable.
-
-## Diagnose extraction failures
-
-Inspect:
-
-```bash
-cat outputs/lidar2imu/run01/conversion_diagnostics.yaml
-```
-
-Important fields:
-
-- `motion_rejected_frame_gap`: candidates crossing LiDAR data gaps
-- `lidar_median_frame_delta_ms`: nominal LiDAR frame period
-- `motion_rejected_low_fitness`: failed registrations
-- `motion_registered_candidate_count`: usable motion factors
-
-If extraction does not meet the minimum sample count, the converter writes
-`calibration_skipped.yaml` and does not run the solver.
-
-For advanced solver, observability, temporal-offset, or submap experiments,
-follow [lidar2imu_design.md](lidar2imu_design.md) and keep the baseline output
-for comparison.
+Maintainers must rebuild and test native GRIL before creating an image after C++
+source changes. Detailed metrics remain documented in
+[`calibration_metric_layers.md`](calibration_metric_layers.md).

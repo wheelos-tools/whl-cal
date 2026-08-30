@@ -11,7 +11,7 @@ import yaml
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation as R
 
-from calibration_common.evaluation import (
+from common.evaluation import (
     build_final_acceptance,
     write_acceptance_artifacts,
     write_paradigm_artifacts,

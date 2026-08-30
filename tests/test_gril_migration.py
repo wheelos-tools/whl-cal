@@ -8,12 +8,15 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from common.geometry import euler_xyz_degrees_to_matrix, quaternion_xyzw_to_matrix
 from gril.abtest import build_abtest_report
+from gril.adapters.apollo_record import _record_paths
+from gril.adapters.base import AdapterConfig
 from gril.cli import build_parser
 from gril.comparison import compare_datasets, compare_results, parse_gril_result
 from gril.config import compare_configs, config_digest, load_algorithm_config
 from gril.dataset_io import load_dataset, write_dataset
-from gril.evaluation import build_input_contract
+from gril.evaluation import build_customer_summary, build_input_contract
 from gril.frontend_event import write_frontend_event_input
 from gril.frontend_runner import NativeFrontendRunConfig, build_native_frontend_commands
 from gril.frontend_trace import compare_frontend_traces
@@ -63,6 +66,32 @@ def _dataset() -> CanonicalDataset:
 
 
 class GrilDatasetTest(unittest.TestCase):
+    def test_apollo_record_directory_expands_split_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = [
+                root / "capture.record.00000",
+                root / "capture.record.00001",
+            ]
+            for path in expected:
+                path.touch()
+            (root / "notes.txt").touch()
+            paths = _record_paths(
+                AdapterConfig(
+                    inputs=(root,),
+                    lidar_topic="/lidar",
+                    imu_topic="/imu",
+                )
+            )
+        self.assertEqual(paths, tuple(str(path) for path in expected))
+
+    def test_lightweight_rotation_helpers_match_expected_conventions(self) -> None:
+        quaternion_rotation = quaternion_xyzw_to_matrix(
+            [0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)]
+        )
+        euler_rotation = euler_xyz_degrees_to_matrix([0.0, 0.0, 90.0])
+        np.testing.assert_allclose(quaternion_rotation, euler_rotation, atol=1e-12)
+
     def test_round_trip_and_equivalence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manifest = write_dataset(_dataset(), Path(directory))
@@ -97,6 +126,25 @@ Time Lag IMU to LiDAR = 0.004
             result = parse_gril_result(path)
         comparison = compare_results(result, result)
         self.assertEqual(comparison["verdict"], "equivalent")
+
+    def test_customer_summary_does_not_claim_physical_acceptance(self) -> None:
+        content = """
+Rotation LiDAR to IMU = 1 2 3
+Translation LiDAR to IMU = 0.1 0.2 0.3
+Time Lag IMU to LiDAR = 0.004
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.txt"
+            path.write_text(content)
+            summary = build_customer_summary(
+                path,
+                _dataset(),
+                developer_diagnostics={"manifest": "manifest.yaml"},
+            )
+        self.assertEqual(summary["verdict"], "review_required")
+        self.assertFalse(summary["release_ready"])
+        self.assertEqual(summary["key_metrics"]["lidar_scans"], 1)
+        self.assertEqual(summary["result"]["translation_m"], [0.1, 0.2, 0.3])
 
     def test_abtest_requires_input_and_result_equivalence(self) -> None:
         content = """

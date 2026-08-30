@@ -95,6 +95,19 @@ def _pose_to_matrix(position, orientation) -> np.ndarray:
     return transform
 
 
+def _message_pose_to_matrix(msg) -> np.ndarray | None:
+    pose = getattr(msg, "pose", None)
+    if pose is None:
+        pose = getattr(msg, "localization", None)
+    if pose is None:
+        return None
+    position = getattr(pose, "position", None)
+    orientation = getattr(pose, "orientation", None)
+    if position is None or orientation is None:
+        return None
+    return _pose_to_matrix(position, orientation)
+
+
 def _extract_imu_components(msg, imu_topic: str) -> tuple[np.ndarray, np.ndarray]:
     linear_acceleration = getattr(msg, "linear_acceleration", None)
     angular_velocity = getattr(msg, "angular_velocity", None)
@@ -234,8 +247,8 @@ def collect_record_bundle(
                     continue
 
                 if topic == pose_topic:
-                    pose = getattr(msg, "pose", None)
-                    if pose is None:
+                    transform_world_localization = _message_pose_to_matrix(msg)
+                    if transform_world_localization is None:
                         continue
                     canonical_timestamp_ns = message_timestamp_ns(
                         topic, msg, int(timestamp_ns)
@@ -243,7 +256,7 @@ def collect_record_bundle(
                     raw_pose_samples.append(
                         (
                             int(canonical_timestamp_ns),
-                            _pose_to_matrix(pose.position, pose.orientation),
+                            transform_world_localization,
                         )
                     )
                     continue
@@ -310,14 +323,11 @@ def collect_pose_samples(
     for record_file in record_files:
         with Record(record_file) as record:
             for _, msg, timestamp_ns in record.read_messages(topics=[pose_topic]):
-                pose = getattr(msg, "pose", None)
-                if pose is None:
+                transform_world_localization = _message_pose_to_matrix(msg)
+                if transform_world_localization is None:
                     continue
                 canonical_timestamp_ns = message_timestamp_ns(
                     pose_topic, msg, int(timestamp_ns)
-                )
-                transform_world_localization = _pose_to_matrix(
-                    pose.position, pose.orientation
                 )
                 transform_world_imu = (
                     transform_world_localization @ transform_localization_to_imu

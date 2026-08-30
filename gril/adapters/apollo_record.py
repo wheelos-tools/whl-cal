@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 
 from gril.adapters.base import AdapterConfig, Scan, pack_imu, pack_lidar
 from gril.models import CanonicalDataset, StaticTransform
 from lidar2lidar.record_adapter import Record
-from lidar2lidar.record_utils import extract_tf_edges, message_timestamp_ns
+from lidar2lidar.record_utils import (
+    discover_record_files,
+    extract_tf_edges,
+    message_timestamp_ns,
+)
 
 
 def _frame_id(message, fallback: str) -> str:
@@ -19,19 +24,31 @@ def _frame_id(message, fallback: str) -> str:
     )
 
 
+def _record_paths(config: AdapterConfig) -> tuple[str, ...]:
+    paths = tuple(
+        record_path
+        for input_path in config.inputs
+        for record_path in discover_record_files(str(input_path))
+    )
+    if not paths:
+        raise ValueError("No Apollo record files found in the configured inputs")
+    return paths
+
+
 class ApolloRecordAdapter:
     def __init__(self, config: AdapterConfig):
         self.config = config
 
     def read(self) -> CanonicalDataset:
         self.config.validate()
+        record_paths = _record_paths(self.config)
         scans: list[Scan] = []
         imu_samples: list[tuple[int, np.ndarray, np.ndarray]] = []
         lidar_frame = ""
         imu_frame = ""
         rejected: Counter[str] = Counter()
 
-        for record_path in self.config.inputs:
+        for record_path in record_paths:
             with Record(str(record_path)) as record:
                 for topic, message, record_timestamp_ns in record.read_messages(
                     topics=(self.config.lidar_topic, self.config.imu_topic)
@@ -112,7 +129,7 @@ class ApolloRecordAdapter:
                         )
                     )
 
-        record_files = tuple(str(path.resolve()) for path in self.config.inputs)
+        record_files = tuple(str(Path(path).resolve()) for path in record_paths)
         transforms = tuple(
             StaticTransform(
                 parent_frame=edge.parent_frame,

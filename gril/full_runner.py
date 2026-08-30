@@ -7,13 +7,15 @@ import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 import numpy as np
 import yaml
 
 from gril.config import config_digest, load_algorithm_config
 from gril.dataset_io import file_sha256, load_dataset
+from gril.evaluation.customer_summary import write_customer_summary
+from gril.models import CanonicalDataset
 from gril.native_runner import write_native_config
 
 _EVENT_COUNT = struct.Struct("<Q")
@@ -303,12 +305,16 @@ def write_full_native_config(
 
 
 def write_full_native_input(
-    dataset_path: Path,
+    dataset_path: Union[Path, CanonicalDataset],
     output_path: Path,
     *,
     scan_count: int | None = None,
 ) -> Path:
-    dataset = load_dataset(dataset_path)
+    dataset = (
+        dataset_path
+        if isinstance(dataset_path, CanonicalDataset)
+        else load_dataset(dataset_path)
+    )
     lidar = dataset.lidar.normalized()
     imu = dataset.imu.normalized()
     selected_scans = len(lidar.scan_timestamps_ns) if scan_count is None else scan_count
@@ -395,8 +401,9 @@ def build_full_native_command(
 def run_full_native(config: NativeFullRunConfig) -> Path:
     config.validate()
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    dataset = load_dataset(config.dataset)
     input_path = write_full_native_input(
-        config.dataset,
+        dataset,
         config.output_dir / "native_dataset_v1.bin",
         scan_count=config.scan_count,
     )
@@ -496,6 +503,21 @@ def run_full_native(config: NativeFullRunConfig) -> Path:
                 "schema": "GRIL_BATCH_TRACE 1",
             },
         },
+    }
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    customer_summary_path = write_customer_summary(
+        config.output_dir / "customer_summary.yaml",
+        result_path,
+        dataset,
+        developer_diagnostics={
+            "manifest": str(manifest_path.resolve()),
+            "full_frontend_trace": str(trace_path.resolve()),
+            "batch_trace": str(batch_trace_path.resolve()),
+        },
+    )
+    manifest["artifacts"]["customer_summary"] = {
+        "path": str(customer_summary_path.resolve()),
+        "sha256": file_sha256(customer_summary_path),
     }
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
     return manifest_path

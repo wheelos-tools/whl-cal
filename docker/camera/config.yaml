@@ -1,0 +1,40 @@
+target_type: chessboard
+pattern_size: [11, 8]
+square_size: 0.025
+camera_index: 0
+window_name: WheelOS Camera Intrinsic Calibration
+window_width: 1280
+window_height: 720
+distortion_model: plumb_bob
+require_release_ready: false
+capture:
+  force_resolution: false
+  width: null
+  height: null
+  fourcc: null
+  buffersize: 1
+  warmup_frames: 12
+  reconnect_bad_frame_burst: 30
+  initial_ready_timeout_s: 10.0
+  latest_frame_read_timeout_s: 0.25
+  reconnect_sleep_s: 0.5
+optimization:
+  resize_factor: 0.5
+  detection_interval: 2
+undistortion_preview:
+  alpha: 1.0
+  center_principal_point: false
+workflow:
+  root_dir: /output
+  save_live_accepted_frames: true
+auto_capture_settings:
+  grid_shape: [3, 3]
+  min_total_samples: 9
+  pose_novelty_area_delta: 0.02
+  pose_novelty_aspect_delta: 0.12
+  pose_novelty_center_distance_ratio: 0.08
+  samples_per_grid: 1
+  delay_between_captures: 1.0
+  stability_frames: 5
+  stability_threshold: 2.0
+  stability_threshold_ratio: 0.02

@@ -48,3 +48,5 @@ gril_native.conf
 gril_native_full.conf
 
 data
+.pytest_cache
+docker/lidar2imu/runtime/

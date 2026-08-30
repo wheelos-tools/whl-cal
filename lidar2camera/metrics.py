@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from calibration_common.evaluation import build_final_acceptance
+from common.evaluation import build_final_acceptance
 from lidar2camera.models import ReferenceCalibrationConfig, ReferenceCalibrationDataset
 
 
