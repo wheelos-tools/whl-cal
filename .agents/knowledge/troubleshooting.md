@@ -21,6 +21,6 @@ Read when calibration diverges, produces inconsistent transforms, passes fitness
 - Validated repository conclusions: `context/knowledge_base/validated_conclusions.md`
 - Open verification points: `context/knowledge_base/verification_points.md`
 - Timing diagnosis: `context/timing_sync_context.md`
-- LiDAR-to-IMU history: `context/lidar2imu_context.md`
+- LiDAR-to-IMU historical baseline/staged evidence: `context/lidar2imu_context.md`
+- Current LiDAR-to-IMU workflow: `.agents/skills/gril-calib-validation/SKILL.md`
 - Scan-to-map history: `context/scan2map_context.md`
-- GRIL workflow: `.agents/skills/gril-calib-validation/SKILL.md`

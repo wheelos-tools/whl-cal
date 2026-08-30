@@ -19,7 +19,7 @@ Read before changing package boundaries, pipeline stages, data extraction, or ou
 - Repository overview: `README.md`
 - Shared pipeline model: `context/calibration_paradigm.md`
 - LiDAR-to-LiDAR design: `docs/lidar2lidar_design.md`
-- LiDAR-to-IMU design: `docs/lidar2imu_design.md`
+- LiDAR-to-IMU GRIL design: `docs/gril_ros_free_migration.md`
 - LiDAR-to-camera design: `docs/lidar2camera_design.md`
 - Record adapter: `lidar2lidar/record_adapter.py`
 - Supported Apollo messages: `lidar2lidar/apollo_record_messages.py`

@@ -1,0 +1,13 @@
+.cache
+.git
+.venv
+outputs
+**/__pycache__
+**/*.pyc
+third_party/gril_native/build/CMakeFiles
+third_party/gril_native/build/Log
+third_party/gril_native/build/Testing
+third_party/gril_native/build/*.a
+third_party/gril_native/build/*test
+third_party/gril_native/build/*trace
+third_party/gril_native/build/gril_native_smoke

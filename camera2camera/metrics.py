@@ -5,9 +5,8 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from calibration_common.evaluation import build_final_acceptance
-from camera2camera.models import (StereoCalibrationConfig,
-                                  StereoCalibrationDataset)
+from camera2camera.models import StereoCalibrationConfig, StereoCalibrationDataset
+from common.evaluation import build_final_acceptance
 
 
 def float_list_summary(values: list[float]) -> dict[str, float] | None:

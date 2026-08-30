@@ -22,12 +22,14 @@ Use this page as the navigation hub for the repo's calibration workflows.
 
 - LiDAR-to-LiDAR (scan2scan / scan2map):
   [docs/lidar2lidar_quickstart.md](lidar2lidar_quickstart.md)
-- LiDAR-to-IMU (record conversion + staged solver + GRIL native route):
+- LiDAR-to-IMU (ROS-free native GRIL):
   [docs/lidar2imu_quickstart.md](lidar2imu_quickstart.md)
 - GRIL ROS-free migration and reference A/B:
   [docs/gril_ros_free_migration.md](gril_ros_free_migration.md)
 - Camera intrinsic:
   [docs/camera_quickstart.md](camera_quickstart.md)
+- Camera intrinsic and LiDAR-to-IMU containers:
+  [docker/README.md](../docker/README.md)
 - Camera-to-camera:
   [docs/camera2camera_quickstart.md](camera2camera_quickstart.md)
 - LiDAR↔Camera (target-based baseline):

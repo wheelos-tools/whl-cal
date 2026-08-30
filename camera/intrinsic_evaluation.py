@@ -6,14 +6,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import yaml
 
-from calibration_common.evaluation import (
+from camera.intrinsic_solver import normalize_distortion_model, project_points
+from common.evaluation import (
     build_final_acceptance,
     write_acceptance_artifacts,
     write_paradigm_artifacts,
     write_table_csv,
 )
-from camera.intrinsic_solver import normalize_distortion_model, project_points
 
 
 def float_list_summary(values):
@@ -37,7 +38,9 @@ def coverage_metrics(sample_records, grid_shape=None):
         max_cell_x = 0
         max_cell_y = 0
         for record in sample_records:
-            occupied_grid_cells = record.get("occupied_grid_cells") or [record["grid_cell"]]
+            occupied_grid_cells = record.get("occupied_grid_cells") or [
+                record["grid_cell"]
+            ]
             for grid_cell in occupied_grid_cells:
                 max_cell_x = max(max_cell_x, int(grid_cell["x"]))
                 max_cell_y = max(max_cell_y, int(grid_cell["y"]))
@@ -87,7 +90,9 @@ def sample_image_size_report(sample_records, capture_runtime_info):
         sample_sizes.append(
             (int(image_size.get("width", 0)), int(image_size.get("height", 0)))
         )
-    unique_sizes = sorted({size for size in sample_sizes if size[0] > 0 and size[1] > 0})
+    unique_sizes = sorted(
+        {size for size in sample_sizes if size[0] > 0 and size[1] > 0}
+    )
     actual_capture = (capture_runtime_info or {}).get("actual_capture_resolution") or {}
     actual_size = (
         int(actual_capture.get("width", 0)),
@@ -109,7 +114,9 @@ def sample_image_size_report(sample_records, capture_runtime_info):
             "height": int(unique_sizes[0][1]),
         }
     if has_actual_size and len(unique_sizes) == 1:
-        report["matches_actual_capture_resolution"] = bool(unique_sizes[0] == actual_size)
+        report["matches_actual_capture_resolution"] = bool(
+            unique_sizes[0] == actual_size
+        )
         report["actual_capture_resolution"] = {
             "width": int(actual_size[0]),
             "height": int(actual_size[1]),
@@ -279,7 +286,9 @@ def build_intrinsic_acceptance(
     target_type = str((calibration_target or {}).get("type", "chessboard"))
     per_view_rms = [float(row["rms_px"]) for row in per_view_report]
     occupied_cell_target = max(4, min(6, int(min_total_samples)))
-    target_points_per_sample = [int(np.asarray(points).shape[0]) for points in imgpoints]
+    target_points_per_sample = [
+        int(np.asarray(points).shape[0]) for points in imgpoints
+    ]
     image_size_report = sample_image_size_report(sample_records, capture_runtime_info)
     if target_type == "aprilgrid":
         min_points_per_sample = int(
@@ -294,7 +303,9 @@ def build_intrinsic_acceptance(
     gates = [
         {
             "name": "sample_count",
-            "status": "pass" if len(sample_records) >= int(min_total_samples) else "fail",
+            "status": (
+                "pass" if len(sample_records) >= int(min_total_samples) else "fail"
+            ),
             "severity": "required",
             "evidence": f"samples={len(sample_records)}, required={min_total_samples}",
             "action": "Collect more valid calibration-target views before trusting the intrinsic result.",
@@ -328,12 +339,18 @@ def build_intrinsic_acceptance(
                 else (
                     "pass"
                     if target_points_per_sample
-                    and float(np.percentile(np.asarray(target_points_per_sample, dtype=float), 20))
+                    and float(
+                        np.percentile(
+                            np.asarray(target_points_per_sample, dtype=float), 20
+                        )
+                    )
                     >= float(min_points_per_sample)
                     else "warning"
                 )
             ),
-            "severity": "required" if target_type in ("aprilgrid", "charuco") else "advisory",
+            "severity": (
+                "required" if target_type in ("aprilgrid", "charuco") else "advisory"
+            ),
             "evidence": (
                 "target_type="
                 f"{target_type}, points_per_sample_p20="
@@ -353,7 +370,8 @@ def build_intrinsic_acceptance(
             "name": "sample_image_size_consistency",
             "status": (
                 "pass"
-                if image_size_report is not None and bool(image_size_report.get("consistent"))
+                if image_size_report is not None
+                and bool(image_size_report.get("consistent"))
                 else "fail"
             ),
             "severity": "required",
@@ -368,7 +386,8 @@ def build_intrinsic_acceptance(
             "status": (
                 "pass"
                 if image_size_report is None
-                or image_size_report.get("matches_actual_capture_resolution") in (None, True)
+                or image_size_report.get("matches_actual_capture_resolution")
+                in (None, True)
                 else "warning"
             ),
             "severity": "required",
@@ -383,7 +402,8 @@ def build_intrinsic_acceptance(
             "status": (
                 "pass"
                 if per_view_rms
-                and float(np.percentile(np.asarray(per_view_rms, dtype=float), 95)) <= 1.5
+                and float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))
+                <= 1.5
                 else "warning"
             ),
             "severity": "required",
@@ -399,7 +419,8 @@ def build_intrinsic_acceptance(
             "severity": "required",
             "evidence": (
                 f"distortion_model={model}, "
-                "min_radial_derivative=" f"{float(monotonicity_report['min_radial_derivative'])}"
+                "min_radial_derivative="
+                f"{float(monotonicity_report['min_radial_derivative'])}"
             ),
             "action": (
                 "Treat non-monotonic radial distortion as calibration failure; "
@@ -448,8 +469,12 @@ def write_review_artifacts(
     output_path = Path(output_yaml_path)
     diagnostics_dir = output_path.with_name(f"{output_path.stem}_diagnostics")
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    per_view_csv = write_table_csv(diagnostics_dir / "per_view_reprojection.csv", per_view_report)
-    sample_records_csv = write_table_csv(diagnostics_dir / "sample_records.csv", sample_records)
+    per_view_csv = write_table_csv(
+        diagnostics_dir / "per_view_reprojection.csv", per_view_report
+    )
+    sample_records_csv = write_table_csv(
+        diagnostics_dir / "sample_records.csv", sample_records
+    )
     heatmap_path = build_heatmap_artifact(diagnostics_dir, coverage)
     final_acceptance = build_intrinsic_acceptance(
         min_total_samples,
@@ -464,6 +489,45 @@ def write_review_artifacts(
         distortion_model=distortion_model,
     )
     acceptance_artifacts = write_acceptance_artifacts(diagnostics_dir, final_acceptance)
+    per_view_rms = [float(row["rms_px"]) for row in per_view_report]
+    status_map = {
+        "pass": "accepted",
+        "warning": "review_required",
+        "fail": "rejected",
+    }
+    customer_summary = {
+        "schema_version": 1,
+        "module": "camera_intrinsic",
+        "verdict": status_map.get(final_acceptance["status"], "review_required"),
+        "release_ready": bool(final_acceptance["release_ready"]),
+        "result": str(output_path),
+        "key_metrics": {
+            "accepted_samples": int(len(sample_records)),
+            "required_samples": int(min_total_samples),
+            "average_reprojection_error_px": float(avg_error),
+            "per_view_reprojection_p95_px": (
+                float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))
+                if per_view_rms
+                else None
+            ),
+            "occupied_image_cells": (
+                None if coverage is None else int(coverage["occupied_cell_count"])
+            ),
+        },
+        "visual_review": [
+            item
+            for item in (
+                comparison_view_path,
+                heatmap_path,
+            )
+            if item is not None
+        ],
+        "next_action": final_acceptance["recommendation"],
+        "developer_diagnostics": str(diagnostics_dir),
+    }
+    customer_summary_path = output_path.parent / "customer_summary.yaml"
+    with customer_summary_path.open("w", encoding="utf-8") as file:
+        yaml.safe_dump(customer_summary, file, sort_keys=False)
     standardized_data = {
         "schema_version": 1,
         "module": "camera_intrinsic",
@@ -499,6 +563,7 @@ def write_review_artifacts(
         "module": "camera_intrinsic",
         "layers": {
             "conclusion": [
+                str(customer_summary_path),
                 acceptance_artifacts["acceptance_report"],
                 acceptance_artifacts["status_summary_csv"],
             ],
@@ -532,6 +597,7 @@ def write_review_artifacts(
     )
     return {
         "diagnostics_dir": str(diagnostics_dir),
+        "customer_summary": str(customer_summary_path),
         "acceptance": acceptance_artifacts,
         "release_ready": bool(final_acceptance.get("release_ready", False)),
         "final_acceptance": final_acceptance,

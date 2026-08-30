@@ -7,8 +7,8 @@ from collections import Counter
 import numpy as np
 from rosbags.rosbag1 import Reader
 from rosbags.typesys import Stores, get_typestore
-from scipy.spatial.transform import Rotation
 
+from common.geometry import quaternion_xyzw_to_matrix
 from gril.adapters.base import AdapterConfig, Scan, pack_imu, pack_lidar
 from gril.models import CanonicalDataset, StaticTransform
 
@@ -77,9 +77,9 @@ def _transform(message) -> np.ndarray:
     translation = message.translation
     rotation = message.rotation
     matrix = np.eye(4, dtype=np.float64)
-    matrix[:3, :3] = Rotation.from_quat(
+    matrix[:3, :3] = quaternion_xyzw_to_matrix(
         [rotation.x, rotation.y, rotation.z, rotation.w]
-    ).as_matrix()
+    )
     matrix[:3, 3] = [translation.x, translation.y, translation.z]
     return matrix
 

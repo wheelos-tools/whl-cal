@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from scipy.spatial.transform import Rotation
 
+from common.geometry import euler_xyz_degrees_to_matrix
 from gril.models import CanonicalDataset
 
 
@@ -115,14 +116,11 @@ def compare_results(
     translation_tolerance_m: float = 0.03,
     time_tolerance_s: float = 0.001,
 ) -> dict[str, Any]:
-    reference_rotation = Rotation.from_euler(
-        "xyz", reference["rotation_xyz_deg"], degrees=True
-    )
-    candidate_rotation = Rotation.from_euler(
-        "xyz", candidate["rotation_xyz_deg"], degrees=True
-    )
-    rotation_error = float(
-        np.degrees((reference_rotation.inv() * candidate_rotation).magnitude())
+    reference_rotation = euler_xyz_degrees_to_matrix(reference["rotation_xyz_deg"])
+    candidate_rotation = euler_xyz_degrees_to_matrix(candidate["rotation_xyz_deg"])
+    rotation_delta = reference_rotation.T @ candidate_rotation
+    rotation_error = math.degrees(
+        math.acos(float(np.clip((np.trace(rotation_delta) - 1.0) / 2.0, -1.0, 1.0)))
     )
     translation_error = float(
         np.linalg.norm(

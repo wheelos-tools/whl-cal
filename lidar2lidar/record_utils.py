@@ -28,17 +28,14 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
-import open3d as o3d
-from scipy.spatial.transform import Rotation as R
 
-# isort: off
-from lidar2lidar.extrinsic_io import (
-    extrinsics_filename,
-    load_extrinsics_file,
-    save_extrinsics_yaml,
-)
+from common.geometry import quaternion_xyzw_to_matrix
 
-# isort: on
+try:
+    import open3d as o3d
+except ImportError:
+    o3d = None
+
 from lidar2lidar.record_adapter import Record, ensure_record_available
 
 
@@ -59,6 +56,13 @@ class TransformEdge:
     source_topic: str
     timestamp_ns: int | None
     is_static: bool
+
+
+def _require_open3d() -> None:
+    if o3d is None:
+        raise RuntimeError(
+            "Open3D is required for LiDAR point-cloud operations but is not installed."
+        )
 
 
 def discover_record_files(input_path: str) -> list[str]:
@@ -358,6 +362,7 @@ def prefetch_pointcloud_cache(
     This avoids repeatedly reopening and rescanning long record files for each
     point cloud query.
     """
+    _require_open3d()
     ensure_record_available()
     cache: dict[tuple[str, int], o3d.geometry.PointCloud] = {}
     pending_by_record_topic: dict[tuple[str, str], set[int]] = defaultdict(set)
@@ -430,6 +435,7 @@ def prefetch_pointcloud_cache(
 
 
 def pointcloud_message_to_open3d(msg) -> o3d.geometry.PointCloud:
+    _require_open3d()
     if hasattr(msg, "points_xyz_array"):
         points = np.asarray(msg.points_xyz_array(), dtype=np.float64)
     else:
@@ -448,6 +454,7 @@ def pointcloud_message_to_open3d(msg) -> o3d.geometry.PointCloud:
 
 
 def load_pointcloud_from_meta(meta: PointCloudMeta) -> o3d.geometry.PointCloud:
+    _require_open3d()
     if meta.artifact_path:
         artifact_path = Path(meta.artifact_path)
         if artifact_path.exists():
@@ -529,14 +536,14 @@ def proto_transform_to_matrix(transform_proto) -> np.ndarray:
     rotation = transform_proto.rotation
 
     transform = np.eye(4, dtype=float)
-    transform[:3, :3] = R.from_quat(
+    transform[:3, :3] = quaternion_xyzw_to_matrix(
         [
             float(rotation.qx),
             float(rotation.qy),
             float(rotation.qz),
             float(rotation.qw),
         ]
-    ).as_matrix()
+    )
     transform[:3, 3] = [
         float(translation.x),
         float(translation.y),
@@ -585,6 +592,8 @@ def extract_tf_edges(record_files: Iterable[str]) -> list[TransformEdge]:
 
 
 def load_transform_edges_from_dir(conf_dir: str | None) -> list[TransformEdge]:
+    from lidar2lidar.extrinsic_io import load_extrinsics_file
+
     if not conf_dir:
         return []
 
@@ -617,6 +626,8 @@ def save_transform_edges_to_dir(
     edges: Iterable[TransformEdge],
     include_dynamic: bool = False,
 ) -> list[str]:
+    from lidar2lidar.extrinsic_io import extrinsics_filename, save_extrinsics_yaml
+
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     saved_paths = []
@@ -775,6 +786,7 @@ def voxel_overlap_ratio(
     source_to_target: np.ndarray,
     voxel_size: float,
 ) -> float:
+    _require_open3d()
     if len(source_cloud.points) == 0 or len(target_cloud.points) == 0:
         return 0.0
 
@@ -824,6 +836,7 @@ def compute_information_metrics(
     max_correspondence_distance: float,
     downsample_voxel_size: float,
 ) -> dict:
+    _require_open3d()
     source_eval = source_cloud.voxel_down_sample(downsample_voxel_size)
     target_eval = target_cloud.voxel_down_sample(downsample_voxel_size)
     info_matrix = o3d.pipelines.registration.get_information_matrix_from_point_clouds(
