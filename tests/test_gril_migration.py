@@ -167,12 +167,14 @@ Time Lag IMU to LiDAR = 0.004
             reference_trace.write_text("GRIL_BATCH_TRACE 1\n")
             candidate_trace.write_text("GRIL_BATCH_TRACE 1\n")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {lidar_type: 2}
 calibration: {cut_frame: true}
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.0}
-""")
+"""
+            )
             report = build_abtest_report(
                 reference_dataset,
                 candidate_dataset,
@@ -200,13 +202,15 @@ patchworkpp: {sensor_height: 1.0}
             trace = root / "trace.txt"
             trace.write_text("GRIL_BATCH_TRACE 1\n")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {}
 calibration: {}
 mapping: {}
 patchworkpp: {}
 launch: {}
-""")
+"""
+            )
             with self.assertRaisesRegex(ValueError, "distinct run artifacts"):
                 build_abtest_report(
                     dataset,
@@ -289,7 +293,8 @@ patchworkpp: {sensor_height: 1.0}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "gril.yaml"
-            source.write_text("""
+            source.write_text(
+                """
 preprocess: {lidar_type: 2}
 calibration:
   cut_frame: true
@@ -298,7 +303,8 @@ calibration:
   gyro_factor: 13.0
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.117}
-""")
+"""
+            )
             values = native_config_values(source)
             native = write_native_config(source, root / "native.conf")
             native_content = native.read_text()
@@ -348,7 +354,8 @@ patchworkpp: {sensor_height: 1.117}
             root = Path(directory)
             write_dataset(repeated, root / "dataset")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess:
   blind: 0.5
   point_filter_num: 3
@@ -356,7 +363,8 @@ preprocess:
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-""")
+"""
+            )
             output = write_preprocess_input(
                 root / "dataset",
                 config,
@@ -388,12 +396,14 @@ patchworkpp: {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {blind: 0.5}
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-""")
+"""
+            )
             with self.assertRaisesRegex(ValueError, "point_filter_num"):
                 write_frontend_event_input(
                     root / "missing-dataset",
@@ -407,12 +417,14 @@ patchworkpp: {}
             dataset = root / "dataset"
             write_dataset(_dataset(), dataset)
             gril_config = root / "gril.yaml"
-            gril_config.write_text("""
+            gril_config.write_text(
+                """
 preprocess: {blind: 0.5, point_filter_num: 3, scan_line: 16}
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-""")
+"""
+            )
             frontend = root / "gril_native_frontend_event_trace"
             ground = root / "gril_native_ground_trace"
             frontend.touch()
@@ -612,12 +624,14 @@ patchworkpp: {}
             root = Path(directory)
             dataset = write_dataset(_dataset(), root / "dataset")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {lidar_type: 2}
 calibration: {cut_frame: true}
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.0}
-""")
+"""
+            )
             result_template = (
                 "Rotation LiDAR to IMU = {rotation} 0 0\n"
                 "Translation LiDAR to IMU = 0 0 0\n"
