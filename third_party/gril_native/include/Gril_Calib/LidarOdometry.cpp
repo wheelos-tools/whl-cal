@@ -594,6 +594,7 @@ LidarOdometryResult LidarOdometryCore::process(
                     normals.points[index].intensity = distance;
                     core.residual_last[index] =
                         std::abs(distance);
+                    total_residual += core.residual_last[index];
                 }
             }
         }
@@ -609,7 +610,9 @@ LidarOdometryResult LidarOdometryCore::process(
             }
         }
         core.residual_mean =
-            total_residual / effective_feature_count;
+            effective_feature_count > 0
+                ? total_residual / effective_feature_count
+                : std::numeric_limits<double>::quiet_NaN();
 
         const int residual_dimension =
             effective_feature_count + 3;

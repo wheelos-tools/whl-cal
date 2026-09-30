@@ -155,6 +155,11 @@ def message_timestamp_ns(topic: str, msg: Any, fallback_timestamp_ns: int) -> in
     return int(fallback_timestamp_ns)
 
 
+def imu_payload(msg: Any) -> Any:
+    payload = getattr(msg, "imu", None)
+    return msg if payload is None else payload
+
+
 def _read_protobuf_varint(payload: memoryview, offset: int) -> tuple[int, int]:
     value = 0
     shift = 0

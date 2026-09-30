@@ -122,6 +122,42 @@ void ekf_update() {
             "ikd-tree map counters are inconsistent");
 }
 
+void residual_mean() {
+    LidarOdometryCore odometry;
+    FrontendState state;
+    odometry.process(plane_cloud(1.0F), LidarGroundEstimate(), state);
+    const LidarOdometryResult result =
+        odometry.process(
+            plane_cloud(1.02F), LidarGroundEstimate(), state);
+    require(result.effective_feature_count > 0,
+            "shifted plane produced no correspondences");
+    double sum = 0.0;
+    int count = 0;
+    for (std::size_t index = 0; index < result.selected.size(); ++index) {
+        if (result.selected[index]) {
+            sum += result.residuals[index];
+            ++count;
+        }
+    }
+    require(count == result.effective_feature_count,
+            "residual selection does not match correspondence count");
+    require(std::isfinite(result.residual_mean) &&
+                result.residual_mean > 0.0 &&
+                std::abs(result.residual_mean - sum / count) < 1e-6,
+            "residual mean does not match accepted point-to-plane distances");
+
+    LidarOdometryCore empty_matches;
+    FrontendState other_state;
+    empty_matches.process(
+        plane_cloud(1.0F), LidarGroundEstimate(), other_state);
+    const LidarOdometryResult no_match =
+        empty_matches.process(
+            plane_cloud(100.0F), LidarGroundEstimate(), other_state);
+    require(no_match.effective_feature_count == 0 &&
+                std::isnan(no_match.residual_mean),
+            "no correspondences must report an undefined residual");
+}
+
 void determinism() {
     LidarOdometryCore left;
     LidarOdometryCore right;
@@ -178,6 +214,8 @@ int main(int argc, char **argv) {
             map_initialization();
         else if (mode == "ekf_update")
             ekf_update();
+        else if (mode == "residual_mean")
+            residual_mean();
         else if (mode == "determinism")
             determinism();
         else if (mode == "pcl_1_10_voxel_order")

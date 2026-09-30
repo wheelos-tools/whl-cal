@@ -10,7 +10,7 @@ from rosbags.rosbag1 import Writer
 from rosbags.typesys import Stores, get_typestore
 
 from lidar2lidar.record_adapter import Record
-from lidar2lidar.record_utils import message_timestamp_ns
+from lidar2lidar.record_utils import imu_payload, message_timestamp_ns
 
 LIDAR_TOPIC = "/apollo/sensor/vanjeelidar/up/PointCloud2"
 IMU_TOPIC = "/apollo/sensor/gnss/imu"
@@ -69,8 +69,14 @@ def _pointcloud_message(msg, sequence: int, types):
         types["PointField"]("time", 16, 7, 1),
         types["PointField"]("ring", 20, 4, 1),
     ]
+    frame_id = str(
+        getattr(msg, "frame_id", "")
+        or getattr(getattr(msg, "header", None), "frame_id", "")
+    ).strip()
+    if not frame_id:
+        raise ValueError("LiDAR message has no frame_id.")
     header = types["Header"](
-        sequence, _time_message(timestamp_ns, types["Time"]), "vanjeelidar_up"
+        sequence, _time_message(timestamp_ns, types["Time"]), frame_id
     )
     output = types["PointCloud2"](
         header,
@@ -87,6 +93,7 @@ def _pointcloud_message(msg, sequence: int, types):
 
 
 def _imu_message(msg, timestamp_ns: int, sequence: int, types):
+    imu = imu_payload(msg)
     header = types["Header"](
         sequence, _time_message(timestamp_ns, types["Time"]), "imu"
     )
@@ -97,15 +104,15 @@ def _imu_message(msg, timestamp_ns: int, sequence: int, types):
         types["Quaternion"](0.0, 0.0, 0.0, 1.0),
         orientation_covariance,
         types["Vector3"](
-            float(msg.angular_velocity.x),
-            float(msg.angular_velocity.y),
-            float(msg.angular_velocity.z),
+            float(imu.angular_velocity.x),
+            float(imu.angular_velocity.y),
+            float(imu.angular_velocity.z),
         ),
         np.zeros(9, dtype=np.float64),
         types["Vector3"](
-            float(msg.linear_acceleration.x),
-            float(msg.linear_acceleration.y),
-            float(msg.linear_acceleration.z),
+            float(imu.linear_acceleration.x),
+            float(imu.linear_acceleration.y),
+            float(imu.linear_acceleration.z),
         ),
         np.zeros(9, dtype=np.float64),
     )

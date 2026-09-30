@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import argparse
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +9,13 @@ from rosbags.rosbag1 import Reader
 from rosbags.typesys import Stores, get_typestore
 
 from lidar2lidar.record_adapter import Record
-from lidar2lidar.record_utils import extract_tf_edges, message_timestamp_ns
+from lidar2lidar.record_utils import (
+    build_transform_graph,
+    extract_tf_edges,
+    imu_payload,
+    lookup_transform,
+    message_timestamp_ns,
+)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--record-file", action="append", required=True)
@@ -21,8 +27,11 @@ parser.add_argument(
 parser.add_argument("--imu-topic", default="/apollo/sensor/gnss/imu")
 parser.add_argument("--tf-parent", default="imu")
 parser.add_argument("--tf-child", default="vanjeelidar_up")
+parser.add_argument("--scan-lines", type=int, default=16)
 parser.add_argument("--sample-index", action="append", type=int)
 args = parser.parse_args()
+if args.scan_lines < 2:
+    parser.error("--scan-lines must be at least 2")
 
 RECORDS = args.record_file
 BAG = args.bag
@@ -49,17 +58,18 @@ for record_path in RECORDS:
             topics=[LIDAR_TOPIC, IMU_TOPIC]
         ):
             if topic == IMU_TOPIC:
+                imu = imu_payload(message)
                 raw_imus.append(
                     (
                         message_timestamp_ns(topic, message, int(record_timestamp_ns)),
                         np.array(
                             [
-                                message.angular_velocity.x,
-                                message.angular_velocity.y,
-                                message.angular_velocity.z,
-                                message.linear_acceleration.x,
-                                message.linear_acceleration.y,
-                                message.linear_acceleration.z,
+                                imu.angular_velocity.x,
+                                imu.angular_velocity.y,
+                                imu.angular_velocity.z,
+                                imu.linear_acceleration.x,
+                                imu.linear_acceleration.y,
+                                imu.linear_acceleration.z,
                             ],
                             dtype=float,
                         ),
@@ -71,6 +81,7 @@ for record_path in RECORDS:
             raw_index = len(raw_clouds)
             raw_frame_ids.add(str(message.frame_id))
             raw_frame_ids.add(str(message.header.frame_id))
+            frame_id = str(message.frame_id or message.header.frame_id).strip()
             if points:
                 xyz = np.array(
                     [(point.x, point.y, point.z) for point in points], dtype=np.float32
@@ -100,6 +111,7 @@ for record_path in RECORDS:
                     "raw_index": raw_index,
                     "record_path": record_path,
                     "record_timestamp_ns": int(record_timestamp_ns),
+                    "frame_id": frame_id,
                     "header_timestamp_ns": int(
                         round(float(message.header.timestamp_sec) * 1e9)
                     ),
@@ -170,6 +182,7 @@ with Reader(BAG) as reader:
         converted_clouds.append(
             {
                 "header_timestamp_ns": header_timestamp_ns,
+                "frame_id": str(message.header.frame_id).strip(),
                 "bag_timestamp_ns": int(timestamp_ns),
                 "point_count": int(len(points)),
                 "minimum_time_s": float(time_values.min()),
@@ -198,7 +211,7 @@ with Reader(BAG) as reader:
         if len(converted_clouds) <= 20:
             horizontal = np.hypot(points["x"], points["y"])
             elevation = np.degrees(np.arctan2(points["z"], horizontal))
-            for ring in range(16):
+            for ring in range(args.scan_lines):
                 ring_elevations[ring].extend(
                     elevation[points["ring"] == ring][::100].tolist()
                 )
@@ -262,6 +275,14 @@ raw_nonempty = [
 ]
 raw_exportable = [entry for entry in raw_nonempty if entry["finite_count"] > 0]
 converted_timestamp_set = {entry["header_timestamp_ns"] for entry in converted_clouds}
+raw_frame_by_timestamp = {
+    entry["minimum_point_timestamp_ns"]: entry["frame_id"] for entry in raw_exportable
+}
+frame_id_mismatches = [
+    entry
+    for entry in converted_clouds
+    if raw_frame_by_timestamp.get(entry["header_timestamp_ns"]) != entry["frame_id"]
+]
 missing_exportable = [
     entry
     for entry in raw_exportable
@@ -294,14 +315,34 @@ all_invalid_frames = [
 ]
 
 tf_edges = extract_tf_edges(RECORDS)
-sensor_edges = [
-    edge
-    for edge in tf_edges
-    if edge.parent_frame == args.tf_parent and edge.child_frame == args.tf_child
-]
-if len(sensor_edges) != 1:
-    raise RuntimeError(f"Expected one static sensor edge, found {len(sensor_edges)}")
-sensor_transform = sensor_edges[0].transform
+static_edges = [edge for edge in tf_edges if edge.is_static]
+static_graph = build_transform_graph(static_edges)
+sensor_transform = lookup_transform(static_graph, args.tf_child, args.tf_parent)
+if sensor_transform is None:
+    raise RuntimeError(
+        "No static TF path from sensor frame "
+        f"{args.tf_child!r} to IMU frame {args.tf_parent!r}"
+    )
+
+predecessors = {args.tf_child: None}
+frames_to_visit = deque([args.tf_child])
+while frames_to_visit and args.tf_parent not in predecessors:
+    current_frame = frames_to_visit.popleft()
+    for next_frame in sorted(static_graph.get(current_frame, {})):
+        if next_frame not in predecessors:
+            predecessors[next_frame] = current_frame
+            frames_to_visit.append(next_frame)
+frame_path = []
+current_frame = args.tf_parent
+while current_frame is not None:
+    frame_path.append(current_frame)
+    current_frame = predecessors.get(current_frame)
+frame_path.reverse()
+if not frame_path or frame_path[0] != args.tf_child:
+    raise RuntimeError(
+        "Could not reconstruct static TF path from "
+        f"{args.tf_child!r} to {args.tf_parent!r}"
+    )
 
 scan_durations_ms = np.array(
     [entry["maximum_time_s"] * 1000.0 for entry in converted_clouds]
@@ -335,6 +376,7 @@ report = {
     },
     "lidar_frame_ids_seen": sorted(raw_frame_ids),
     "point_contract": {
+        "ring_source": "point_index_mod_scan_lines",
         "all_converted_points_finite": all(
             entry["finite"] for entry in converted_clouds
         ),
@@ -346,6 +388,7 @@ report = {
         "last_point_is_max_time_frame_count": int(
             np.sum(last_times == scan_durations_ms / 1000.0)
         ),
+        "all_frame_ids_match_apollo_source": not frame_id_mismatches,
         "ring_range": [
             min(entry["ring_min"] for entry in converted_clouds),
             max(entry["ring_max"] for entry in converted_clouds),
@@ -359,6 +402,7 @@ report = {
             "p75": float(np.percentile(values, 75)),
         }
         for ring, values in sorted(ring_elevations.items())
+        if values
     },
     "imu_contract": {
         "timestamp_sequence_exact": bool(
@@ -397,6 +441,9 @@ report = {
         "initial_100_gyro_mean_rad_s": imu_initial[:, 0:3].mean(axis=0).tolist(),
     },
     "static_transform_lidar_to_imu": {
+        "parent_frame": args.tf_parent,
+        "child_frame": args.tf_child,
+        "frame_path_child_to_parent": frame_path,
         "matrix": sensor_transform.tolist(),
         "inverse_matrix": np.linalg.inv(sensor_transform).tolist(),
         "determinant": float(np.linalg.det(sensor_transform[:3, :3])),
@@ -418,6 +465,7 @@ report = {
                 for timestamp_ns in missing_imu_timestamps
             )
         ),
+        "frame_ids_match_apollo_source": not frame_id_mismatches,
         "sampled_xyz_exact": all(
             entry["xyz_max_absolute_error"] == 0.0 for entry in sample_checks
         ),
@@ -434,8 +482,13 @@ report = {
             == 0.0
         ),
         "rings_ordered": all(
-            np.median(ring_elevations[ring]) > np.median(ring_elevations[ring + 1])
-            for ring in range(15)
+            ring in ring_elevations
+            and ring + 1 in ring_elevations
+            and ring_elevations[ring]
+            and ring_elevations[ring + 1]
+            and np.percentile(ring_elevations[ring], 25)
+            > np.percentile(ring_elevations[ring + 1], 75)
+            for ring in range(args.scan_lines - 1)
         ),
         "gravity_axis_is_positive_z": bool(imu_initial[:, 3:6].mean(axis=0)[2] > 9.0),
     },
