@@ -6,15 +6,16 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from calibration_common.evaluation import (
+import yaml
+
+from camera.intrinsic_sampling import edge_corner_coverage
+from camera.intrinsic_solver import normalize_distortion_model
+from common.evaluation import (
     build_final_acceptance,
     write_acceptance_artifacts,
     write_paradigm_artifacts,
     write_table_csv,
 )
-
-from camera.intrinsic_sampling import edge_corner_coverage
-from camera.intrinsic_solver import normalize_distortion_model
 
 
 def float_list_summary(values):
@@ -453,6 +454,40 @@ def write_review_artifacts(
         distortion_model=distortion_model,
     )
     acceptance_artifacts = write_acceptance_artifacts(diagnostics_dir, final_acceptance)
+    per_view_rms = [float(row["rms_px"]) for row in per_view_report]
+    status_map = {
+        "pass": "accepted",
+        "warning": "review_required",
+        "fail": "rejected",
+    }
+    customer_summary = {
+        "schema_version": 1,
+        "module": "camera_intrinsic",
+        "verdict": status_map.get(final_acceptance["status"], "review_required"),
+        "release_ready": bool(final_acceptance["release_ready"]),
+        "result": str(output_path),
+        "key_metrics": {
+            "accepted_samples": int(len(sample_records)),
+            "required_samples": int(min_total_samples),
+            "global_reprojection_rms_px": float(global_reprojection_rms),
+            "per_view_reprojection_rms_p95_px": (
+                float(np.percentile(np.asarray(per_view_rms, dtype=float), 95))
+                if per_view_rms
+                else None
+            ),
+            "occupied_image_cells": (
+                None if coverage is None else int(coverage["occupied_cell_count"])
+            ),
+        },
+        "visual_review": [
+            item for item in (comparison_view_path, heatmap_path) if item is not None
+        ],
+        "next_action": final_acceptance["recommendation"],
+        "developer_diagnostics": str(diagnostics_dir),
+    }
+    customer_summary_path = output_path.parent / "customer_summary.yaml"
+    with customer_summary_path.open("w", encoding="utf-8") as stream:
+        yaml.safe_dump(customer_summary, stream, sort_keys=False)
     standardized_data = {
         "schema_version": 1,
         "module": "camera_intrinsic",
@@ -489,6 +524,7 @@ def write_review_artifacts(
         "module": "camera_intrinsic",
         "layers": {
             "conclusion": [
+                str(customer_summary_path),
                 acceptance_artifacts["acceptance_report"],
                 acceptance_artifacts["status_summary_csv"],
             ],
@@ -521,6 +557,7 @@ def write_review_artifacts(
     )
     return {
         "diagnostics_dir": str(diagnostics_dir),
+        "customer_summary": str(customer_summary_path),
         "acceptance": acceptance_artifacts,
         "release_ready": bool(final_acceptance.get("release_ready", False)),
         "final_acceptance": final_acceptance,

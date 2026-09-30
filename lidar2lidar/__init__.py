@@ -19,9 +19,15 @@
 
 """Core APIs for LiDAR-to-LiDAR calibration."""
 
-from lidar2lidar.lidar2lidar import calibrate_lidar_extrinsic, matrix_to_quaternion_and_translation
-
 __all__ = [
-	"calibrate_lidar_extrinsic",
-	"matrix_to_quaternion_and_translation",
+    "calibrate_lidar_extrinsic",
+    "matrix_to_quaternion_and_translation",
 ]
+
+
+def __getattr__(name):
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from lidar2lidar import lidar2lidar as implementation
+
+    return getattr(implementation, name)

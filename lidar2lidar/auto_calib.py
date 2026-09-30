@@ -35,7 +35,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from calibration_common.evaluation import (
+from common.evaluation import (
     build_final_acceptance,
     write_acceptance_artifacts,
     write_paradigm_artifacts,
@@ -49,7 +49,6 @@ from lidar2lidar.extrinsic_io import (
 from lidar2lidar.lidar2lidar import calibrate_lidar_extrinsic
 from lidar2lidar.loop_closure import (
     build_aligned_snapshot,
-    build_initial_topic_transforms,
     build_prior_topic_transforms,
     compose_topic_transforms,
     compute_visual_plane_metrics,

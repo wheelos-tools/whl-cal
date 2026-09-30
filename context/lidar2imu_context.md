@@ -17,6 +17,19 @@ last_tested: 2026-04-27
 3. **Evaluation layer**: keep coarse/fine metrics stable while iterating the
    converter and solver
 
+Data-layer rule:
+
+- parse the record once into a reusable bundle or prepared dataset, then let the
+  solver consume that normalized input
+- avoid separate scans for TF, pointcloud metadata, pose, and IMU in the same
+  conversion run
+- canonicalize timestamps from sensor measurement fields when available
+  (`measurement_time` first for LiDAR, pose, and IMU; convert GNSS best_pose /
+  heading measurement_time from GPS epoch to Unix), and use record write time
+  only as fallback
+- for large Apollo bags, prefer the prepared dataset path when the same raw data
+  feeds multiple calibration modules
+
 ## 2. Current findings on `record_data_0402`
 
 ### Round 1: unfiltered baseline
@@ -1880,3 +1893,174 @@ With this round, the immediate priority order is now:
 5. **true scan-to-map continuation**
    - improve the algorithm ceiling, but not at the cost of destabilizing the now
      fixed evaluation surfaces
+
+## 2026-06-18 GRIL-style full refactor roadmap
+
+### User-facing goal
+
+The current priority is no longer just “get a numerically acceptable extrinsic”.
+The new target is:
+
+1. post-calibration local scenes that look SLAM-like and stay visually sharp
+2. BEV trajectory comparison where IMU and LiDAR paths can be inspected directly
+
+### Architecture decision
+
+Do not keep using one long-window LiDAR registration path as both:
+
+- the local scene reconstruction path
+- and the calibration motion-factor generation path
+
+These are now treated as separate responsibilities.
+
+### Refactor direction
+
+Keep the current staged solver alive as the baseline, then build a stronger path
+beside it with four layers:
+
+1. `extraction/`
+   - record scan
+   - timestamp alignment
+   - ground sample extraction
+   - motion window generation
+2. `mapping/`
+   - SLAM-like local scene builder for review clouds and trajectory snippets
+3. `solvers/`
+   - current staged baseline
+   - GRIL-style decomposition:
+     - stage-1 `roll/pitch/z` from ground constraints
+     - stage-2 `x/y/yaw` and optional time offset from planar motion
+4. `review/`
+   - local cloud overlap review
+   - BEV trajectory comparison
+   - stable HTML / YAML / CSV outputs
+
+### Implementation policy
+
+- preserve the existing CLI and artifact contract while refactoring
+- move large helper blocks out of `record_converter.py` and `visualization.py`
+- keep single files moderate in size instead of growing new monoliths
+- only promote the GRIL-style path after it beats the baseline on:
+  - local scene sharpness
+  - BEV trajectory agreement
+  - motion residuals
+  - runtime / operational robustness
+
+### Current execution order
+
+1. split extraction helpers out of `record_converter.py`
+2. build a dedicated local mapping / review front-end
+3. implement the GRIL-style planar solver behind a separate profile or flag
+4. cut pipeline orchestration over to the new modules
+5. validate on `20260507092334.record.00000` and the full `run-eight` bag
+
+### 2026-06-18 user-approved P0-P4 route
+
+The current refactor should follow this exact upgrade ladder instead of more
+incremental patching inside the old monoliths:
+
+1. **P0: structural split without behavior change**
+   - pull `extraction / review / evaluation` out of giant files first
+   - keep current artifact names and numerical behavior stable while splitting
+2. **P1: independent local-mapping review front-end**
+   - solve the “submaps should look sharp like SLAM” problem first
+   - do not let solver changes hide mapping-review regressions
+3. **P2: GRIL ground stage**
+   - make `roll / pitch / z` a dedicated stable stage
+   - attach explicit gate / skip reasons instead of burying this inside joint flow
+4. **P3: GRIL planar stage**
+   - add a new `x / y / yaw (+ optional td)` solver path
+   - feed it only window-quality-screened motion factors
+5. **P4: light joint polish + production cutover**
+   - only allow the new path to replace the baseline production profile when it
+     wins on both:
+     - local scene clarity / map sharpness
+     - calibration residual / review evidence
+
+### 2026-06-18 implementation update
+
+The first two refactor slices are now partially landed in code:
+
+- extraction helpers moved out of `record_converter.py` into:
+  - `lidar2imu/extraction/timing.py`
+  - `lidar2imu/extraction/ground.py`
+  - `lidar2imu/extraction/motion_candidates.py`
+  - `lidar2imu/extraction/motion_windows.py`
+- local submap building moved into:
+  - `lidar2imu/mapping/submaps.py`
+- dense review-object reconstruction moved out of `visualization.py` into:
+  - `lidar2imu/review/registration_objects.py`
+
+Current implementation rule for this refactor round:
+
+- keep the baseline CLI and artifact contract unchanged
+- keep the new modules as internal plumbing only; do not rename outputs
+- defer end-to-end bag validation until the current extraction + mapping + review
+  refactor slice is complete, so the comparison is done once on the integrated
+  candidate instead of after every micro-edit
+
+### 2026-06-18 architecture split + integrated smoke
+
+The GRIL-style refactor is now structurally landed in code:
+
+- `visualization.py` no longer owns review front-end / report / file-output
+  helpers; those now live in:
+  - `lidar2imu/review/front_end.py`
+  - `lidar2imu/review/io_utils.py`
+  - `lidar2imu/review/report.py`
+- evaluation plumbing is now split into:
+  - `lidar2imu/evaluation/consistency.py`
+  - `lidar2imu/evaluation/holdout.py`
+  - `lidar2imu/evaluation/diagnostics.py`
+  - `lidar2imu/evaluation/assessment.py`
+  - `lidar2imu/evaluation/builder.py`
+  - `lidar2imu/metrics.py` is now only the stable import surface
+- solver plumbing is now split into:
+  - `lidar2imu/solvers/ground.py`
+  - `lidar2imu/solvers/planar.py`
+  - `lidar2imu/solvers/joint.py`
+  - `lidar2imu/solvers/robustness.py`
+  - `lidar2imu/solvers/dataset_split.py`
+  - `lidar2imu/solvers/orchestrator.py`
+  - `lidar2imu/pipeline.py` is now orchestration-only
+
+New candidate control surface:
+
+- `CalibrationConfig.solver_family`
+- CLI / converter support:
+  - `--solver-family baseline`
+  - `--solver-family gril_staged`
+- current policy:
+  - baseline remains default
+  - `gril_staged` is still candidate-only and uses screened motion factors before
+    planar release
+
+Integrated smoke after the full refactor:
+
+1. static check:
+   - `python3 -m compileall lidar2imu`
+2. candidate solver smoke from standardized samples:
+   - `python3 -m lidar2imu.cli --input .../baseline_reextract_left_front/standardized_samples.yaml --output-dir outputs/lidar2imu/refactor_final_smoke_gril --solver-family gril_staged`
+   - result:
+     - wrote complete outputs under `outputs/lidar2imu/refactor_final_smoke_gril`
+     - `metrics.yaml.summary.solver_family = gril_staged`
+3. integrated converter + baseline calibration smoke:
+   - `python3 -m lidar2imu.record_converter --record-path .../20260507092334.record.00000 --lidar-topic /apollo/sensor/vanjeelidar/left_front/PointCloud2 --output-dir outputs/lidar2imu/refactor_final_smoke_record --profile baseline --calibrate`
+   - result:
+     - wrote `standardized_samples.yaml`
+     - wrote full calibration outputs under
+       `outputs/lidar2imu/refactor_final_smoke_record/calibration`
+     - review artifacts still include:
+       - `trajectory_overlay.svg`
+       - `trajectory_overlay_cloud.ply`
+       - `registration_review.yaml`
+       - `review_report.html`
+
+Current cutover state:
+
+- architecture split is complete enough for further algorithm work to happen in
+  `solvers/` and `evaluation/` instead of the old monoliths
+- baseline CLI / artifact names remain stable
+- production profile still stays on the baseline solver family until the new
+  `gril_staged` path proves better on local-map sharpness and residual/review
+  evidence

@@ -18,11 +18,12 @@
 # Author: daohu527
 
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import open3d as o3d
 import yaml
-from pathlib import Path
 from scipy.spatial.transform import Rotation
 
 
@@ -170,7 +171,7 @@ class LearningBasedCalibrator:
         lidar = o3d.io.read_point_cloud(str(lidar_path))
         depth_map = np.load(depth_path)
         with open(init_extr_path, "r") as f:
-            init_guess = yaml.safe_load(f)
+            yaml.safe_load(f)
 
         # depth to pcd
         cam_pcd_full = self._depth_to_point_cloud(depth_map)

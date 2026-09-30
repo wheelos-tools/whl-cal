@@ -26,7 +26,6 @@ calibration without any GUI. This enables CI and smoke tests.
 
 import glob
 import os
-import time
 from datetime import datetime
 
 import cv2
@@ -78,10 +77,18 @@ def _float_list_summary(values):
 
 
 class CameraCalibrator:
-    def __init__(self, cfg_path, session_name=None, capture_only=False):
+    def __init__(
+        self,
+        cfg_path,
+        session_name=None,
+        capture_only=False,
+        output_dir=None,
+    ):
         """Initialize and load configuration"""
         with open(cfg_path, "r") as f:
             self.cfg = yaml.safe_load(f)
+        if output_dir is not None:
+            self.cfg.setdefault("workflow", {})["root_dir"] = str(output_dir)
 
         self.ac_cfg = self.cfg["auto_capture_settings"]
         self.distortion_model = normalize_distortion_model(
@@ -679,173 +686,6 @@ class CameraCalibrator:
             )
             return 3
         return 0
-
-    def run_live_headless(self, max_seconds=0):
-        """Live camera capture without GUI; safe on servers without DISPLAY."""
-        print("[INFO] Headless live mode: GUI disabled, running auto capture loop.")
-        print(f"[INFO] Capture source: {self.capture_source}")
-        self._prepare_live_capture_session()
-        cap, _backend_name = open_managed_capture(
-            self.capture_source,
-            self.cfg,
-            self.capture_source_meta,
-        )
-        if cap is None:
-            print("[ERROR] Cannot open capture source", self.capture_source)
-            return 1
-        self.live_capture_handle = cap
-
-        apply_capture_settings(cap, self.cfg, self.capture_source_meta)
-        start_ts = time.time()
-        h = w = None
-        frame_count = 0
-        empty_frame_count = 0
-        first_frame_saved = False
-
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None or frame.size == 0:
-                if (
-                    getattr(cap, "managed_capture", False)
-                    and hasattr(cap, "is_ready")
-                    and not cap.is_ready()
-                ):
-                    if frame_count % 30 == 0:
-                        print("[WARN] Waiting for network stream recovery/warm-up...")
-                    frame_count += 1
-                    continue
-                print("[WARN] Failed to read frame from camera; retrying...")
-                frame_count += 1
-                empty_frame_count += 1
-                if empty_frame_count > 90:
-                    print(
-                        "[ERROR] Too many empty frames. Check stream URI/codec/network and OpenCV ffmpeg support."
-                    )
-                    break
-                continue
-            if is_visually_empty_frame(frame):
-                empty_frame_count += 1
-                if empty_frame_count % 15 == 0:
-                    print(
-                        "[WARN] Received invalid image frames repeatedly (blank or near-uniform, e.g. solid green); "
-                        "continuing to wait for a valid decoded frame."
-                    )
-                if empty_frame_count > 120:
-                    print(
-                        "[ERROR] Too many invalid frames. Check whether the selected /dev/video node is wrong, "
-                        "the camera is returning a bogus ISP stream, or the RTSP/codec path is misconfigured."
-                    )
-                    break
-                continue
-            empty_frame_count = 0
-
-            self.last_raw_frame = frame.copy()
-
-            if h is None:
-                h, w = frame.shape[:2]
-                self.capture_runtime_info = build_capture_runtime_info(
-                    self.cfg,
-                    self.capture_source,
-                    self.capture_source_meta,
-                    cap,
-                    frame,
-                )
-                log_capture_runtime_info(self.capture_runtime_info)
-
-            if not first_frame_saved:
-                debug_frame_path = self.workspace.debug_image_path(
-                    self.capture_session,
-                    "headless_first_frame.jpg",
-                )
-                if cv2.imwrite(str(debug_frame_path), frame):
-                    print(f"[SAVED] First headless frame: {debug_frame_path}")
-                first_frame_saved = True
-
-            if self.state == "CAPTURING":
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                detection = self._find_target(gray, frame_count)
-                self._record_detection_debug(detection, frame_count, "headless_live")
-                if detection.found:
-                    capture_complete = self._run_auto_capture(
-                        gray,
-                        detection,
-                        w,
-                        h,
-                        frame_bgr=frame,
-                        source="headless_live",
-                        frame_counter=frame_count,
-                    )
-                    if capture_complete and self.capture_only:
-                        self._write_capture_session_manifest(status="capture_complete")
-                        print("[PASS] Headless capture-only session completed.")
-                        self._freeze_capture_runtime_info()
-                        cap.release()
-                        self.live_capture_handle = None
-                        return 0
-
-                if frame_count % 30 == 0:
-                    progress = self.sampling.progress_snapshot()
-                    print(
-                        "[INFO] Headless progress:",
-                        f"stage={progress['stage']}",
-                        f"samples={progress['sample_count']}/{progress['required_sample_count']}",
-                        f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
-                        f"remaining={progress['remaining_required_samples']}",
-                    )
-
-            if self.state == "SHOWING_RESULT" and self.mtx is not None:
-                if self.require_release_ready and not bool(self.last_release_ready):
-                    print(
-                        "[FAIL] Calibration finished but quality gates are not release-ready."
-                    )
-                    self._freeze_capture_runtime_info()
-                    cap.release()
-                    self.live_capture_handle = None
-                    return 3
-                print("[PASS] Headless live calibration completed.")
-                self._freeze_capture_runtime_info()
-                cap.release()
-                self.live_capture_handle = None
-                return 0
-
-            if max_seconds > 0 and (time.time() - start_ts) >= float(max_seconds):
-                progress = self.sampling.progress_snapshot()
-                print(
-                    "[WARN] Headless live mode timed out before collecting enough samples.",
-                    f"stage={progress['stage']}",
-                    f"samples={progress['sample_count']}/{progress['required_sample_count']}",
-                    f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
-                )
-                break
-
-            frame_count += 1
-
-        self._freeze_capture_runtime_info()
-        cap.release()
-        self.live_capture_handle = None
-        if self.capture_only:
-            self._write_capture_session_manifest(status="capture_incomplete")
-            progress = self.sampling.progress_snapshot()
-            print(
-                "[ERROR] Headless capture-only session did not finish.",
-                f"stage={progress['stage']}",
-                f"samples={progress['sample_count']}/{progress['required_sample_count']}",
-                f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
-            )
-            return 2
-        if self.mtx is not None:
-            if self.require_release_ready and not bool(self.last_release_ready):
-                print(
-                    "[FAIL] Calibration finished but quality gates are not release-ready."
-                )
-                return 3
-            print("[PASS] Headless live calibration completed.")
-            return 0
-        print(
-            "[ERROR] Headless live calibration did not finish.",
-            f"samples={len(self.objpoints)}/{self.min_total_samples}",
-        )
-        return 2
 
     def run_headless(
         self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")

@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import yaml
 
-from calibration_common.evaluation import (
+from common.evaluation import (
     write_acceptance_artifacts,
     write_paradigm_artifacts,
     write_table_csv,

@@ -153,14 +153,10 @@ stronger candidate evolves beside it.
 
 ### `lidar2imu`
 
-The repo keeps:
-
-- a conservative `baseline` profile
-- a more ambitious `production` profile
-- `--planar-motion-policy auto` as the safety mechanism for weak bags
-
-This is a deliberate choice to prevent weak excitation from being reported as a
-full-confidence 6DoF success.
+The repo keeps only the ROS-free native GRIL algorithm. The former Python
+baseline and staged variants were removed after the 0827 comparison showed
+that both locked `x/y/yaw` to the input prior. GRIL remains review-only until
+its complete extrinsic passes repeatability and independent physical holdout.
 
 ### `lidar2camera`
 
@@ -248,5 +244,5 @@ Do not swap methods just because a paper reports a better benchmark number.
 - run and review flow: [calibration_review_guide.md](calibration_review_guide.md)
 - module entry points: [quickstart_index.md](quickstart_index.md)
 - `lidar2lidar` design: [lidar2lidar_design.md](lidar2lidar_design.md)
-- `lidar2imu` design: [lidar2imu_design.md](lidar2imu_design.md)
+- LiDAR-to-IMU GRIL design: [gril_ros_free_migration.md](gril_ros_free_migration.md)
 - `lidar2camera` design: [lidar2camera_design.md](lidar2camera_design.md)

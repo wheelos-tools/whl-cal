@@ -1,0 +1,86 @@
+diff --git a/include/Gril_Calib/Gril_Calib.h b/include/Gril_Calib/Gril_Calib.h
+index 5f87442..2908987 100644
+--- a/include/Gril_Calib/Gril_Calib.h
++++ b/include/Gril_Calib/Gril_Calib.h
+@@ -373,6 +373,9 @@ public:
+ 
+     void fout_check_lidar();
+ 
++    void dump_batch_trace_v1(const string &path, const int &orig_odom_freq, const int &cut_frame_num,
++                             const double &timediff_imu_wrt_lidar, const double &move_start_time) const;
++
+     void LI_Calibration(int &orig_odom_freq, int &cut_frame_num, double &timediff_imu_wrt_lidar, const double &move_start_time);
+ 
+     void print_calibration_result(double &time_L_I, M3D &R_L_I, V3D &p_L_I, V3D &bias_g, V3D &bias_a, V3D gravity);
+diff --git a/include/Gril_Calib/Gril_Calib.cpp b/include/Gril_Calib/Gril_Calib.cpp
+index 8f0727e..87c488d 100644
+--- a/include/Gril_Calib/Gril_Calib.cpp
++++ b/include/Gril_Calib/Gril_Calib.cpp
+@@ -687,6 +687,53 @@ void Gril_Calib::clear() {
+     cout << "\x1B[2J\x1B[H";
+ }
+ 
++void Gril_Calib::dump_batch_trace_v1(const string &path, const int &orig_odom_freq, const int &cut_frame_num,
++                                     const double &timediff_imu_wrt_lidar, const double &move_start_time) const {
++    ofstream trace(path, ios::out);
++    trace << setprecision(17);
++    trace << "GRIL_BATCH_TRACE 1\n"
++          << "orig_odom_freq " << orig_odom_freq << "\n"
++          << "cut_frame_num " << cut_frame_num << "\n"
++          << "timediff_imu_wrt_lidar " << timediff_imu_wrt_lidar << "\n"
++          << "move_start_time " << move_start_time << "\n"
++          << "imu_states " << IMU_state_group_ALL.size() << "\n";
++
++    for (const auto &state : IMU_state_group_ALL) {
++        trace << "imu " << state.timeStamp;
++        for (int row = 0; row < 3; ++row)
++            for (int col = 0; col < 3; ++col)
++                trace << " " << state.rot_end(row, col);
++        trace << " " << state.pos_end.transpose()
++              << " " << state.ang_vel.transpose()
++              << " " << state.linear_vel.transpose()
++              << " " << state.ang_acc.transpose()
++              << " " << state.linear_acc.transpose() << "\n";
++    }
++
++    trace << "lidar_states " << Lidar_state_group.size() << "\n";
++    for (const auto &state : Lidar_state_group) {
++        trace << "lidar " << state.timeStamp;
++        for (int row = 0; row < 3; ++row)
++            for (int col = 0; col < 3; ++col)
++                trace << " " << state.rot_end(row, col);
++        trace << " " << state.pos_end.transpose()
++              << " " << state.ang_vel.transpose()
++              << " " << state.linear_vel.transpose()
++              << " " << state.ang_acc.transpose()
++              << " " << state.linear_acc.transpose() << "\n";
++    }
++
++    trace << "ground_constraints " << Lidar_wrt_ground_group.size() << "\n";
++    for (int i = 0; i < Lidar_wrt_ground_group.size(); ++i)
++        trace << "ground " << Lidar_wrt_ground_group[i].w() << " " << Lidar_wrt_ground_group[i].x() << " "
++              << Lidar_wrt_ground_group[i].y() << " " << Lidar_wrt_ground_group[i].z() << " "
++              << IMU_wrt_ground_group[i].w() << " " << IMU_wrt_ground_group[i].x() << " "
++              << IMU_wrt_ground_group[i].y() << " " << IMU_wrt_ground_group[i].z() << " "
++              << normal_vector_wrt_lidar_group[i].transpose() << " "
++              << distance_Lidar_wrt_ground_group[i] << "\n";
++    trace << "END\n";
++}
++
+ //** main function in LiDAR IMU calibration **//
+ void Gril_Calib::LI_Calibration(int &orig_odom_freq, int &cut_frame_num, double &timediff_imu_wrt_lidar,
+                                 const double &move_start_time) {
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index 5d09fa8..c645b1b 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -1406,6 +1406,9 @@ int main(int argc, char **argv) {
+                                                                        lidar_q, imu_q_eigen, lidar_estimate_height);
+ 
+                 if (data_accum_finished) {
++                    Calib_LI->dump_batch_trace_v1(RESULT_FILE_DIR("GRIL_batch_trace_v1.txt"),
++                                                  orig_odom_freq, cut_frame_num,
++                                                  timediff_imu_wrt_lidar, move_start_time);
+                     Calib_LI->LI_Calibration(orig_odom_freq, cut_frame_num, timediff_imu_wrt_lidar, move_start_time);
+ 
+                     online_calib_starts_time = lidar_end_time;

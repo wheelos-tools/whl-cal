@@ -32,9 +32,21 @@
 *.app
 
 .venv
+.cache/
 __pycache__/
 *.egg-info/
 outputs/
+third_party/gril_native/build/
 lidar2lidar/output_pcds/
 
+# ROS-free GRIL generated execution artifacts
+GRIL_Calib_result.txt
+GRIL_batch_trace_v1.txt
+GRIL_full_frontend_trace_v1.txt
+native_dataset_v1.bin
+gril_native.conf
+gril_native_full.conf
+
 data
+.pytest_cache
+docker/lidar2imu/runtime/

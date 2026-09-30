@@ -1,0 +1,106 @@
+diff --git a/src/laserMapping.cpp b/src/laserMapping.cpp
+index 5f20ee9..ffe1a22 100644
+--- a/src/laserMapping.cpp
++++ b/src/laserMapping.cpp
+@@ -136,6 +136,8 @@ vector<double> Rot_LI_cov(3, 0.00005);
+ V3D mean_acc = Zero3d;
+ ofstream fout_result;
+ ofstream fout_preprocess_trace;
++ofstream fout_frontend_cv_trace;
++int frontend_cv_package_count = 0;
+ 
+ vector<BoxPointType> cub_needrm;
+ deque<PointCloudXYZI::Ptr> lidar_buffer;
+@@ -216,6 +218,62 @@ void write_preprocess_trace(
+     fout_preprocess_trace << "end_scan\n";
+ }
+ 
++void write_frontend_cv_cloud(const char *label, const PointCloudXYZI &cloud) {
++    fout_frontend_cv_trace << label << " " << cloud.size() << "\n";
++    for (const auto &point : cloud.points) {
++        fout_frontend_cv_trace << "point "
++                               << point.x << " " << point.y << " " << point.z << " "
++                               << point.intensity << " " << point.curvature << "\n";
++    }
++}
++
++void write_frontend_cv_state(const char *label, const StatesGroup &value) {
++    fout_frontend_cv_trace << label;
++    for (int row = 0; row < 3; ++row)
++        for (int col = 0; col < 3; ++col)
++            fout_frontend_cv_trace << " " << value.rot_end(row, col);
++    for (int index = 0; index < 3; ++index)
++        fout_frontend_cv_trace << " " << value.pos_end(index);
++    for (int row = 0; row < 3; ++row)
++        for (int col = 0; col < 3; ++col)
++            fout_frontend_cv_trace << " " << value.offset_R_L_I(row, col);
++    for (int index = 0; index < 3; ++index)
++        fout_frontend_cv_trace << " " << value.offset_T_L_I(index);
++    for (int index = 0; index < 3; ++index)
++        fout_frontend_cv_trace << " " << value.vel_end(index);
++    for (int index = 0; index < 3; ++index)
++        fout_frontend_cv_trace << " " << value.bias_g(index);
++    for (int index = 0; index < 3; ++index)
++        fout_frontend_cv_trace << " " << value.bias_a(index);
++    for (int index = 0; index < 3; ++index)
++        fout_frontend_cv_trace << " " << value.gravity(index);
++    for (int row = 0; row < DIM_STATE; ++row)
++        for (int col = 0; col < DIM_STATE; ++col)
++            fout_frontend_cv_trace << " " << value.cov(row, col);
++    fout_frontend_cv_trace << "\n";
++}
++
++void write_frontend_cv_trace(
++        const MeasureGroup &measure,
++        const StatesGroup &before,
++        const StatesGroup &after,
++        const PointCloudXYZI &output) {
++    frontend_cv_package_count++;
++    if (frontend_cv_package_count > 25)
++        return;
++    fout_frontend_cv_trace << "package " << frontend_cv_package_count << " "
++                           << measure.lidar_beg_time << " " << lidar_end_time << "\n";
++    fout_frontend_cv_trace << "imu " << measure.imu.size() << "\n";
++    for (const auto &imu : measure.imu)
++        fout_frontend_cv_trace << "imu_sample "
++                               << imu->header.stamp.toSec() << "\n";
++    write_frontend_cv_state("before", before);
++    write_frontend_cv_cloud("input", *measure.lidar);
++    write_frontend_cv_state("after", after);
++    write_frontend_cv_cloud("output", output);
++    fout_frontend_cv_trace << "end_package\n";
++}
++
+ boost::shared_ptr<PatchWorkpp<pcl::PointXYZI>> PatchworkppGroundSeg;
+ 
+ // visualize ground segmenation result
+@@ -975,6 +1033,10 @@ int main(int argc, char **argv) {
+     fout_preprocess_trace.open(RESULT_FILE_DIR("GRIL_preprocess_trace_v1.txt"), ios::out);
+     fout_preprocess_trace << setprecision(17);
+     fout_preprocess_trace << "GRIL_PREPROCESS_TRACE 1\n";
++    fout_frontend_cv_trace.open(RESULT_FILE_DIR("GRIL_frontend_cv_trace_v1.txt"), ios::out);
++    fout_frontend_cv_trace << setprecision(17);
++    fout_frontend_cv_trace << "GRIL_FRONTEND_CV_TRACE 1\n";
++    fout_frontend_cv_trace << "config " << gyr_cov << " " << acc_cov << "\n";
+     if (fout_out)
+         cout << "~~~~" << ROOT_DIR << " file opened" << endl;
+     else
+@@ -1066,7 +1127,10 @@ int main(int argc, char **argv) {
+            
+ 
+             /** IMU pre-processing **/
++            StatesGroup state_before_cv = state;
+             p_imu->Process(Measures, state, feats_undistort);
++            write_frontend_cv_trace(
++                    Measures, state_before_cv, state, *feats_undistort);
+             state_propagat = state;
+ 
+             if (feats_undistort->empty() || (feats_undistort == NULL)) {
+@@ -1480,5 +1544,6 @@ int main(int argc, char **argv) {
+     }
+ 
+     fout_preprocess_trace << "END\n";
++    fout_frontend_cv_trace << "END\n";
+     return 0;
+ }
+\ No newline at end of file
