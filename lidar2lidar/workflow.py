@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
 
 import yaml
@@ -221,6 +222,71 @@ def _build_complete_relations(
     return relations
 
 
+def _topics_from_explicit_relations(relation_entries: list[dict]) -> list[str]:
+    topics = []
+    for entry in relation_entries:
+        if "source_topic" in entry:
+            topics.append(entry["source_topic"])
+        if "target_topic" in entry:
+            topics.append(entry["target_topic"])
+    return list(dict.fromkeys(topics))
+
+
+def _resolve_workflow_relations(
+    relations: list[dict],
+    *,
+    topic_infos: dict[str, dict],
+    selected_topics: list[str],
+) -> tuple[list[dict], list[dict]]:
+    relation_ids: set[str] = set()
+    resolved_relations: list[dict] = []
+    skipped_relations: list[dict] = []
+    for relation in relations:
+        normalized = _relation_defaults(relation)
+        if normalized["relation_id"] is None:
+            normalized["relation_id"] = (
+                f"{normalized['source_topic']}__to__{normalized['target_topic']}"
+            )
+        if normalized["relation_id"] in relation_ids:
+            raise ValueError(f"Duplicate workflow relation_id: {normalized['relation_id']}")
+        relation_ids.add(normalized["relation_id"])
+        if normalized["source_topic"] == normalized["target_topic"]:
+            raise ValueError(
+                f"Workflow relation {normalized['relation_id']} has identical source and target topic."
+            )
+        missing_topics = [
+            normalized[topic_key]
+            for topic_key in ("source_topic", "target_topic")
+            if normalized[topic_key] not in topic_infos
+        ]
+        if missing_topics:
+            skipped_relations.append(
+                {
+                    "relation_id": normalized["relation_id"],
+                    "reason": "unknown_topic",
+                    "missing_topics": missing_topics,
+                }
+            )
+            logging.warning(
+                "Skipping workflow relation %s because topic(s) are absent from the record: %s",
+                normalized["relation_id"],
+                ", ".join(missing_topics),
+            )
+            continue
+        resolved_relations.append(
+            {
+                **normalized,
+                "source_frame": topic_infos[normalized["source_topic"]]["frame_id"],
+                "target_frame": topic_infos[normalized["target_topic"]]["frame_id"],
+            }
+        )
+        if normalized["source_topic"] not in selected_topics:
+            selected_topics.append(normalized["source_topic"])
+        if normalized["target_topic"] not in selected_topics:
+            selected_topics.append(normalized["target_topic"])
+    return resolved_relations, skipped_relations
+
+
 def resolve_workflow_plan(
     *,
     workflow_config: dict | None,
@@ -259,9 +325,18 @@ def resolve_workflow_plan(
         )
     if target_topic not in selected_topics:
         selected_topics.insert(0, target_topic)
-    for topic in selected_topics:
-        if topic not in topic_infos:
-            raise ValueError(f"Unknown workflow topic: {topic}")
+    unknown_selected_topics = [
+        topic for topic in selected_topics if topic not in topic_infos
+    ]
+    if unknown_selected_topics:
+        for topic in unknown_selected_topics:
+            logging.warning(
+                "Skipping unknown workflow topic %s; it is not present in the record.",
+                topic,
+            )
+        selected_topics = [topic for topic in selected_topics if topic in topic_infos]
+        if target_topic not in selected_topics:
+            selected_topics.insert(0, target_topic)
 
     mode = str(planner.get("mode", "target_star"))
     relation_entries = explicit_relation_entries
@@ -294,37 +369,41 @@ def resolve_workflow_plan(
         )
         resolved_mode = "target_star"
 
-    relation_ids = set()
-    resolved_relations = []
-    for relation in relations:
-        normalized = _relation_defaults(relation)
-        if normalized["relation_id"] is None:
-            normalized["relation_id"] = (
-                f"{normalized['source_topic']}__to__{normalized['target_topic']}"
-            )
-        if normalized["relation_id"] in relation_ids:
-            raise ValueError(f"Duplicate workflow relation_id: {normalized['relation_id']}")
-        relation_ids.add(normalized["relation_id"])
-        if normalized["source_topic"] == normalized["target_topic"]:
-            raise ValueError(
-                f"Workflow relation {normalized['relation_id']} has identical source and target topic."
-            )
-        for topic_key in ("source_topic", "target_topic"):
-            if normalized[topic_key] not in topic_infos:
-                raise ValueError(
-                    f"Workflow relation {normalized['relation_id']} references unknown topic {normalized[topic_key]}."
-                )
-        resolved_relations.append(
-            {
-                **normalized,
-                "source_frame": topic_infos[normalized["source_topic"]]["frame_id"],
-                "target_frame": topic_infos[normalized["target_topic"]]["frame_id"],
-            }
+    resolved_relations, skipped_relations = _resolve_workflow_relations(
+        relations,
+        topic_infos=topic_infos,
+        selected_topics=selected_topics,
+    )
+    if not resolved_relations and relation_entries:
+        fallback_topics = [
+            topic
+            for topic in _topics_from_explicit_relations(relation_entries)
+            if topic in topic_infos
+        ]
+        if target_topic not in fallback_topics:
+            fallback_topics.insert(0, target_topic)
+        selected_topics = list(dict.fromkeys(fallback_topics))
+        logging.warning(
+            "No explicit workflow relations remain after filtering missing topics; "
+            "falling back to target_star over %d available workflow topic(s).",
+            len(selected_topics),
         )
-        if normalized["source_topic"] not in selected_topics:
-            selected_topics.append(normalized["source_topic"])
-        if normalized["target_topic"] not in selected_topics:
-            selected_topics.append(normalized["target_topic"])
+        relations = _build_target_star_relations(
+            selected_topics=selected_topics,
+            target_topic=target_topic,
+        )
+        resolved_mode = "explicit_fallback_target_star"
+        resolved_relations, fallback_skipped = _resolve_workflow_relations(
+            relations,
+            topic_infos=topic_infos,
+            selected_topics=selected_topics,
+        )
+        skipped_relations = skipped_relations + fallback_skipped
+    if not resolved_relations:
+        raise ValueError(
+            "Workflow produced no calibratable relations after filtering missing topics. "
+            f"Skipped relations: {skipped_relations}"
+        )
 
     scene_sufficiency["min_overlap_ratio"] = (
         float(scene_sufficiency["min_overlap_ratio"])
@@ -344,11 +423,13 @@ def resolve_workflow_plan(
             planner.get("enable_global_optimization", default_enable_global_optimization)
         ),
         "relations": resolved_relations,
+        "skipped_relations": skipped_relations,
         "scene_sufficiency": scene_sufficiency,
         "repeatability": repeatability,
         "visualization": visualization,
         "summary": {
             "selected_topic_count": len(selected_topics),
+            "skipped_relation_count": len(skipped_relations),
             "relation_count": len(resolved_relations),
             "required_relation_count": int(
                 sum(1 for relation in resolved_relations if relation["required"])

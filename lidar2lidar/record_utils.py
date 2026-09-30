@@ -596,34 +596,65 @@ def extract_tf_edges(record_files: Iterable[str]) -> list[TransformEdge]:
     return edges
 
 
-def load_transform_edges_from_dir(conf_dir: str | None) -> list[TransformEdge]:
+def _transform_edge_from_extrinsics_file(file_path: str | Path) -> TransformEdge | None:
     from lidar2lidar.extrinsic_io import load_extrinsics_file
 
+    matrix, parent_frame, child_frame, stamp_ns, _ = load_extrinsics_file(str(file_path))
+    if not parent_frame or not child_frame:
+        return None
+    return TransformEdge(
+        parent_frame=parent_frame,
+        child_frame=child_frame,
+        transform=matrix,
+        source_topic=f"conf:{Path(file_path).name}",
+        timestamp_ns=stamp_ns,
+        is_static=True,
+    )
+
+
+def load_transform_edges_from_files(paths: list[str] | None) -> list[TransformEdge]:
+    edges: list[TransformEdge] = []
+    for path in paths or []:
+        file_path = Path(path).expanduser()
+        if not file_path.is_file():
+            raise FileNotFoundError(f"Extrinsics file not found: {path}")
+        edge = _transform_edge_from_extrinsics_file(file_path)
+        if edge is not None:
+            edges.append(edge)
+    return edges
+
+
+def load_transform_edges_from_dir(conf_dir: str | None) -> list[TransformEdge]:
     if not conf_dir:
         return []
 
-    directory = Path(conf_dir)
+    directory = Path(conf_dir).expanduser()
     if not directory.exists() or not directory.is_dir():
         return []
 
     edges = []
     for file_path in sorted(directory.glob("*_extrinsics.yaml")):
-        matrix, parent_frame, child_frame, stamp_ns, _ = load_extrinsics_file(
-            str(file_path)
-        )
-        if not parent_frame or not child_frame:
-            continue
-        edges.append(
-            TransformEdge(
-                parent_frame=parent_frame,
-                child_frame=child_frame,
-                transform=matrix,
-                source_topic="conf",
-                timestamp_ns=stamp_ns,
-                is_static=True,
-            )
-        )
+        edge = _transform_edge_from_extrinsics_file(file_path)
+        if edge is not None:
+            edges.append(edge)
     return edges
+
+
+def load_transform_edges(
+    conf_dir: str | None = None,
+    *,
+    extrinsics_files: list[str] | None = None,
+    extrinsics_files_only: bool = False,
+) -> list[TransformEdge]:
+    """Load static TF edges from a conf directory and/or explicit extrinsics YAML paths."""
+    if extrinsics_files_only:
+        return load_transform_edges_from_files(extrinsics_files)
+
+    conf_edges = load_transform_edges_from_dir(conf_dir)
+    file_edges = load_transform_edges_from_files(extrinsics_files)
+    if not file_edges:
+        return conf_edges
+    return merge_transform_edges(file_edges, conf_edges)
 
 
 def save_transform_edges_to_dir(

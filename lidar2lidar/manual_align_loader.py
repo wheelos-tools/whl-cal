@@ -34,7 +34,7 @@ from lidar2lidar.record_utils import (
     infer_pointcloud_topics,
     list_topics,
     load_pointcloud_from_meta,
-    load_transform_edges_from_dir,
+    load_transform_edges,
     lookup_transform,
     topic_sensor_name,
     transform_delta_metrics,
@@ -304,6 +304,8 @@ def probe_manual_align_frames(
     *,
     record_path: str,
     conf_dir: str | None = None,
+    initial_extrinsics: list[str] | None = None,
+    initial_extrinsics_only: bool = False,
     target_topic: str | None = None,
     topics: list[str] | None = None,
     sync_threshold_ms: float = 50.0,
@@ -314,6 +316,8 @@ def probe_manual_align_frames(
         record_files=record_files,
         workflow_yaml=workflow_yaml,
         conf_dir=conf_dir,
+        initial_extrinsics=initial_extrinsics,
+        initial_extrinsics_only=initial_extrinsics_only,
         target_topic=target_topic,
         topics=topics,
     )
@@ -467,6 +471,8 @@ def _resolve_manual_align_workflow(
     record_files: list[str],
     workflow_yaml: str | None,
     conf_dir: str | None,
+    initial_extrinsics: list[str] | None = None,
+    initial_extrinsics_only: bool = False,
     target_topic: str | None,
     topics: list[str] | None,
 ) -> tuple[dict, list[str], str, str]:
@@ -510,7 +516,12 @@ def _resolve_manual_align_workflow(
         workflow_path=workflow_path,
         pointcloud_topics=[topic for topic in pointcloud_topics if topic in topic_infos],
         topic_infos=topic_infos,
-        tf_edges=load_transform_edges_from_dir(conf_dir) or [],
+        tf_edges=load_transform_edges(
+            conf_dir,
+            extrinsics_files=initial_extrinsics,
+            extrinsics_files_only=initial_extrinsics_only,
+        )
+        or [],
         default_target_topic=default_target,
         cli_source_topics=topics,
         default_min_overlap=0.07,
@@ -547,6 +558,8 @@ def load_manual_align_session(
     *,
     record_path: str,
     conf_dir: str | None = None,
+    initial_extrinsics: list[str] | None = None,
+    initial_extrinsics_only: bool = False,
     target_topic: str | None = None,
     topics: list[str] | None = None,
     sync_threshold_ms: float = 50.0,
@@ -559,6 +572,8 @@ def load_manual_align_session(
         record_files=record_files,
         workflow_yaml=workflow_yaml,
         conf_dir=conf_dir,
+        initial_extrinsics=initial_extrinsics,
+        initial_extrinsics_only=initial_extrinsics_only,
         target_topic=target_topic,
         topics=topics,
     )
@@ -605,7 +620,13 @@ def load_manual_align_session(
     )
     reference_meta = target_metas[frame_index]
 
-    tf_graph = build_transform_graph(load_transform_edges_from_dir(conf_dir))
+    tf_graph = build_transform_graph(
+        load_transform_edges(
+            conf_dir,
+            extrinsics_files=initial_extrinsics,
+            extrinsics_files_only=initial_extrinsics_only,
+        )
+    )
     cloud_cache: dict = {}
     sensors: list[SensorFrame] = []
 

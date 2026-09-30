@@ -36,9 +36,13 @@ class ManualAlignServerState:
         frame_index: int,
         output_dir: str,
         workflow_yaml: str | None,
+        initial_extrinsics: list[str] | None = None,
+        initial_extrinsics_only: bool = False,
     ) -> None:
         self.record_path = record_path
         self.conf_dir = conf_dir
+        self.initial_extrinsics = list(initial_extrinsics or [])
+        self.initial_extrinsics_only = bool(initial_extrinsics_only)
         self.target_topic = target_topic
         self.sync_threshold_ms = sync_threshold_ms
         self.voxel_size = voxel_size
@@ -53,6 +57,8 @@ class ManualAlignServerState:
         return probe_manual_align_frames(
             record_path=self.record_path,
             conf_dir=self.conf_dir,
+            initial_extrinsics=self.initial_extrinsics or None,
+            initial_extrinsics_only=self.initial_extrinsics_only,
             target_topic=self.target_topic,
             sync_threshold_ms=self.sync_threshold_ms,
             workflow_yaml=self.workflow_yaml,
@@ -66,6 +72,8 @@ class ManualAlignServerState:
                 self.session = load_manual_align_session(
                     record_path=self.record_path,
                     conf_dir=self.conf_dir,
+                    initial_extrinsics=self.initial_extrinsics or None,
+                    initial_extrinsics_only=self.initial_extrinsics_only,
                     target_topic=self.target_topic,
                     sync_threshold_ms=self.sync_threshold_ms,
                     voxel_size=self.voxel_size,
@@ -309,6 +317,25 @@ def main() -> None:
         help="Directory with *_extrinsics.yaml initial guesses.",
     )
     parser.add_argument(
+        "--initial-extrinsics",
+        action="append",
+        default=None,
+        metavar="YAML",
+        help=(
+            "Explicit extrinsics YAML for initial point-cloud alignment "
+            "(e.g. lf_to_rr_extrinsics.yaml). Overrides the same parent/child edge "
+            "from --conf-dir when both are set."
+        ),
+    )
+    parser.add_argument(
+        "--initial-extrinsics-only",
+        action="store_true",
+        help=(
+            "Load only --initial-extrinsics files and ignore --conf-dir. "
+            "Use when a single edge file (such as lf_to_rr) should seed the UI."
+        ),
+    )
+    parser.add_argument(
         "--target-topic",
         default="/apollo/sensor/vanjeelidar/left_front/PointCloud2",
         help="Reference LiDAR topic (fixed in the UI).",
@@ -356,6 +383,8 @@ def main() -> None:
     state = ManualAlignServerState(
         record_path=args.record_path,
         conf_dir=args.conf_dir,
+        initial_extrinsics=args.initial_extrinsics,
+        initial_extrinsics_only=args.initial_extrinsics_only,
         target_topic=args.target_topic,
         sync_threshold_ms=args.sync_threshold_ms,
         voxel_size=args.voxel_size,
