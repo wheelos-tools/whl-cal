@@ -8,7 +8,7 @@ This file is the compact index for the current engineering surfaces in the repo.
 | --- | --- | --- | --- |
 | `lidar2lidar` | `record_utils.py`, `scan2map_dataset.py`, `auto_calib.py` extraction paths | `auto_calib.py`, `scan2map_calib.py`, `temporal_calib.py` | `metrics.yaml`, `diagnostics/*.yaml` |
 | `gril` / LiDAR-to-IMU | `gril/adapters/`, `gril/dataset_io.py` | `third_party/gril_native/` | `gril/validation.py`, GRIL validation skill diagnostics |
-| `camera` | interactive/headless sample collection in `camera/intrinsic.py` | OpenCV intrinsic solve (`plumb_bob` + `fisheye`) | calibration YAML + `*_diagnostics/` acceptance/data_quality/visualization artifacts |
+| `camera` | GUI live capture or offline image-dataset extraction in `camera/intrinsic.py` | OpenCV intrinsic solve (`plumb_bob` + `fisheye`) | calibration YAML + `*_diagnostics/` acceptance/data_quality/visualization artifacts |
 | `lidar2camera` | raw image / PCD pair loading + extraction gating in `reference_pipeline.py` | `reference_pipeline.py`, `learning_based.py` | `metrics.yaml`, `diagnostics/*.yaml`, CSVs, heatmap/scatter/overlay review surfaces |
 
 ## Main commands
@@ -56,15 +56,13 @@ This file is the compact index for the current engineering surfaces in the repo.
 - `calibrated/*.yaml`
 - optional `visual_review/*/merged_cloud_colored.ply`
 
-### lidar2imu
+### GRIL / LiDAR-to-IMU
 
-- `standardized_samples.yaml`
-- `conversion_diagnostics.yaml`
-- `calibration/calibrated_tf.yaml`
-- `calibration/metrics.yaml`
-- `calibration/diagnostics/algorithm.yaml`
-- `calibration/diagnostics/evaluation.yaml`
-- `calibration/diagnostics/observability.yaml`
+- `customer_summary.yaml`
+- `calibrated_tf.yaml`
+- `metrics.yaml`
+- `diagnostics/`
+- standardized input and validation artifacts emitted by `gril-migrate`
 
 ### camera / lidar2camera
 

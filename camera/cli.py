@@ -147,7 +147,7 @@ def apply_pattern_size_override(calibrator, pattern_size_arg):
 
 def dispatch_run(calibrator, args):
     if args.images_dir:
-        return calibrator.run_offline(args.images_dir)
+        return calibrator.run_headless(args.images_dir)
 
     display_available = bool(
         os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
