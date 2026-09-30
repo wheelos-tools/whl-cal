@@ -12,6 +12,10 @@ each calibration module.
 
 ## 1. Shared review order
 
+Customers should open `customer_summary.yaml` first. It contains only the
+verdict, final result, a small set of decision metrics, visual-review paths, and
+the next action. The detailed order below is the developer/debug layer.
+
 Across `lidar2lidar`, `lidar2imu`, and `lidar2camera`, use the same review order:
 
 1. `diagnostics/standardized_data.yaml`
@@ -38,7 +42,7 @@ For `camera`, the same pattern lives under `calibration_*_diagnostics/`.
 | `camera2camera` | `python tools/run_camera2camera_smoke.py --pairs 8` | confirms the stereo bundle-adjustment baseline can recover a synthetic camera↔camera extrinsic |
 | `lidar2camera` | `PYTHONPATH=. python3 tools/run_lidar2camera_smoke.py --poses 5` | confirms the runtime and optimizer behave on a synthetic reference case |
 | `lidar2lidar` | `lidar2lidar-auto --record-path /path/to/record --conf-dir lidar2lidar/conf --output-dir outputs/lidar2lidar/run` | confirms the record can be parsed and a baseline automatic run can finish |
-| `lidar2imu` | `lidar2imu-convert-record --record-path /path/to/record --output-dir outputs/lidar2imu/run01 --profile baseline --calibrate` | confirms the record can be converted and the staged solver can finish |
+| `gril` / LiDAR-to-IMU | `gril-migrate run-native --input /path/to/record --input-type record --config CONFIG --executable gril_native_full_frontend --output-dir outputs/gril/run01` | confirms the record adapter and native GRIL execution can finish; it does not prove physical extrinsic accuracy |
 
 These are not release procedures. They are the shortest meaningful end-to-end
 checks.
@@ -60,10 +64,11 @@ Read in this order:
 Primary signals:
 
 - capture resolution vs preview rendering mapping
-- average reprojection error
-- per-view reprojection long tail
-- image coverage breadth
-- radial monotonicity
+- `sample_sufficiency`: 36 views, grid redundancy, and outer-corner coverage
+- `capture_mode`: one native, unmodified image mode
+- `reprojection_fit`: global RMS and per-view tail
+- `reprojection_consistency`: solver RMS agrees with direct residuals
+- `projection_validity`: radial distortion is monotonic
 
 For the live-capture manifest, inspect these fields first:
 
@@ -166,7 +171,7 @@ Primary signals:
 
 | Module | Good first-pass baseline |
 | --- | --- |
-| `camera` | avg reprojection error < `1.0 px`; per-view reprojection p95 < `1.5 px`; image coverage spans multiple grid cells; no radial monotonicity warning |
+| `camera` | global reprojection RMS < `1.0 px`; per-view reprojection p95 < `1.5 px`; every grid cell meets its sample count and target corners cover all four outer quadrants; solver/recomputed RMS agree; radial distortion is monotonic |
 | `camera2camera` | `final_rms_px <= 1.0`; per-pair p95 <= `1.5 px`; holdout p95 <= `1.5 px`; epipolar p95 <= `1.0 px`; accepted pair ratio healthy; both image coverage and pose diversity pass |
 | `lidar2camera` | `final_rms_px <= 1.0`; per-pose p95 <= `1.5 px`; holdout p95 <= `1.5 px`; accepted pair ratio healthy; image coverage / pose diversity / board geometry pass |
 | `lidar2lidar` | `release_ready: true`; required relations connected; scene sufficiency and repeatability pass; overlays do not show ghosting / double edges |

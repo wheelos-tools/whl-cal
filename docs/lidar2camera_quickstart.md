@@ -60,7 +60,7 @@ will load it automatically and use it as the optimizer seed.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[lidar2camera]"
 ```
 
 ## Quick run

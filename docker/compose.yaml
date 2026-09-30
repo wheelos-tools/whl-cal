@@ -1,0 +1,32 @@
+services:
+  camera:
+    profiles: [camera]
+    build:
+      context: ..
+      dockerfile: docker/camera/Dockerfile
+    image: whl-cal-camera:local
+    environment:
+      DISPLAY: ${DISPLAY}
+    devices:
+      - ${CAMERA_DEVICE:-/dev/video0}:${CAMERA_DEVICE:-/dev/video0}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${OUTPUT_DIR:-../outputs/docker-camera}:/output
+    command: ["--output-dir", "/output"]
+
+  lidar2imu:
+    profiles: [lidar2imu]
+    build:
+      context: ..
+      dockerfile: docker/lidar2imu/Dockerfile
+    image: whl-cal-lidar2imu:local
+    volumes:
+      - ${INPUT_DIR:-../data}:/data:ro
+      - ${OUTPUT_DIR:-../outputs/docker-lidar2imu}:/output
+    command:
+      - --input
+      - /data
+      - --input-type
+      - record
+      - --output-dir
+      - /output

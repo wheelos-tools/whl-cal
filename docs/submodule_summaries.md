@@ -14,7 +14,7 @@ This document preserves concise, user-facing snippets that were previously locat
 
 - Purpose: Intrinsic camera calibration using a chessboard.
 - Quick start:
-  - Install: `pip install opencv-python numpy pyyaml`
+  - Install: `pip install -e ".[camera]"`
   - Run: `camera-intrinsic-calibrate --config camera_config.yaml`
   - Controls: `S` save frame, `C` run calibration (>=20 frames), `Q` quit.
 - Output: `outputs/camera_intrinsic/runs/<session>/calibration.yaml` plus diagnostics and comparison views.
@@ -78,14 +78,13 @@ lidar2lidar-auto \
   - Quick Start: `docs/lidar2lidar_quickstart.md`
   - Design: `docs/lidar2lidar_design.md`
 
-## lidar2imu
+## GRIL / lidar2imu
 
-- Purpose: staged LiDAR-to-IMU calibration pipeline with a separate evaluation layer.
-- Commands: `lidar2imu-calibrate`, `lidar2imu-convert-record`.
+- Purpose: ROS-free native GRIL LiDAR-to-IMU calibration and validation.
+- Command: `gril-migrate`.
 - Docs:
-  - Overview: `docs/lidar2imu.md`
   - Quick Start: `docs/lidar2imu_quickstart.md`
-  - Design: `docs/lidar2imu_design.md`
+  - Design and release gate: `docs/gril_ros_free_migration.md`
 
 ---
 

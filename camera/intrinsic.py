@@ -25,12 +25,12 @@ calibration without any GUI. This enables CI and smoke tests.
 """
 
 import glob
+import os
+from datetime import datetime
+
 import cv2
 import numpy as np
 import yaml
-import time
-import os
-from datetime import datetime
 
 from camera.intrinsic_capture import (
     apply_capture_settings,
@@ -53,7 +53,9 @@ from camera.intrinsic_sampling import IntrinsicSamplingState
 from camera.intrinsic_solver import (
     build_undistortion_model,
     calibrate_camera,
-    mean_reprojection_error,
+    normalize_distortion_model,
+    reprojection_residuals,
+    reprojection_summary,
     undistort_for_preview,
 )
 from camera.intrinsic_targets import CalibrationTargetDetector
@@ -75,12 +77,24 @@ def _float_list_summary(values):
 
 
 class CameraCalibrator:
-    def __init__(self, cfg_path, session_name=None, capture_only=False):
+    def __init__(
+        self,
+        cfg_path,
+        session_name=None,
+        capture_only=False,
+        output_dir=None,
+    ):
         """Initialize and load configuration"""
         with open(cfg_path, "r") as f:
             self.cfg = yaml.safe_load(f)
+        if output_dir is not None:
+            self.cfg.setdefault("workflow", {})["root_dir"] = str(output_dir)
 
         self.ac_cfg = self.cfg["auto_capture_settings"]
+        self.distortion_model = normalize_distortion_model(
+            self.cfg.get("distortion_model", "plumb_bob")
+        )
+        self.cfg["distortion_model"] = self.distortion_model
         self.window_name = self.cfg.get("window_name", "Camera Calibrator")
         self.target_type = str(
             self.cfg.get("target_type", self.cfg.get("pattern_type", "chessboard"))
@@ -197,7 +211,9 @@ class CameraCalibrator:
 
     def _prepare_run_session(self, dataset_label=None):
         if self.run_session is None:
-            self.run_session = self.workspace.prepare_run_session(dataset_label=dataset_label)
+            self.run_session = self.workspace.prepare_run_session(
+                dataset_label=dataset_label
+            )
             print(
                 "[INFO] Calibration artifacts directory:",
                 self.run_session.session_dir,
@@ -210,7 +226,9 @@ class CameraCalibrator:
         snapshot = {
             "capture_source": str(self.capture_source),
             "capture_source_type": self.capture_source_meta.get("source_type"),
-            "selected_camera_index": self.capture_source_meta.get("selected_camera_index"),
+            "selected_camera_index": self.capture_source_meta.get(
+                "selected_camera_index"
+            ),
             "requested_capture_resolution": (
                 None
                 if cap_cfg["width"] is None or cap_cfg["height"] is None
@@ -244,7 +262,9 @@ class CameraCalibrator:
             if self.capture_runtime_info is not None
             else self._base_capture_runtime_snapshot()
         )
-        if self.live_capture_handle is not None and hasattr(self.live_capture_handle, "diagnostics"):
+        if self.live_capture_handle is not None and hasattr(
+            self.live_capture_handle, "diagnostics"
+        ):
             snapshot["stream_health"] = self.live_capture_handle.diagnostics()
         return snapshot
 
@@ -258,7 +278,9 @@ class CameraCalibrator:
     def _write_capture_session_manifest(self, status):
         if self.capture_session is None:
             return
-        accepted_total = len(list(self.capture_session.accepted_dir.glob("sample_*.jpg")))
+        accepted_total = len(
+            list(self.capture_session.accepted_dir.glob("sample_*.jpg"))
+        )
         capture_runtime = self._capture_runtime_snapshot()
         data = {
             "schema_version": 1,
@@ -270,7 +292,9 @@ class CameraCalibrator:
             "capture_runtime": capture_runtime,
             "accepted_dir": str(self.capture_session.accepted_dir),
             "accepted_sample_count": int(accepted_total),
-            "preexisting_accepted_sample_count": int(self.preexisting_capture_sample_count),
+            "preexisting_accepted_sample_count": int(
+                self.preexisting_capture_sample_count
+            ),
             "accepted_sample_count_current_run": int(len(self.sample_records)),
             "required_sample_count": int(self.min_total_samples),
             "latest_detection_debug": self.last_detection_debug,
@@ -300,8 +324,7 @@ class CameraCalibrator:
             debug_info.get("selected_scale"),
         )
         should_print = (
-            self._last_aprilgrid_debug_signature != signature
-            or frame_counter % 90 == 0
+            self._last_aprilgrid_debug_signature != signature or frame_counter % 90 == 0
         )
         if should_print:
             attempts = " ".join(
@@ -337,9 +360,11 @@ class CameraCalibrator:
         self.last_sampling_debug = sampling_debug
         signature = (
             int(sampling_debug.get("stability_counter", 0)),
-            None
-            if sampling_debug.get("motion_px") is None
-            else round(float(sampling_debug.get("motion_px")), 2),
+            (
+                None
+                if sampling_debug.get("motion_px") is None
+                else round(float(sampling_debug.get("motion_px")), 2)
+            ),
             round(float(sampling_debug.get("effective_threshold_px", 0.0)), 2),
             int(len(self.objpoints)),
             bool(sampling_debug.get("accept")) if "accept" in sampling_debug else None,
@@ -385,7 +410,10 @@ class CameraCalibrator:
                     detection_result.image_points,
                     detection_result.feature_ids,
                 )
-            if detection_result.marker_ids is not None and detection_result.marker_corners:
+            if (
+                detection_result.marker_ids is not None
+                and detection_result.marker_corners
+            ):
                 cv2.aruco.drawDetectedMarkers(
                     image,
                     detection_result.marker_corners,
@@ -405,11 +433,17 @@ class CameraCalibrator:
         area_delta = capture_decision.get("closest_area_delta")
         aspect_delta = capture_decision.get("closest_aspect_delta")
         center_delta = capture_decision.get("closest_center_distance_ratio")
-        if area_delta is not None and float(area_delta) < float(self.sampling.pose_novelty_area_delta):
+        if area_delta is not None and float(area_delta) < float(
+            self.sampling.pose_novelty_area_delta
+        ):
             guidance_parts.append("move closer or farther")
-        if aspect_delta is not None and float(aspect_delta) < float(self.sampling.pose_novelty_aspect_delta):
+        if aspect_delta is not None and float(aspect_delta) < float(
+            self.sampling.pose_novelty_aspect_delta
+        ):
             guidance_parts.append("tilt the board more")
-        if center_delta is not None and float(center_delta) < float(self.sampling.pose_novelty_center_distance_ratio):
+        if center_delta is not None and float(center_delta) < float(
+            self.sampling.pose_novelty_center_distance_ratio
+        ):
             guidance_parts.append("shift the board center")
         if not guidance_parts:
             guidance_parts.append("make a clearly different pose")
@@ -428,27 +462,27 @@ class CameraCalibrator:
         return f"Coverage done: {action_text} ({remaining_samples} novel poses left)"
 
     def _coverage_metrics(self):
-        return coverage_metrics(self.sample_records, grid_shape=self.grid_shape)
-
-    def _per_view_reprojection_report(self, rvecs, tvecs):
-        return per_view_reprojection_report(
-            self.objpoints,
-            self.imgpoints,
-            self.mtx,
-            self.dist,
+        return coverage_metrics(
             self.sample_records,
-            rvecs,
-            tvecs,
+            grid_shape=self.grid_shape,
+            samples_per_grid=self.samples_per_grid,
+            edge_corner_min_radius_ratio=self.sampling.edge_corner_min_radius_ratio,
         )
 
     def _distortion_monotonicity_report(self, image_size_wh):
-        return distortion_monotonicity_report(self.mtx, self.dist, image_size_wh)
+        return distortion_monotonicity_report(
+            self.mtx,
+            self.dist,
+            image_size_wh,
+            distortion_model=self.distortion_model,
+        )
 
     def _write_review_artifacts(
         self,
         output_yaml_path,
         *,
-        avg_error,
+        global_reprojection_rms,
+        solver_reported_rms,
         per_view_report,
         coverage,
         monotonicity_report,
@@ -459,12 +493,13 @@ class CameraCalibrator:
             sample_records=self.sample_records,
             capture_runtime_info=self.capture_runtime_info,
             calibration_target=self.target_detector.target_config(),
-            imgpoints=self.imgpoints,
             comparison_view_path=self.comparison_view_path,
-            avg_error=avg_error,
+            global_reprojection_rms=global_reprojection_rms,
+            solver_reported_rms=solver_reported_rms,
             per_view_report=per_view_report,
             coverage=coverage,
             monotonicity_report=monotonicity_report,
+            distortion_model=self.distortion_model,
         )
 
     def run(self):
@@ -496,7 +531,11 @@ class CameraCalibrator:
         while True:
             ret, frame = cap.read()
             if not ret or frame is None or frame.size == 0:
-                if getattr(cap, "managed_capture", False) and hasattr(cap, "is_ready") and not cap.is_ready():
+                if (
+                    getattr(cap, "managed_capture", False)
+                    and hasattr(cap, "is_ready")
+                    and not cap.is_ready()
+                ):
                     if frame_count % 30 == 0:
                         print("[WARN] Waiting for network stream recovery/warm-up...")
                     frame_count += 1
@@ -597,9 +636,7 @@ class CameraCalibrator:
                     )
 
             if h is not None:
-                draw_text(
-                    display, "R: Restart | V: Validate | ESC: Exit", (50, h - 40)
-                )
+                draw_text(display, "R: Restart | V: Validate | ESC: Exit", (50, h - 40))
 
             # Render to window: preserve aspect ratio and center-pad to avoid distortion
             src_h, src_w = display.shape[:2]
@@ -630,7 +667,7 @@ class CameraCalibrator:
         self.live_capture_handle = None
         cv2.destroyAllWindows()
         if self.capture_only:
-            if len(self.objpoints) >= self.min_total_samples:
+            if self.sampling.progress_snapshot()["stage"] == "ready_to_calibrate":
                 self._write_capture_session_manifest(status="capture_complete")
                 return 0
             self._write_capture_session_manifest(status="capture_incomplete")
@@ -639,176 +676,16 @@ class CameraCalibrator:
                 f"samples={len(self.objpoints)}/{self.min_total_samples}",
             )
             return 2
-        if self.mtx is not None and self.require_release_ready and not bool(
-            self.last_release_ready
+        if (
+            self.mtx is not None
+            and self.require_release_ready
+            and not bool(self.last_release_ready)
         ):
-            print("[FAIL] Calibration finished but quality gates are not release-ready.")
+            print(
+                "[FAIL] Calibration finished but quality gates are not release-ready."
+            )
             return 3
         return 0
-
-    def run_live_headless(self, max_seconds=0):
-        """Live camera capture without GUI; safe on servers without DISPLAY."""
-        print("[INFO] Headless live mode: GUI disabled, running auto capture loop.")
-        print(f"[INFO] Capture source: {self.capture_source}")
-        self._prepare_live_capture_session()
-        cap, _backend_name = open_managed_capture(
-            self.capture_source,
-            self.cfg,
-            self.capture_source_meta,
-        )
-        if cap is None:
-            print("[ERROR] Cannot open capture source", self.capture_source)
-            return 1
-        self.live_capture_handle = cap
-
-        apply_capture_settings(cap, self.cfg, self.capture_source_meta)
-        start_ts = time.time()
-        h = w = None
-        frame_count = 0
-        empty_frame_count = 0
-        first_frame_saved = False
-
-        while True:
-            ret, frame = cap.read()
-            if not ret or frame is None or frame.size == 0:
-                if getattr(cap, "managed_capture", False) and hasattr(cap, "is_ready") and not cap.is_ready():
-                    if frame_count % 30 == 0:
-                        print("[WARN] Waiting for network stream recovery/warm-up...")
-                    frame_count += 1
-                    continue
-                print("[WARN] Failed to read frame from camera; retrying...")
-                frame_count += 1
-                empty_frame_count += 1
-                if empty_frame_count > 90:
-                    print(
-                        "[ERROR] Too many empty frames. Check stream URI/codec/network and OpenCV ffmpeg support."
-                    )
-                    break
-                continue
-            if is_visually_empty_frame(frame):
-                empty_frame_count += 1
-                if empty_frame_count % 15 == 0:
-                    print(
-                        "[WARN] Received invalid image frames repeatedly (blank or near-uniform, e.g. solid green); "
-                        "continuing to wait for a valid decoded frame."
-                    )
-                if empty_frame_count > 120:
-                    print(
-                        "[ERROR] Too many invalid frames. Check whether the selected /dev/video node is wrong, "
-                        "the camera is returning a bogus ISP stream, or the RTSP/codec path is misconfigured."
-                    )
-                    break
-                continue
-            empty_frame_count = 0
-
-            self.last_raw_frame = frame.copy()
-
-            if h is None:
-                h, w = frame.shape[:2]
-                self.capture_runtime_info = build_capture_runtime_info(
-                    self.cfg,
-                    self.capture_source,
-                    self.capture_source_meta,
-                    cap,
-                    frame,
-                )
-                log_capture_runtime_info(self.capture_runtime_info)
-
-            if not first_frame_saved:
-                debug_frame_path = self.workspace.debug_image_path(
-                    self.capture_session,
-                    "headless_first_frame.jpg",
-                )
-                if cv2.imwrite(str(debug_frame_path), frame):
-                    print(f"[SAVED] First headless frame: {debug_frame_path}")
-                first_frame_saved = True
-
-            if self.state == "CAPTURING":
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                detection = self._find_target(gray, frame_count)
-                self._record_detection_debug(detection, frame_count, "headless_live")
-                if detection.found:
-                    capture_complete = self._run_auto_capture(
-                        gray,
-                        detection,
-                        w,
-                        h,
-                        frame_bgr=frame,
-                        source="headless_live",
-                        frame_counter=frame_count,
-                    )
-                    if capture_complete and self.capture_only:
-                        self._write_capture_session_manifest(status="capture_complete")
-                        print("[PASS] Headless capture-only session completed.")
-                        self._freeze_capture_runtime_info()
-                        cap.release()
-                        self.live_capture_handle = None
-                        return 0
-
-                if frame_count % 30 == 0:
-                    progress = self.sampling.progress_snapshot()
-                    print(
-                        "[INFO] Headless progress:",
-                        f"stage={progress['stage']}",
-                        f"samples={progress['sample_count']}/{progress['required_sample_count']}",
-                        f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
-                        f"remaining={progress['remaining_required_samples']}",
-                        f"next={progress.get('guidance_summary')}",
-                    )
-
-            if self.state == "SHOWING_RESULT" and self.mtx is not None:
-                if self.require_release_ready and not bool(self.last_release_ready):
-                    print(
-                        "[FAIL] Calibration finished but quality gates are not release-ready."
-                    )
-                    self._freeze_capture_runtime_info()
-                    cap.release()
-                    self.live_capture_handle = None
-                    return 3
-                print("[PASS] Headless live calibration completed.")
-                self._freeze_capture_runtime_info()
-                cap.release()
-                self.live_capture_handle = None
-                return 0
-
-            if max_seconds > 0 and (time.time() - start_ts) >= float(max_seconds):
-                progress = self.sampling.progress_snapshot()
-                print(
-                    "[WARN] Headless live mode timed out before collecting enough samples.",
-                    f"stage={progress['stage']}",
-                    f"samples={progress['sample_count']}/{progress['required_sample_count']}",
-                    f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
-                )
-                break
-
-            frame_count += 1
-
-        self._freeze_capture_runtime_info()
-        cap.release()
-        self.live_capture_handle = None
-        if self.capture_only:
-            self._write_capture_session_manifest(status="capture_incomplete")
-            progress = self.sampling.progress_snapshot()
-            print(
-                "[ERROR] Headless capture-only session did not finish.",
-                f"stage={progress['stage']}",
-                f"samples={progress['sample_count']}/{progress['required_sample_count']}",
-                f"coverage={progress['coverage_cell_count']}/{progress['coverage_target_cell_count']}",
-            )
-            return 2
-        if self.mtx is not None:
-            if self.require_release_ready and not bool(self.last_release_ready):
-                print(
-                    "[FAIL] Calibration finished but quality gates are not release-ready."
-                )
-                return 3
-            print("[PASS] Headless live calibration completed.")
-            return 0
-        print(
-            "[ERROR] Headless live calibration did not finish.",
-            f"samples={len(self.objpoints)}/{self.min_total_samples}",
-        )
-        return 2
 
     def run_headless(
         self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")
@@ -891,7 +768,9 @@ class CameraCalibrator:
         # success if self.mtx set
         if self.mtx is not None:
             if self.require_release_ready and not bool(self.last_release_ready):
-                print("[FAIL] Calibration finished but quality gates are not release-ready.")
+                print(
+                    "[FAIL] Calibration finished but quality gates are not release-ready."
+                )
                 return 3
             print("[PASS] Headless calibration completed.")
             return 0
@@ -910,6 +789,7 @@ class CameraCalibrator:
             image_size_wh,
             self.cfg.get("undistortion_preview", {}) or {},
             alpha=alpha,
+            distortion_model=self.distortion_model,
         )
 
     def _undistort_for_preview(self, image, alpha=None):
@@ -919,6 +799,7 @@ class CameraCalibrator:
             self.dist,
             self.cfg.get("undistortion_preview", {}) or {},
             alpha=alpha,
+            distortion_model=self.distortion_model,
         )
 
     def _find_target(self, gray, frame_counter, detect_every_frame=False):
@@ -967,7 +848,6 @@ class CameraCalibrator:
             )
             sampling_debug.update(capture_decision)
             self._record_sampling_debug(sampling_debug, frame_counter, source)
-            remaining_samples = int(capture_decision.get("remaining_required_samples") or 0)
             remaining_cells = int(self.sampling.remaining_coverage_cells)
             if bool(capture_decision.get("accept")):
                 self._save_sample(
@@ -983,6 +863,11 @@ class CameraCalibrator:
                     self.feedback_text = (
                         f"Move target to uncovered cells ({remaining_cells} cells left)"
                     )
+                elif capture_reason == "move_to_outer_quadrants":
+                    missing = ", ".join(
+                        capture_decision.get("missing_outer_quadrants") or []
+                    )
+                    self.feedback_text = f"Move board corners outward: {missing}"
                 elif capture_reason == "pose_not_novel":
                     self.feedback_text = self._build_pose_rejection_feedback(
                         capture_decision
@@ -994,7 +879,11 @@ class CameraCalibrator:
                 if self.capture_only:
                     self.feedback_text = "Capture complete"
                     return True
-                self._prepare_run_session(dataset_label=self.capture_session.label if self.capture_session else None)
+                self._prepare_run_session(
+                    dataset_label=(
+                        self.capture_session.label if self.capture_session else None
+                    )
+                )
                 self._calibrate(w, h)
         return False
 
@@ -1013,10 +902,14 @@ class CameraCalibrator:
             print(f"[OK] Captured sample #{sample_index} (diverse pose)")
         elif capture_reason == "coverage_needed":
             print(f"[OK] Captured sample #{sample_index} (coverage)")
+        elif capture_reason == "edge_coverage_needed":
+            print(f"[OK] Captured sample #{sample_index} (outer field coverage)")
         else:
             print(f"[OK] Captured sample #{sample_index}")
         refined = np.asarray(detection.image_points, dtype=np.float32).reshape(-1, 1, 2)
-        object_points = np.asarray(detection.object_points, dtype=np.float32).reshape(-1, 3)
+        object_points = np.asarray(detection.object_points, dtype=np.float32).reshape(
+            -1, 3
+        )
         width = int(gray.shape[1])
         height = int(gray.shape[0])
         saved_source_path = source_path
@@ -1049,36 +942,44 @@ class CameraCalibrator:
             self.objpoints,
             self.imgpoints,
             (w, h),
+            distortion_model=self.distortion_model,
         )
-        if not ret:
+        if ret is None or not np.isfinite(float(ret)):
             print("[ERROR] Calibration failed.")
             return
         self.mtx, self.dist = mtx, dist
-        per_view_report = self._per_view_reprojection_report(rvecs, tvecs)
-        err = self._reprojection_error(rvecs, tvecs)
-        print(f"[REPORT] Avg Reprojection Error: {err:.4f}px")
-        self._build_result_canv(w, h)
-        self._save_results(
-            w,
-            h,
-            err,
-            per_view_report=per_view_report,
-        )
-        self.state = "SHOWING_RESULT"
-
-    def _reprojection_error(self, rvecs, tvecs):
-        return mean_reprojection_error(
+        residual_views = reprojection_residuals(
             self.objpoints,
             self.imgpoints,
             self.mtx,
             self.dist,
             rvecs,
             tvecs,
+            distortion_model=self.distortion_model,
         )
+        reprojection = reprojection_summary(residual_views)
+        per_view_report = per_view_reprojection_report(
+            residual_views,
+            self.sample_records,
+        )
+        print(
+            f"[REPORT] Global Reprojection RMS: {reprojection['global_rms_px']:.4f}px"
+        )
+        self._build_result_canv(w, h)
+        self._save_results(
+            w,
+            h,
+            reprojection,
+            solver_reported_rms=float(ret),
+            per_view_report=per_view_report,
+        )
+        self.state = "SHOWING_RESULT"
 
     def _build_result_canv(self, w, h):
         print("[INFO] Generating Distortion Comparison View...")
-        self._prepare_run_session(dataset_label=self.capture_session.label if self.capture_session else None)
+        self._prepare_run_session(
+            dataset_label=self.capture_session.label if self.capture_session else None
+        )
 
         if self.last_raw_frame is None:
             self.last_raw_frame = np.zeros((h, w, 3), dtype=np.uint8)
@@ -1092,8 +993,18 @@ class CameraCalibrator:
         print(f"[SAVED] {self.comparison_view_path}")
         self.result_canvas = canvas
 
-    def _save_results(self, w, h, error, *, per_view_report):
-        self._prepare_run_session(dataset_label=self.capture_session.label if self.capture_session else None)
+    def _save_results(
+        self,
+        w,
+        h,
+        reprojection,
+        *,
+        solver_reported_rms,
+        per_view_report,
+    ):
+        self._prepare_run_session(
+            dataset_label=self.capture_session.label if self.capture_session else None
+        )
         fname = str(self.run_session.calibration_yaml_path)
         self.capture_runtime_info = self._capture_runtime_snapshot()
         _, preview_info = self._build_undistortion_model((w, h))
@@ -1115,7 +1026,7 @@ class CameraCalibrator:
             image_height=h,
             calibration_target=self.target_detector.target_config(),
             camera_matrix=dict(rows=3, cols=3, data=self.mtx.tolist()),
-            distortion_model=str(self.cfg.get("distortion_model", "plumb_bob")),
+            distortion_model=self.distortion_model,
             distortion_coefficients=dict(
                 rows=1,
                 cols=int(distortion.size),
@@ -1133,14 +1044,16 @@ class CameraCalibrator:
             per_view_reprojection_summary=_float_list_summary(
                 [float(row["rms_px"]) for row in per_view_report]
             ),
-            avg_reprojection_error=float(error),
+            global_reprojection_rms_px=float(reprojection["global_rms_px"]),
+            solver_reported_rms_px=float(solver_reported_rms),
         )
         with open(fname, "w") as f:
             yaml.dump(data, f, indent=4)
         print(f"[SAVED] Calibration file: {fname}")
         review_artifacts = self._write_review_artifacts(
             fname,
-            avg_error=error,
+            global_reprojection_rms=reprojection["global_rms_px"],
+            solver_reported_rms=solver_reported_rms,
             per_view_report=per_view_report,
             coverage=coverage,
             monotonicity_report=monotonicity_report,

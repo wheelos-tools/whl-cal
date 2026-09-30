@@ -53,12 +53,14 @@ def matrix_from_transform_dict(transform_dict: dict) -> np.ndarray:
     rotation = transform_dict["rotation"]
 
     transform = np.eye(4, dtype=float)
-    transform[:3, :3] = R.from_quat([
-        float(rotation["x"]),
-        float(rotation["y"]),
-        float(rotation["z"]),
-        float(rotation["w"]),
-    ]).as_matrix()
+    transform[:3, :3] = R.from_quat(
+        [
+            float(rotation["x"]),
+            float(rotation["y"]),
+            float(rotation["z"]),
+            float(rotation["w"]),
+        ]
+    ).as_matrix()
     transform[:3, 3] = [
         float(translation["x"]),
         float(translation["y"]),
@@ -85,13 +87,15 @@ def transform_dict_from_matrix(matrix: np.ndarray) -> dict:
     }
 
 
-def build_extrinsics_payload(parent_frame: str,
-                            child_frame: str,
-                            matrix: np.ndarray,
-                            stamp_ns: int | None = None,
-                            seq: int = 0,
-                            metrics: dict | None = None,
-                            metadata: dict | None = None) -> dict:
+def build_extrinsics_payload(
+    parent_frame: str,
+    child_frame: str,
+    matrix: np.ndarray,
+    stamp_ns: int | None = None,
+    seq: int = 0,
+    metrics: dict | None = None,
+    metadata: dict | None = None,
+) -> dict:
     payload = {
         "header": {
             "stamp": stamp_ns_to_dict(stamp_ns),
@@ -121,11 +125,26 @@ def parse_transform_payload(payload) -> tuple[np.ndarray, str, str, int | None]:
         child_frame = str(payload.get("child_frame_id", ""))
 
         if "transform" in payload:
-            return matrix_from_transform_dict(payload["transform"]), parent_frame, child_frame, stamp_ns
+            return (
+                matrix_from_transform_dict(payload["transform"]),
+                parent_frame,
+                child_frame,
+                stamp_ns,
+            )
         if "translation" in payload and "rotation" in payload:
-            return matrix_from_transform_dict(payload), parent_frame, child_frame, stamp_ns
+            return (
+                matrix_from_transform_dict(payload),
+                parent_frame,
+                child_frame,
+                stamp_ns,
+            )
         if "extrinsic_matrix" in payload:
-            return np.array(payload["extrinsic_matrix"], dtype=float), parent_frame, child_frame, stamp_ns
+            return (
+                np.array(payload["extrinsic_matrix"], dtype=float),
+                parent_frame,
+                child_frame,
+                stamp_ns,
+            )
 
     return np.array(payload, dtype=float), parent_frame, child_frame, stamp_ns
 
@@ -142,14 +161,16 @@ def load_extrinsics_file(path: str) -> tuple[np.ndarray, str, str, int | None, d
     return matrix, parent_frame, child_frame, stamp_ns, payload
 
 
-def save_extrinsics_yaml(path: str,
-                         parent_frame: str,
-                         child_frame: str,
-                         matrix: np.ndarray,
-                         stamp_ns: int | None = None,
-                         seq: int = 0,
-                         metrics: dict | None = None,
-                         metadata: dict | None = None) -> dict:
+def save_extrinsics_yaml(
+    path: str,
+    parent_frame: str,
+    child_frame: str,
+    matrix: np.ndarray,
+    stamp_ns: int | None = None,
+    seq: int = 0,
+    metrics: dict | None = None,
+    metadata: dict | None = None,
+) -> dict:
     payload = build_extrinsics_payload(
         parent_frame=parent_frame,
         child_frame=child_frame,

@@ -12,6 +12,11 @@ All calibration modules should follow the same production review lifecycle:
    - normalize raw inputs into a standard representation
    - write metadata and transform provenance
    - evaluate data quality before optimization
+   - for Apollo bags, parse once into a bundle or prepared dataset before solving;
+     do not reread the same record separately for TF, point clouds, pose, and IMU
+   - prefer sensor measurement timestamps over record write time when the
+     message exposes them; for GNSS best_pose / heading, convert measurement_time
+     from GPS epoch to Unix before matching
 2. **Algorithm**
    - run the solver only after data quality is known
    - preserve weak-observability decisions in the output

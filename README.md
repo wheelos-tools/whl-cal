@@ -8,7 +8,7 @@ workflows.
 | Module | Current status | Practical recommendation |
 | --- | --- | --- |
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
-| `lidar2imu` | real-bag validated | keep `--profile baseline` as regression reference; use `--profile production` as the current map-side production candidate |
+| `gril` / LiDAR-to-IMU | sole LiDAR-to-IMU algorithm; research-only ROS-free source build | iterate on native GRIL only; its 0827 full A/B rotation discrepancy is `0.406964 deg` versus a `0.2 deg` gate, so production release is not yet approved ([release gate](docs/gril_ros_free_migration.md)) |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
 | `camera2camera` | target-based stereo baseline exists | use the checkerboard paired-image pipeline as the current production baseline; add ChArUco next |
 | `lidar2camera` | target-based industrial baseline exists | use the target-based pipeline as the current production baseline; keep targetless paths experimental |
@@ -34,7 +34,7 @@ If you are new to the repo, follow the docs in this order:
 | `camera2camera` | paired image directories | two camera image topics if you want Apollo traceability; the current tool itself consumes exported image pairs | parent / child intrinsics, board pattern size, square size, multi-pose board plan |
 | `lidar2camera` | paired `image + .pcd` files | camera image topic, LiDAR `PointCloud2`, `/tf_static`, optional `/tf` | camera intrinsics, distortion, checkerboard size, square size |
 | `lidar2lidar` | Apollo `.record` or prepared dataset | all raw LiDAR `PointCloud2` topics, `/tf_static`, optional `/tf` | sensor topic list, approximate TF tree / initial extrinsics, scene plan |
-| `lidar2imu` | Apollo `.record`, prepared dataset, or `standardized_samples.yaml` | one LiDAR topic, `/apollo/localization/pose`, IMU-related topics, `/tf_static`, optional `/tf` | LiDAR topic, pose topic, IMU topic, initial LiDAR↔IMU TF if bag lacks it |
+| `gril` / LiDAR-to-IMU | Apollo `.record`, ROS1 bag, or canonical GRIL dataset | one raw LiDAR topic, raw IMU topic, `/tf_static`, optional independent GNSS/INS odometry for holdout | LiDAR topic, IMU topic, scan-line count, reviewed sensor configuration |
 
 ## Install
 
@@ -46,12 +46,29 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+The base package installs only the shared numerical and YAML dependencies. Install
+the extra matching the calibration workflow you need:
+
+```bash
+pip install -e ".[camera]"
+pip install -e ".[camera2camera]"
+pip install -e ".[lidar2lidar]"
+pip install -e ".[lidar2imu]"
+pip install -e ".[lidar2camera]"
+```
+
+To install every calibration workflow in one environment, combine all extras:
+
+```bash
+pip install -e ".[all]"
+```
+
 If the default PyPI route is slow or unstable in this environment, switch pip to
 the Tsinghua mirror inside the active virtual environment first:
 
 ```bash
 python -m pip config --site set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-pip install -e .
+pip install -e ".[all]"
 ```
 
 ## Common workflow
@@ -89,6 +106,8 @@ lidar2lidar-topics "$RECORD_DIR"
   [docs/lidar2lidar_quickstart.md](docs/lidar2lidar_quickstart.md)
 - LiDAR-to-IMU:
   [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
+- GRIL ROS-free migration:
+  [docs/gril_ros_free_migration.md](docs/gril_ros_free_migration.md)
 - Camera intrinsic:
   [docs/camera_quickstart.md](docs/camera_quickstart.md)
 - Camera-to-camera:
@@ -146,22 +165,15 @@ lidar2lidar-rig-dataset \
 ### LiDAR-to-IMU
 
 ```bash
-lidar2imu-convert-record \
-  --profile production \
-  --record-path "$RECORD_DIR" \
-  --output-dir outputs/lidar2imu/raw_validation \
-  --calibrate
-```
-
-The same prepared dataset can also be reused directly:
-
-```bash
-lidar2imu-convert-record \
-  --prepared-dataset-yaml outputs/prepared/run-eight-raw4/diagnostics/prepared_rig_dataset.yaml \
-  --lidar-topic /apollo/sensor/vanjeelidar/left_front/PointCloud2 \
-  --output-dir outputs/lidar2imu/run-eight-left-front-prepared \
-  --profile baseline \
-  --calibrate
+gril-migrate run-native \
+  --input "$RECORD_DIR" \
+  --input-type record \
+  --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
+  --executable third_party/gril_native/build/gril_native_full_frontend \
+  --output-dir outputs/gril/run01 \
+  --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
+  --imu-topic /apollo/sensor/gnss/imu \
+  --scan-lines 16
 ```
 
 ### Camera-to-camera
@@ -193,11 +205,19 @@ lidar2camera-nuscenes-benchmark \
 camera-intrinsic-calibrate --config camera_config.yaml
 ```
 
+### Containers
+
+Camera intrinsic and ROS-free GRIL use separate images and the same read-only
+input / writable output mount convention. See
+[docker/README.md](docker/README.md). Live camera capture requires a GUI;
+headless camera execution is supported only for offline image datasets.
+
 ## Common output artifacts
 
 The repo keeps the final review surface stable on purpose. Depending on the
 module, look for:
 
+- `customer_summary.yaml` for the concise customer verdict and key metrics
 - `calibrated_tf.yaml`
 - `metrics.yaml`
 - `diagnostics/standardized_data.yaml`
@@ -212,6 +232,9 @@ For `camera`, the equivalent outputs live under
 `outputs/camera_intrinsic/runs/<session>/calibration_diagnostics/`, while live
 accepted samples are archived under
 `outputs/camera_intrinsic/captures/<session>/accepted/`.
+
+Detailed metric layering is documented in
+[docs/calibration_metric_layers.md](docs/calibration_metric_layers.md).
 
 ## Knowledge base and deeper docs
 
@@ -229,11 +252,11 @@ Module docs:
 - LiDAR-to-LiDAR overview: [docs/lidar2lidar.md](docs/lidar2lidar.md)
 - LiDAR-to-LiDAR Quick Start: [docs/lidar2lidar_quickstart.md](docs/lidar2lidar_quickstart.md)
 - LiDAR-to-LiDAR current design: [docs/lidar2lidar_design.md](docs/lidar2lidar_design.md)
-- LiDAR-to-IMU overview: [docs/lidar2imu.md](docs/lidar2imu.md)
+- LiDAR-to-IMU quick start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
 - LiDAR-to-IMU Quick Start: [docs/lidar2imu_quickstart.md](docs/lidar2imu_quickstart.md)
 - Camera-to-camera Quick Start: [docs/camera2camera_quickstart.md](docs/camera2camera_quickstart.md)
 - Camera-to-camera design: [docs/camera2camera_design.md](docs/camera2camera_design.md)
-- LiDAR-to-IMU current design: [docs/lidar2imu_design.md](docs/lidar2imu_design.md)
+- ROS-free GRIL design and release gate: [docs/gril_ros_free_migration.md](docs/gril_ros_free_migration.md)
 - Camera intrinsic quick start: [docs/camera_quickstart.md](docs/camera_quickstart.md)
 - LiDAR↔Camera Quick Start: [docs/lidar2camera_quickstart.md](docs/lidar2camera_quickstart.md)
 - LiDAR↔Camera current design: [docs/lidar2camera_design.md](docs/lidar2camera_design.md)

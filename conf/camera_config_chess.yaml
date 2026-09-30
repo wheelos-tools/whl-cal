@@ -8,11 +8,12 @@ auto_capture_settings:
     grid_shape:
     - 3
     - 3
-    min_total_samples: 9
+    edge_corner_min_radius_ratio: 0.7
+    min_total_samples: 36
     pose_novelty_area_delta: 0.02
     pose_novelty_aspect_delta: 0.12
     pose_novelty_center_distance_ratio: 0.08
-    samples_per_grid: 1
+    samples_per_grid: 3
     stability_frames: 5
     stability_threshold: 2.0
     stability_threshold_ratio: 0.05
