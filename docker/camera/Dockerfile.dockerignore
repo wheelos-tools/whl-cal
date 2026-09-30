@@ -1,0 +1,7 @@
+.cache
+.git
+.venv
+outputs
+**/__pycache__
+**/*.pyc
+third_party/gril_native/build

@@ -42,10 +42,15 @@ Recommended chessboard baseline config is tracked in `conf/camera_config_chess.y
 
 ## 4. Solver/evaluation contract
 
-- Reprojection metrics come from one 2D residual path: global RMS plus the
-  per-view p95 tail. Do not use `L2 / N`; 2D RMS is `L2 / sqrt(N)`.
-- Keep five release gates only: sample sufficiency, capture mode, reprojection
-  fit, solver/residual consistency, and projection validity.
+- Compute one residual vector per view and report global corner-weighted 2D RMS
+  plus per-view RMS and p95 tails. Do not use `L2 / N`; 2D RMS is
+  `L2 / sqrt(N)`.
+- Keep the five release gates aligned with `camera.intrinsic_evaluation`:
+  sample sufficiency/coverage, capture mode and image-size consistency,
+  reprojection fit, solver/residual consistency, and projection validity.
+- Treat solver/residual disagreement and non-monotonic distortion as rejected
+  runs. Reprojection thresholds do not replace image coverage or downstream
+  validation.
 
 ## 5. Artifacts to trust
 

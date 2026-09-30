@@ -21,20 +21,21 @@ from __future__ import annotations
 
 import bisect
 import copy
+import struct
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
-import open3d as o3d
-from scipy.spatial.transform import Rotation as R
 
-from lidar2lidar.extrinsic_io import (
-    extrinsics_filename,
-    load_extrinsics_file,
-    save_extrinsics_yaml,
-)
+from common.geometry import quaternion_xyzw_to_matrix
+
+try:
+    import open3d as o3d
+except ImportError:
+    o3d = None
+
 from lidar2lidar.record_adapter import Record, ensure_record_available
 
 
@@ -57,9 +58,27 @@ class TransformEdge:
     is_static: bool
 
 
+def _require_open3d() -> None:
+    if o3d is None:
+        raise RuntimeError(
+            "Open3D is required for LiDAR point-cloud operations but is not installed."
+        )
+
+
 def discover_record_files(input_path: str) -> list[str]:
     path = Path(input_path)
     if path.is_file():
+        if path.suffix and path.suffix[1:].isdigit():
+            family_prefix = path.stem
+            record_files = sorted(
+                str(child)
+                for child in path.parent.iterdir()
+                if child.is_file()
+                and child.name.startswith(f"{family_prefix}.")
+                and child.name[len(family_prefix) + 1 :].isdigit()
+            )
+            if record_files:
+                return record_files
         return [str(path)]
     if not path.is_dir():
         raise FileNotFoundError(f"Record path not found: {input_path}")
@@ -100,6 +119,181 @@ def resolve_topic_frame_id(topic: str, frame_id: str) -> str:
     if frame_id:
         return frame_id
     return topic_sensor_name(topic)
+
+
+GPS_TO_UNIX_OFFSET_NS = 315964782_000_000_000
+
+
+def _timestamp_field_to_ns(value: Any) -> int | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric) or numeric <= 0.0:
+        return None
+    return int(round(numeric * 1e9))
+
+
+def message_timestamp_ns(topic: str, msg: Any, fallback_timestamp_ns: int) -> int:
+    header = getattr(msg, "header", None)
+    measurement_timestamp_ns = _timestamp_field_to_ns(
+        getattr(msg, "measurement_time", None)
+    )
+    header_timestamp_ns = _timestamp_field_to_ns(getattr(header, "timestamp_sec", None))
+
+    if topic in {
+        "/apollo/sensor/gnss/best_pose",
+        "/apollo/sensor/gnss/heading",
+    }:
+        if measurement_timestamp_ns is not None:
+            return measurement_timestamp_ns + GPS_TO_UNIX_OFFSET_NS
+
+    if measurement_timestamp_ns is not None:
+        return measurement_timestamp_ns
+    if header_timestamp_ns is not None:
+        return header_timestamp_ns
+    return int(fallback_timestamp_ns)
+
+
+def imu_payload(msg: Any) -> Any:
+    payload = getattr(msg, "imu", None)
+    return msg if payload is None else payload
+
+
+def _read_protobuf_varint(payload: memoryview, offset: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while offset < len(payload) and shift < 70:
+        byte = int(payload[offset])
+        offset += 1
+        value |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            return value, offset
+        shift += 7
+    raise ValueError("Invalid protobuf varint.")
+
+
+def _skip_protobuf_value(payload: memoryview, offset: int, wire_type: int) -> int:
+    if wire_type == 0:
+        _, offset = _read_protobuf_varint(payload, offset)
+        return offset
+    if wire_type == 1:
+        next_offset = offset + 8
+        if next_offset > len(payload):
+            raise ValueError("Truncated protobuf fixed64 value.")
+        return next_offset
+    if wire_type == 2:
+        size, offset = _read_protobuf_varint(payload, offset)
+        next_offset = offset + size
+        if next_offset > len(payload):
+            raise ValueError("Truncated protobuf length-delimited value.")
+        return next_offset
+    if wire_type == 5:
+        next_offset = offset + 4
+        if next_offset > len(payload):
+            raise ValueError("Truncated protobuf fixed32 value.")
+        return next_offset
+    raise ValueError(f"Unsupported protobuf wire type: {wire_type}.")
+
+
+def _protobuf_header_metadata(payload: memoryview) -> tuple[float | None, str]:
+    timestamp_sec = None
+    frame_id = ""
+    offset = 0
+    while offset < len(payload):
+        tag, offset = _read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if field_number == 1 and wire_type == 1:
+            timestamp_sec = float(struct.unpack_from("<d", payload, offset)[0])
+        elif field_number == 9 and wire_type == 2:
+            size, value_offset = _read_protobuf_varint(payload, offset)
+            frame_id = bytes(payload[value_offset : value_offset + size]).decode(
+                "utf-8"
+            )
+        offset = _skip_protobuf_value(payload, offset, wire_type)
+    return timestamp_sec, frame_id
+
+
+def pointcloud_protobuf_metadata(
+    payload_bytes: bytes, fallback_timestamp_ns: int
+) -> tuple[int, str]:
+    """Read PointCloud timing/frame metadata without decoding repeated points."""
+    payload = memoryview(payload_bytes)
+    measurement_time = None
+    header_timestamp = None
+    header_frame_id = ""
+    frame_id = ""
+    offset = 0
+    while offset < len(payload):
+        tag, offset = _read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if field_number == 1 and wire_type == 2:
+            size, value_offset = _read_protobuf_varint(payload, offset)
+            header_timestamp, header_frame_id = _protobuf_header_metadata(
+                payload[value_offset : value_offset + size]
+            )
+        elif field_number == 2 and wire_type == 2:
+            size, value_offset = _read_protobuf_varint(payload, offset)
+            frame_id = bytes(payload[value_offset : value_offset + size]).decode(
+                "utf-8"
+            )
+        elif field_number == 5 and wire_type == 1:
+            measurement_time = float(struct.unpack_from("<d", payload, offset)[0])
+        offset = _skip_protobuf_value(payload, offset, wire_type)
+
+    timestamp_ns = _timestamp_field_to_ns(measurement_time)
+    if timestamp_ns is None:
+        timestamp_ns = _timestamp_field_to_ns(header_timestamp)
+    if (
+        timestamp_ns is not None
+        and abs(int(timestamp_ns) - int(fallback_timestamp_ns))
+        > 7 * 24 * 60 * 60 * 1_000_000_000
+    ):
+        raise ValueError("PointCloud sensor timestamp is implausible.")
+    return (
+        int(fallback_timestamp_ns if timestamp_ns is None else timestamp_ns),
+        frame_id or header_frame_id,
+    )
+
+
+def pointcloud_protobuf_xyz_array(payload_bytes: bytes) -> np.ndarray:
+    """Decode PointXYZIT coordinates without constructing protobuf objects."""
+    payload = memoryview(payload_bytes)
+    points = []
+    offset = 0
+    while offset < len(payload):
+        tag, offset = _read_protobuf_varint(payload, offset)
+        field_number = tag >> 3
+        wire_type = tag & 0x07
+        if field_number != 4 or wire_type != 2:
+            offset = _skip_protobuf_value(payload, offset, wire_type)
+            continue
+
+        size, point_offset = _read_protobuf_varint(payload, offset)
+        point_end = point_offset + size
+        if point_end > len(payload):
+            raise ValueError("Truncated PointXYZIT message.")
+        xyz = [np.nan, np.nan, np.nan]
+        nested_offset = point_offset
+        while nested_offset < point_end:
+            point_tag, nested_offset = _read_protobuf_varint(payload, nested_offset)
+            point_field = point_tag >> 3
+            point_wire_type = point_tag & 0x07
+            if 1 <= point_field <= 3 and point_wire_type == 5:
+                xyz[point_field - 1] = struct.unpack_from("<f", payload, nested_offset)[
+                    0
+                ]
+            nested_offset = _skip_protobuf_value(
+                payload, nested_offset, point_wire_type
+            )
+        points.append(xyz)
+        offset = point_end
+
+    if not points:
+        return np.empty((0, 3), dtype=np.float64)
+    return np.asarray(points, dtype=np.float64)
 
 
 def get_topic_frame_ids(
@@ -145,11 +339,14 @@ def collect_pointcloud_metadata(
                     channel,
                     getattr(header, "frame_id", ""),
                 )
+                canonical_timestamp_ns = message_timestamp_ns(
+                    channel, msg, int(timestamp_ns)
+                )
                 metadata[channel].append(
                     PointCloudMeta(
                         topic=channel,
                         frame_id=frame_id,
-                        timestamp_ns=int(timestamp_ns),
+                        timestamp_ns=int(canonical_timestamp_ns),
                         record_path=record_file,
                     )
                 )
@@ -162,7 +359,88 @@ def collect_pointcloud_metadata(
     return metadata
 
 
+def prefetch_pointcloud_cache(
+    metas: Iterable[PointCloudMeta],
+) -> dict[tuple[str, int], o3d.geometry.PointCloud]:
+    """Load required point clouds with one pass per (record_path, topic).
+
+    This avoids repeatedly reopening and rescanning long record files for each
+    point cloud query.
+    """
+    _require_open3d()
+    ensure_record_available()
+    cache: dict[tuple[str, int], o3d.geometry.PointCloud] = {}
+    pending_by_record_topic: dict[tuple[str, str], set[int]] = defaultdict(set)
+
+    for meta in metas:
+        cache_key = (str(meta.topic), int(meta.timestamp_ns))
+        if cache_key in cache:
+            continue
+        if meta.artifact_path:
+            artifact_path = Path(meta.artifact_path)
+            if artifact_path.exists():
+                cloud = o3d.io.read_point_cloud(str(artifact_path))
+                if cloud.is_empty():
+                    raise RuntimeError(
+                        f"Cached point cloud at {artifact_path} is empty or unreadable."
+                    )
+                cache[cache_key] = cloud
+                continue
+        pending_by_record_topic[(str(meta.record_path), str(meta.topic))].add(
+            int(meta.timestamp_ns)
+        )
+
+    for (record_path, topic), pending_timestamps in pending_by_record_topic.items():
+        if not pending_timestamps:
+            continue
+        with Record(record_path) as record:
+            for (
+                channel,
+                payload,
+                type_name,
+                timestamp_ns,
+            ) in record.read_raw_messages(topics=[topic]):
+                if channel != topic:
+                    continue
+                raw_timestamp_ns = int(timestamp_ns)
+                try:
+                    canonical_timestamp_ns, _ = pointcloud_protobuf_metadata(
+                        payload, raw_timestamp_ns
+                    )
+                except (UnicodeDecodeError, ValueError, struct.error):
+                    msg = record.decode_message(channel, payload, type_name)
+                    canonical_timestamp_ns = message_timestamp_ns(
+                        channel, msg, raw_timestamp_ns
+                    )
+                if (
+                    canonical_timestamp_ns not in pending_timestamps
+                    and raw_timestamp_ns not in pending_timestamps
+                ):
+                    continue
+
+                try:
+                    points = pointcloud_protobuf_xyz_array(payload)
+                    cloud = o3d.geometry.PointCloud()
+                    cloud.points = o3d.utility.Vector3dVector(
+                        points[np.isfinite(points).all(axis=1)]
+                    )
+                except (ValueError, struct.error):
+                    msg = record.decode_message(channel, payload, type_name)
+                    cloud = pointcloud_message_to_open3d(msg)
+                if canonical_timestamp_ns in pending_timestamps:
+                    cache[(str(topic), int(canonical_timestamp_ns))] = cloud
+                    pending_timestamps.discard(canonical_timestamp_ns)
+                if raw_timestamp_ns in pending_timestamps:
+                    cache[(str(topic), int(raw_timestamp_ns))] = cloud
+                    pending_timestamps.discard(raw_timestamp_ns)
+                if not pending_timestamps:
+                    break
+
+    return cache
+
+
 def pointcloud_message_to_open3d(msg) -> o3d.geometry.PointCloud:
+    _require_open3d()
     if hasattr(msg, "points_xyz_array"):
         points = np.asarray(msg.points_xyz_array(), dtype=np.float64)
     else:
@@ -181,6 +459,7 @@ def pointcloud_message_to_open3d(msg) -> o3d.geometry.PointCloud:
 
 
 def load_pointcloud_from_meta(meta: PointCloudMeta) -> o3d.geometry.PointCloud:
+    _require_open3d()
     if meta.artifact_path:
         artifact_path = Path(meta.artifact_path)
         if artifact_path.exists():
@@ -193,10 +472,15 @@ def load_pointcloud_from_meta(meta: PointCloudMeta) -> o3d.geometry.PointCloud:
     ensure_record_available()
     with Record(meta.record_path) as record:
         for channel, msg, timestamp_ns in record.read_messages(topics=[meta.topic]):
-            if channel == meta.topic and int(timestamp_ns) == meta.timestamp_ns:
+            message_timestamp = message_timestamp_ns(channel, msg, int(timestamp_ns))
+            if channel == meta.topic and (
+                int(timestamp_ns) == meta.timestamp_ns
+                or message_timestamp == meta.timestamp_ns
+            ):
                 return pointcloud_message_to_open3d(msg)
     raise RuntimeError(
-        f"Failed to reload point cloud from {meta.record_path} topic {meta.topic} at {meta.timestamp_ns}."
+        "Failed to reload point cloud from "
+        f"{meta.record_path} topic {meta.topic} at {meta.timestamp_ns}."
     )
 
 
@@ -257,14 +541,14 @@ def proto_transform_to_matrix(transform_proto) -> np.ndarray:
     rotation = transform_proto.rotation
 
     transform = np.eye(4, dtype=float)
-    transform[:3, :3] = R.from_quat(
+    transform[:3, :3] = quaternion_xyzw_to_matrix(
         [
             float(rotation.qx),
             float(rotation.qy),
             float(rotation.qz),
             float(rotation.qw),
         ]
-    ).as_matrix()
+    )
     transform[:3, 3] = [
         float(translation.x),
         float(translation.y),
@@ -313,6 +597,8 @@ def extract_tf_edges(record_files: Iterable[str]) -> list[TransformEdge]:
 
 
 def load_transform_edges_from_dir(conf_dir: str | None) -> list[TransformEdge]:
+    from lidar2lidar.extrinsic_io import load_extrinsics_file
+
     if not conf_dir:
         return []
 
@@ -345,6 +631,8 @@ def save_transform_edges_to_dir(
     edges: Iterable[TransformEdge],
     include_dynamic: bool = False,
 ) -> list[str]:
+    from lidar2lidar.extrinsic_io import extrinsics_filename, save_extrinsics_yaml
+
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     saved_paths = []
@@ -425,7 +713,8 @@ def render_tf_tree(edges: Iterable[TransformEdge]) -> str:
     ):
         kind = "static" if edge.is_static else "dynamic"
         lines.append(
-            f"- [{kind}] {edge.parent_frame} -> {edge.child_frame} ({edge.source_topic})"
+            f"- [{kind}] {edge.parent_frame} -> "
+            f"{edge.child_frame} ({edge.source_topic})"
         )
     return "\n".join(lines)
 
@@ -502,6 +791,7 @@ def voxel_overlap_ratio(
     source_to_target: np.ndarray,
     voxel_size: float,
 ) -> float:
+    _require_open3d()
     if len(source_cloud.points) == 0 or len(target_cloud.points) == 0:
         return 0.0
 
@@ -551,6 +841,7 @@ def compute_information_metrics(
     max_correspondence_distance: float,
     downsample_voxel_size: float,
 ) -> dict:
+    _require_open3d()
     source_eval = source_cloud.voxel_down_sample(downsample_voxel_size)
     target_eval = target_cloud.voxel_down_sample(downsample_voxel_size)
     info_matrix = o3d.pipelines.registration.get_information_matrix_from_point_clouds(

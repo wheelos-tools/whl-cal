@@ -91,13 +91,12 @@ def build_argument_parser():
         help="Directory of images for headless calibration",
     )
     parser.add_argument(
-        "--pattern-size", default=None, help="Override pattern size as W,H (optional)"
+        "--output-dir",
+        default=None,
+        help="Override workflow.root_dir for calibration artifacts",
     )
     parser.add_argument(
-        "--headless-live-max-seconds",
-        type=float,
-        default=0,
-        help="Max seconds for automatic live headless mode. 0 means no timeout.",
+        "--pattern-size", default=None, help="Override pattern size as W,H (optional)"
     )
     parser.add_argument(
         "--require-release-ready",
@@ -150,17 +149,20 @@ def dispatch_run(calibrator, args):
     if args.images_dir:
         return calibrator.run_headless(args.images_dir)
 
-    display_available = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    if display_available:
-        try:
-            return calibrator.run()
-        except cv2.error as exc:
-            print(f"[WARN] GUI mode failed ({exc}). Falling back to headless live mode.")
-    else:
+    display_available = bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
+    if not display_available:
         print(
-            "[WARN] No DISPLAY/WAYLAND_DISPLAY detected. Falling back to headless live mode."
+            "[ERROR] Live camera calibration requires a GUI preview. "
+            "Set DISPLAY/WAYLAND_DISPLAY or use --images-dir for offline calibration."
         )
-    return calibrator.run_live_headless(max_seconds=args.headless_live_max_seconds)
+        return 2
+    try:
+        return calibrator.run()
+    except cv2.error as exc:
+        print(f"[ERROR] Cannot open the live calibration GUI: {exc}")
+        return 2
 
 
 def run_cli(args):
@@ -181,6 +183,7 @@ def run_cli(args):
         str(config_path),
         session_name=args.session_name,
         capture_only=args.capture_only,
+        output_dir=args.output_dir,
     )
     if args.require_release_ready:
         calibrator.require_release_ready = True

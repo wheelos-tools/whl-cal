@@ -60,6 +60,7 @@ all = [
   "protobuf==3.19.4",
   "cyber_record",
   "pupil-apriltags",
+  "rosbags>=0.11,<0.12",
   "scipy",
   "pyyaml"
 ]
@@ -74,6 +75,9 @@ where = ["."]
 [tool.setuptools.package-data]
 lidar2lidar = ["conf/*.yaml", "conf/*.md"]
 
+[tool.isort]
+profile = "black"
+
 [project.scripts]
 camera-intrinsic-calibrate = "camera.cli:main"
 lidar2lidar-calibrate = "lidar2lidar.cli:main"
@@ -83,15 +87,14 @@ lidar2lidar-scan2map = "lidar2lidar.scan2map_calib:main"
 lidar2lidar-scan2map-dataset = "lidar2lidar.scan2map_dataset:main"
 lidar2lidar-temporal = "lidar2lidar.temporal_calib:main"
 lidar2lidar-rig-dataset = "tools.lidar2lidar.prepare_rig_dataset:main"
-lidar2imu-calibrate = "lidar2imu.cli:main"
-lidar2imu-convert-record = "lidar2imu.record_converter:main"
-lidar2imu-tune-record = "tools.lidar2imu.tune_record:main"
-lidar2imu-review-runs = "tools.lidar2imu.review_runs:main"
+lidar2lidar-shared-fov-ablation = "tools.lidar2lidar.run_shared_fov_ablation:main"
+gril-migrate = "gril.cli:main"
 lidar2camera-calibrate = "lidar2camera.cli:main"
 camera2camera-calibrate = "camera2camera.cli:main"
 lidar2camera-extract-record = "lidar2camera.record_export:main"
 lidar2camera-nuscenes-benchmark = "tools.lidar2camera.run_nuscenes_benchmark:main"
 lidar2camera-nuscenes-precision-audit = "tools.lidar2camera.run_nuscenes_precision_audit:main"
+lidar2camera-nuscenes-split-benchmark = "tools.lidar2camera.run_nuscenes_split_benchmark:main"
 lidar2lidar-extract = "tools.lidar2lidar.extract_pcd:main"
 lidar2lidar-inspect-pointcloud = "tools.lidar2lidar.inspect_pointcloud:main"
 lidar2lidar-topics = "tools.lidar2lidar.list_topics:main"

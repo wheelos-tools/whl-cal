@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import logging
 
-from lidar2camera.nuscenes_benchmark import (EdgeRefinementConfig,
-                                             NuScenesBenchmarkConfig,
-                                             run_nuscenes_benchmark)
+from lidar2camera.nuscenes_benchmark import (
+    EdgeRefinementConfig,
+    NuScenesBenchmarkConfig,
+    run_nuscenes_benchmark,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -63,7 +65,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--methods",
-        default="identity,edge_refine,silhouette_refine,batch_hybrid_refine,oracle_gt",
+        default=(
+            "identity,edge_refine,direct_visual_refine,"
+            "silhouette_refine,batch_hybrid_refine,oracle_gt"
+        ),
         help="Comma-separated benchmark methods.",
     )
     parser.add_argument(

@@ -1,0 +1,116 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 08131c1..119ac8b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -16,11 +16,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -pthread -std=c++0x -std=c++14 -fexceptions")
+ 
+ message("Current CPU architecture: ${CMAKE_SYSTEM_PROCESSOR}")
++option(GRIL_DETERMINISTIC_FRONTEND "Disable parallel correspondence evaluation" OFF)
+ if(CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(X86)|(amd64)|(AMD64)" )
+   include(ProcessorCount)
+   ProcessorCount(N)
+   message("Processer number:  ${N}")
+-  if(N GREATER 4)
++  if(GRIL_DETERMINISTIC_FRONTEND)
++    add_definitions(-DMP_PROC_NUM=1)
++    message("Deterministic single-thread frontend")
++  elseif(N GREATER 4)
+     add_definitions(-DMP_EN)
+     add_definitions(-DMP_PROC_NUM=3)
+     message("core for MP: 3")
+diff --git a/include/Gril_Calib/Gril_Calib.cpp b/include/Gril_Calib/Gril_Calib.cpp
+index 5e0d710..8f0727e 100644
+--- a/include/Gril_Calib/Gril_Calib.cpp
++++ b/include/Gril_Calib/Gril_Calib.cpp
+@@ -120,8 +120,13 @@ void Gril_Calib::downsample_interpolate_IMU(const double &move_start_time) {
+ 
+     while (IMU_state_group_ALL.front().timeStamp < move_start_time - 3.0)
+         IMU_state_group_ALL.pop_front();
+-    while (Lidar_state_group.front().timeStamp < move_start_time - 3.0)
++    while (Lidar_state_group.front().timeStamp < move_start_time - 3.0) {
+         Lidar_state_group.pop_front();
++        Lidar_wrt_ground_group.pop_front();
++        IMU_wrt_ground_group.pop_front();
++        normal_vector_wrt_lidar_group.pop_front();
++        distance_Lidar_wrt_ground_group.pop_front();
++    }
+ 
+     // Original IMU measurements
+     deque<CalibState> IMU_states_all_origin;
+@@ -239,6 +244,10 @@ void Gril_Calib::IMU_time_compensate(const double &lag_time, const bool &is_disc
+         while (i < 10) {
+             Lidar_state_group.pop_front();
+             IMU_state_group.pop_front();
++            Lidar_wrt_ground_group.pop_front();
++            IMU_wrt_ground_group.pop_front();
++            normal_vector_wrt_lidar_group.pop_front();
++            distance_Lidar_wrt_ground_group.pop_front();
+             i++;
+         }
+     }
+@@ -248,8 +257,13 @@ void Gril_Calib::IMU_time_compensate(const double &lag_time, const bool &is_disc
+         it_IMU_state->timeStamp = it_IMU_state->timeStamp - lag_time;
+     }
+ 
+-    while (Lidar_state_group.front().timeStamp < IMU_state_group.front().timeStamp)
++    while (Lidar_state_group.front().timeStamp < IMU_state_group.front().timeStamp) {
+         Lidar_state_group.pop_front();  
++        Lidar_wrt_ground_group.pop_front();
++        IMU_wrt_ground_group.pop_front();
++        normal_vector_wrt_lidar_group.pop_front();
++        distance_Lidar_wrt_ground_group.pop_front();
++    }
+ 
+     while (Lidar_state_group.front().timeStamp > IMU_state_group[1].timeStamp)
+         IMU_state_group.pop_front();    
+@@ -725,6 +739,24 @@ void Gril_Calib::LI_Calibration(int &orig_odom_freq, int &cut_frame_num, double
+     align_Group(IMU_state_group, Lidar_wrt_ground_group, IMU_wrt_ground_group,
+                 normal_vector_wrt_lidar_group, distance_Lidar_wrt_ground_group);
+ 
++    ofstream aligned_states(FILE_DIR("aligned_accel_states.txt"), ios::out);
++    aligned_states << setprecision(15);
++    for (int i = 0; i < IMU_state_group.size(); ++i) {
++        aligned_states << Lidar_state_group[i].timeStamp << " ";
++        for (int row = 0; row < 3; ++row)
++            for (int col = 0; col < 3; ++col)
++                aligned_states << Lidar_state_group[i].rot_end(row, col) << " ";
++        aligned_states << IMU_state_group[i].linear_acc.transpose() << " "
++                       << Lidar_state_group[i].linear_acc.transpose() << " "
++                       << Lidar_state_group[i].ang_vel.transpose() << " "
++                       << Lidar_state_group[i].ang_acc.transpose() << " ";
++        M3D ground_rotation = Lidar_wrt_ground_group[i].matrix();
++        for (int row = 0; row < 3; ++row)
++            for (int col = 0; col < 3; ++col)
++                aligned_states << ground_rotation(row, col) << " ";
++        aligned_states << endl;
++    }
++
+     // Calibration at once
+     solve_Rot_Trans_calib(timediff_imu_wrt_lidar, imu_sensor_height);
+ 
+diff --git a/include/IMU_Processing.hpp b/include/IMU_Processing.hpp
+index 4d8776d..776b99a 100644
+--- a/include/IMU_Processing.hpp
++++ b/include/IMU_Processing.hpp
+@@ -214,6 +214,7 @@ void ImuProcess::Forward_propagation_without_imu(const MeasureGroup &meas, State
+ 
+     if (b_first_frame_) {
+         dt = 0.1;
++        time_last_scan = pcl_beg_time;
+         b_first_frame_ = false;
+     } else {
+         dt = pcl_beg_time - time_last_scan;
+diff --git a/src/preprocess.cpp b/src/preprocess.cpp
+index e0e7ba0..d8d0f3d 100644
+--- a/src/preprocess.cpp
++++ b/src/preprocess.cpp
+@@ -139,7 +139,7 @@ Preprocess::process_cut_frame_pcl2(const sensor_msgs::PointCloud2::ConstPtr &msg
+         //     memset(is_first, true, sizeof(is_first));
+         // }
+ 
+-        if (pl_orig.points[plsize - 1].time > 0 && pl_orig.points[0].time > 0) {
++        if (pl_orig.points[plsize - 1].time > 0) {
+             cout << "Use given offset time." << endl;
+             given_offset_time = true;
+         } else {
