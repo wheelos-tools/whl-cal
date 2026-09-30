@@ -45,6 +45,11 @@ jobs:
           disk-cache: ${{ github.workflow }}
           bazel-version: ${{ steps.bazel-version.outputs.version }}
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
       - name: Install C++ (Clang-Format), Shell (Shellcheck) and Buildifier
         run: |
           sudo apt-get update
