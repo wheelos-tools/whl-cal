@@ -17,8 +17,13 @@
 - [architecture.md](.agents/knowledge/architecture.md) — package boundaries and data flow.
 - [conventions.md](.agents/knowledge/conventions.md) — artifacts, schemas, style, and documentation rules.
 - [troubleshooting.md](.agents/knowledge/troubleshooting.md) — failure triage and authoritative diagnostics.
+- [lidar2imu_research.md](.agents/knowledge/lidar2imu_research.md) — LiDAR-IMU data gates, 0827 comparison, baseline-preserving iteration, and acceptance rules.
+- [camera_intrinsic_research.md](.agents/knowledge/camera_intrinsic_research.md) — intrinsic calibration baseline, validation gaps, and evidence-gated improvement roadmap.
+- [lidar2camera_research.md](.agents/knowledge/lidar2camera_research.md) — reference and targetless LiDAR-camera calibration comparison, current implementation limits, and validation roadmap.
+- [lidar2lidar_research.md](.agents/knowledge/lidar2lidar_research.md) — scan2scan baseline, semantic/overlap-aware candidates, and controlled comparison roadmap.
 
 ## Skills
+- [algorithm-research](.agents/skills/algorithm-research/SKILL.md)
 - [calibration-algorithm-design](.agents/skills/calibration-algorithm-design/SKILL.md)
 - [calibration-algorithm-iteration](.agents/skills/calibration-algorithm-iteration/SKILL.md)
 - [calibration-algorithm-validation](.agents/skills/calibration-algorithm-validation/SKILL.md)

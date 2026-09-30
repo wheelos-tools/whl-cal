@@ -170,12 +170,19 @@ def collect_record_bundle(
     pose_topic: str,
     imu_topic: str | None,
     parent_frame: str,
+    record_files: list[str] | None = None,
 ) -> RecordBundle:
     ensure_record_available()
     if not lidar_topics:
         raise RuntimeError("At least one LiDAR topic is required.")
 
-    record_files = discover_record_files(record_path)
+    record_files = (
+        list(record_files)
+        if record_files is not None
+        else discover_record_files(record_path)
+    )
+    if not record_files:
+        raise RuntimeError(f"No record files found for {record_path}.")
     lidar_topics = list(dict.fromkeys(lidar_topics))
     requested_topics = set(lidar_topics)
     requested_topics.update({"/tf_static", "/tf"})

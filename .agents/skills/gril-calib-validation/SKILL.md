@@ -62,6 +62,13 @@ python .agents/skills/gril-calib-validation/scripts/gril_pipeline.py all \
   --scan-lines 16
 ```
 
+For Apollo records, choose the IMU topic by timestamp provenance, not by name.
+On the 2026-05-06 capture, `/apollo/sensor/gnss/imu` has no usable
+`measurement_time` and its header is host-publish time; use
+`/apollo/sensor/gnss/corrected_imu`, whose header is converted INS measurement
+time, for calibration timing. The exporter and direct-record adapter unwrap its
+nested `imu` payload. Verify this policy against each capture before use.
+
 Run individual phases with `setup`, `prepare`, `run`, and `diagnose`. Use
 `--skip-submap` on `diagnose` when only signal diagnostics are needed.
 
@@ -76,6 +83,8 @@ Run individual phases with `setup`, `prepare`, `run`, and `diagnose`. Use
 - `scripts/validate_dynamics.py`: derivative filtering, observability, window,
   bias, and synthetic checks
 - `scripts/yaw_time_grid.py`: contiguous cross-validated yaw-time profile
+- `scripts/profile_gril_batch_timing.py`: angular-rate timing profile over
+  actual GRIL state timestamps and contiguous windows
 - `scripts/build_imu_submap.py`: per-point SE(3) motion-compensated submap and
   local planar thickness
 - `scripts/gril_pipeline.py`: pinned setup and end-to-end orchestration
@@ -157,13 +166,18 @@ the matching GRIL config seed is approximately `[-0.34, 0, -0.59] m`.
 ### Coordinate audit
 
 - Preserve LiDAR points in their native sensor frame.
+- Preserve the source LiDAR `frame_id` in exported messages and verify it
+  matches the record; a topic name or renamed frame is not a coordinate
+  conversion.
 - Preserve IMU angular velocity and acceleration in their native IMU frame.
-- Verify the static LiDAR-to-IMU transform direction independently.
+- Resolve the static LiDAR-to-IMU transform through the static TF graph when it
+  is represented by multiple edges, and verify its direction independently.
 - Check gravity axis and sign from stationary IMU samples.
 - Fit or inspect the ground plane; a z-up LiDAR should produce small ground
   roll/pitch and a physically plausible sensor height.
-- Validate inferred rings using per-ring elevation distributions. Each ring
-  should form a stable, ordered vertical angle.
+- Determine the sensor's actual channel count before inferring rings. Validate
+  inferred rings using separated, stable, ordered per-ring elevation bands;
+  ordered medians alone do not validate the mapping.
 - Never use a renamed ROS `frame_id` as evidence that numerical vectors were
   transformed.
 
@@ -171,6 +185,9 @@ the matching GRIL config seed is approximately `[-0.34, 0, -0.59] m`.
 
 - Compare record timestamp, header timestamp, point minimum timestamp, and point
   maximum timestamp.
+- Verify IMU clock provenance. Do not treat a host-publish header as sensor
+  time; use the capture's verified measurement-time topic and preserve its
+  angular velocity and acceleration values.
 - Confirm point offsets are monotonic and have the expected scan duration.
 - Confirm GRIL interprets point time in seconds before converting it to
   `curvature` milliseconds.
@@ -219,10 +236,28 @@ Before judging extrinsics:
 - plot LiDAR odometry and independent GNSS/INS odometry in one BEV figure
 - align with SE(2) rigid alignment only; do not scale
 - report ATE/RPE, path length, maximum step, and gap boundaries
+- for the native batch trace, run `evaluate_trajectories.py --batch-trace
+  GRIL_batch_trace_v1.txt` with the original records to plot the LiDAR path
+  and relative yaw drift against INS odometry in four contiguous windows.
+  INS odometry shares the input IMU chain: use it only to audit frontend
+  motion, never as an independent extrinsic ground truth.
+- Do not interpret an uncompensated LiDAR-vs-INS path-length ratio as frontend
+  speed error: their origins differ, and turns contribute lever-arm motion.
+  Prior to a physical trajectory verdict, account for the transform, while
+  treating any configured transform only as a sensitivity prior.
 - run the same input twice and compare trajectories
 - inspect ground height and normal stability
 
 A bounded trajectory is necessary but does not prove derivative quality.
+The `odometry` trace's residual field is only meaningful after confirming the
+binary computes the mean absolute accepted point-to-plane distance (see
+`LidarOdometry.cpp`); earlier builds wrote zero or `nan` because the accumulator
+was never incremented. Compare the actual executable digest, not just the
+source or library build target. Treat even a corrected in-sample residual as
+diagnostic: on the 2026-05-06 corrected-IMU capture, identical-input reruns of
+the instrumented frontend produced different batch traces and terminal
+solutions. Resolve frontend repeatability before using the residual to rank
+calibrations or testing optimizer changes.
 
 ### 3. Raw signal and observability validation
 
@@ -319,6 +354,17 @@ numerically observable but practically unidentifiable.
 
 When yaw or time is uncertain, grid or profile them using contiguous holdout
 error, not training cost.
+For the native GRIL batch trace, first use `profile_gril_batch_timing.py` to
+screen whether timestamp-aware angular-rate norm correlation has a supported
+peak inside the plausible clock window. Treat a weak, boundary, or
+window-dependent peak as insufficient time observability, not as a measured
+time offset.
+Compare `--signal yaw_z` without smoothing against `--signal yaw_z
+--smoothing-s 0.1` on the same frozen trace to test whether high-frequency
+frontend noise explains a failure; retain the default norm run as the
+three-axis baseline. The tool records each window's peak, zero-offset
+correlation, signal spread, and explicit failure reasons. Smoothing can
+strengthen correlation without making the estimated time or extrinsic valid.
 
 Report:
 

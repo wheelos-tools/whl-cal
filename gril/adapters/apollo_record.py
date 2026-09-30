@@ -13,6 +13,7 @@ from lidar2lidar.record_adapter import Record
 from lidar2lidar.record_utils import (
     discover_record_files,
     extract_tf_edges,
+    imu_payload,
     message_timestamp_ns,
 )
 
@@ -58,6 +59,7 @@ class ApolloRecordAdapter:
                             f"Could not decode {topic} from {record_path}"
                         )
                     if topic == self.config.imu_topic:
+                        imu = imu_payload(message)
                         timestamp_ns = message_timestamp_ns(
                             topic, message, int(record_timestamp_ns)
                         )
@@ -69,17 +71,17 @@ class ApolloRecordAdapter:
                                 timestamp_ns,
                                 np.array(
                                     [
-                                        message.angular_velocity.x,
-                                        message.angular_velocity.y,
-                                        message.angular_velocity.z,
+                                        imu.angular_velocity.x,
+                                        imu.angular_velocity.y,
+                                        imu.angular_velocity.z,
                                     ],
                                     dtype=np.float64,
                                 ),
                                 np.array(
                                     [
-                                        message.linear_acceleration.x,
-                                        message.linear_acceleration.y,
-                                        message.linear_acceleration.z,
+                                        imu.linear_acceleration.x,
+                                        imu.linear_acceleration.y,
+                                        imu.linear_acceleration.z,
                                     ],
                                     dtype=np.float64,
                                 ),

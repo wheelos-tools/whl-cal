@@ -323,6 +323,7 @@ if(BUILD_TESTING)
       pinned_config
       map_initialization
       ekf_update
+      residual_mean
       determinism
       pcl_1_10_voxel_order)
     add_test(
