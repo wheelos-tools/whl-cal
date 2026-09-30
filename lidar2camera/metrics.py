@@ -298,7 +298,7 @@ def _board_geometry_status(
 
 
 def _geometry_resolution_metrics(
-    extraction_report: dict[str, Any]
+    extraction_report: dict[str, Any],
 ) -> dict[str, Any] | None:
     resolution = extraction_report.get("geometry_resolution") or {}
     if not resolution:

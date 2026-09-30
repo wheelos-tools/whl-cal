@@ -53,8 +53,7 @@ double ros_time_to_seconds(std::int64_t timestamp_ns) {
     --seconds;
     nanoseconds += kNanosecondsPerSecond;
   }
-  return static_cast<double>(seconds) +
-         1e-9 * static_cast<double>(nanoseconds);
+  return static_cast<double>(seconds) + 1e-9 * static_cast<double>(nanoseconds);
 }
 
 void expect(std::istream &input, const std::string &expected) {
@@ -505,16 +504,13 @@ void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
     const bool ahrs_initialized =
         pipeline.ahrs.update(measure.imu, pipeline.imu_wrt_ground);
 
-    const auto ground_it =
-        pipeline.ground_by_scan.find(
-            static_cast<std::uint32_t>(measure.source_scan_index));
+    const auto ground_it = pipeline.ground_by_scan.find(
+        static_cast<std::uint32_t>(measure.source_scan_index));
     if (ground_it == pipeline.ground_by_scan.end())
-      throw std::runtime_error(
-          "missing source raw-scan Patchwork++ state");
+      throw std::runtime_error("missing source raw-scan Patchwork++ state");
     const RawGroundState ground = ground_it->second;
-    const auto pending_it =
-        pipeline.pending_cuts_by_scan.find(
-            static_cast<std::uint32_t>(measure.source_scan_index));
+    const auto pending_it = pipeline.pending_cuts_by_scan.find(
+        static_cast<std::uint32_t>(measure.source_scan_index));
     if (pending_it == pipeline.pending_cuts_by_scan.end() ||
         pending_it->second == 0)
       throw std::runtime_error("missing source raw-scan cut count");
@@ -536,8 +532,8 @@ void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
           << pipeline.lidar_wrt_ground.y() << " "
           << pipeline.lidar_wrt_ground.z() << " "
           << pipeline.normal_lidar.transpose() << " " << pipeline.lidar_height
-          << " " << ground.ground_count << " " << ground.nonground_count
-          << " " << measure.source_scan_index << "\n";
+          << " " << ground.ground_count << " " << ground.nonground_count << " "
+          << measure.source_scan_index << "\n";
     write_state(trace, "propagated", pipeline.state);
 
     LidarGroundEstimate odometry_ground;
@@ -876,12 +872,12 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
       const VelodynePreprocessResult result =
           preprocess_velodyne_scan(points, raw_timestamp_s, preprocess);
       if (!result.cut_clouds.empty()) {
-        const auto inserted = pipeline->ground_by_scan.emplace(
-            scan_number, ground);
+        const auto inserted =
+            pipeline->ground_by_scan.emplace(scan_number, ground);
         if (!inserted.second)
           throw std::runtime_error("duplicate source LiDAR scan number");
-        pipeline->pending_cuts_by_scan.emplace(
-            scan_number, result.cut_clouds.size());
+        pipeline->pending_cuts_by_scan.emplace(scan_number,
+                                               result.cut_clouds.size());
       }
       for (std::size_t cut_index = 0; cut_index < result.cut_clouds.size();
            ++cut_index) {
@@ -891,10 +887,10 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
       }
       trace << "lidar_event " << event_index << " " << scan_number << " "
             << pipeline->preprocess_scan_count << " " << raw_timestamp_s << " "
-            << point_count << " "
-            << result.surface.size() << " " << result.cut_clouds.size() << " "
-            << ground.ground_count << " " << ground.nonground_count << " "
-            << (rollback ? 1 : 0) << " " << (hard_offset_locked ? 1 : 0) << " "
+            << point_count << " " << result.surface.size() << " "
+            << result.cut_clouds.size() << " " << ground.ground_count << " "
+            << ground.nonground_count << " " << (rollback ? 1 : 0) << " "
+            << (hard_offset_locked ? 1 : 0) << " "
             << pipeline->hard_time.hard_offset_s() << " "
             << pipeline->synchronizer.lidar_buffer_size() << "\n";
     } else {
