@@ -24,10 +24,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Read Bazel version from .bazelversion
-        id: bazel-version
-        run: echo "version=$(cat .bazelversion)" >> $GITHUB_OUTPUT
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -43,7 +39,6 @@ jobs:
         with:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
-          bazel-version: ${{ steps.bazel-version.outputs.version }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -58,7 +53,7 @@ jobs:
 
           # Install Buildifier using Go
           # Todo(zero): different from ".pre-commit-config.yaml"
-          go install github.com/bazelbuild/buildtools/buildifier@latest
+          go install github.com/bazelbuild/buildtools/buildifier@v0.0.0-20260904073137-eaa4d125b423
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
       - name: Run Lint and Format Checks (PR Diff Mode)
@@ -69,8 +64,8 @@ jobs:
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
 
-      - name: Run Lint and Format Checks (Push Full Mode)
+      - name: Run Lint and Format Checks (Push Diff Mode)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          echo "Running apollo_lint.sh in full mode for push to main branch..."
-          ${{ github.workspace }}/scripts/ci/apollo_lint.sh --all
+          echo "Running apollo_lint.sh against the push commit..."
+          ${{ github.workspace }}/scripts/ci/apollo_lint.sh --all --diff "${{ github.event.before }}"

@@ -23,37 +23,36 @@ using PointType = pcl::PointXYZINormal;
 using PointCloudXYZI = pcl::PointCloud<PointType>;
 
 struct VelodynePoint {
-    float x = 0.0F;
-    float y = 0.0F;
-    float z = 0.0F;
-    float intensity = 0.0F;
-    float time_s = 0.0F;
-    std::uint16_t ring = 0;
+  float x = 0.0F;
+  float y = 0.0F;
+  float z = 0.0F;
+  float intensity = 0.0F;
+  float time_s = 0.0F;
+  std::uint16_t ring = 0;
 };
 
 struct VelodynePreprocessConfig {
-    double blind = 1.0;
-    int point_filter_num = 1;
-    int n_scans = 16;
-    int required_frame_num = 1;
-    int scan_count = 0;
+  double blind = 1.0;
+  int point_filter_num = 1;
+  int n_scans = 16;
+  int required_frame_num = 1;
+  int scan_count = 0;
 };
 
 struct VelodynePreprocessResult {
-    PointCloudXYZI surface;
-    std::deque<PointCloudXYZI> cut_clouds;
-    std::deque<double> cut_timestamps_ms;
-    bool given_offset_time = false;
+  PointCloudXYZI surface;
+  std::deque<PointCloudXYZI> cut_clouds;
+  std::deque<double> cut_timestamps_ms;
+  bool given_offset_time = false;
 };
 
 void validate_velodyne_preprocess_input(
-    const std::vector<VelodynePoint> &points,
-    double scan_timestamp_s,
+    const std::vector<VelodynePoint> &points, double scan_timestamp_s,
     const VelodynePreprocessConfig &config);
 
-VelodynePreprocessResult preprocess_velodyne_scan(
-    const std::vector<VelodynePoint> &points,
-    double scan_timestamp_s,
-    const VelodynePreprocessConfig &config);
+VelodynePreprocessResult
+preprocess_velodyne_scan(const std::vector<VelodynePoint> &points,
+                         double scan_timestamp_s,
+                         const VelodynePreprocessConfig &config);
 
 #endif
