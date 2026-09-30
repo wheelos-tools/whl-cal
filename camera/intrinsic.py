@@ -53,8 +53,9 @@ from camera.intrinsic_sampling import IntrinsicSamplingState
 from camera.intrinsic_solver import (
     build_undistortion_model,
     calibrate_camera,
-    mean_reprojection_error,
     normalize_distortion_model,
+    reprojection_residuals,
+    reprojection_summary,
     undistort_for_preview,
 )
 from camera.intrinsic_targets import CalibrationTargetDetector
@@ -461,18 +462,11 @@ class CameraCalibrator:
         return f"Coverage done: {action_text} ({remaining_samples} novel poses left)"
 
     def _coverage_metrics(self):
-        return coverage_metrics(self.sample_records, grid_shape=self.grid_shape)
-
-    def _per_view_reprojection_report(self, rvecs, tvecs):
-        return per_view_reprojection_report(
-            self.objpoints,
-            self.imgpoints,
-            self.mtx,
-            self.dist,
+        return coverage_metrics(
             self.sample_records,
-            rvecs,
-            tvecs,
-            distortion_model=self.distortion_model,
+            grid_shape=self.grid_shape,
+            samples_per_grid=self.samples_per_grid,
+            edge_corner_min_radius_ratio=self.sampling.edge_corner_min_radius_ratio,
         )
 
     def _distortion_monotonicity_report(self, image_size_wh):
@@ -487,7 +481,8 @@ class CameraCalibrator:
         self,
         output_yaml_path,
         *,
-        avg_error,
+        global_reprojection_rms,
+        solver_reported_rms,
         per_view_report,
         coverage,
         monotonicity_report,
@@ -498,9 +493,9 @@ class CameraCalibrator:
             sample_records=self.sample_records,
             capture_runtime_info=self.capture_runtime_info,
             calibration_target=self.target_detector.target_config(),
-            imgpoints=self.imgpoints,
             comparison_view_path=self.comparison_view_path,
-            avg_error=avg_error,
+            global_reprojection_rms=global_reprojection_rms,
+            solver_reported_rms=solver_reported_rms,
             per_view_report=per_view_report,
             coverage=coverage,
             monotonicity_report=monotonicity_report,
@@ -672,7 +667,7 @@ class CameraCalibrator:
         self.live_capture_handle = None
         cv2.destroyAllWindows()
         if self.capture_only:
-            if len(self.objpoints) >= self.min_total_samples:
+            if self.sampling.progress_snapshot()["stage"] == "ready_to_calibrate":
                 self._write_capture_session_manifest(status="capture_complete")
                 return 0
             self._write_capture_session_manifest(status="capture_incomplete")
@@ -692,10 +687,10 @@ class CameraCalibrator:
             return 3
         return 0
 
-    def run_offline(
+    def run_headless(
         self, images_dir: str, patterns=("*.png", "*.jpg", "*.jpeg")
     ) -> int:
-        """Process an offline image directory without opening the live GUI.
+        """Process a directory of images to run calibration without GUI.
 
         Returns 0 on success, 1 if no images found, 2 on calibration failure.
         """
@@ -777,10 +772,10 @@ class CameraCalibrator:
                     "[FAIL] Calibration finished but quality gates are not release-ready."
                 )
                 return 3
-            print("[PASS] Offline calibration completed.")
+            print("[PASS] Headless calibration completed.")
             return 0
         else:
-            print("[FAIL] Offline calibration failed.")
+            print("[FAIL] Headless calibration failed.")
             return 2
 
     def _build_undistortion_model(self, image_size_wh, alpha=None):
@@ -868,6 +863,11 @@ class CameraCalibrator:
                     self.feedback_text = (
                         f"Move target to uncovered cells ({remaining_cells} cells left)"
                     )
+                elif capture_reason == "move_to_outer_quadrants":
+                    missing = ", ".join(
+                        capture_decision.get("missing_outer_quadrants") or []
+                    )
+                    self.feedback_text = f"Move board corners outward: {missing}"
                 elif capture_reason == "pose_not_novel":
                     self.feedback_text = self._build_pose_rejection_feedback(
                         capture_decision
@@ -902,6 +902,8 @@ class CameraCalibrator:
             print(f"[OK] Captured sample #{sample_index} (diverse pose)")
         elif capture_reason == "coverage_needed":
             print(f"[OK] Captured sample #{sample_index} (coverage)")
+        elif capture_reason == "edge_coverage_needed":
+            print(f"[OK] Captured sample #{sample_index} (outer field coverage)")
         else:
             print(f"[OK] Captured sample #{sample_index}")
         refined = np.asarray(detection.image_points, dtype=np.float32).reshape(-1, 1, 2)
@@ -946,20 +948,7 @@ class CameraCalibrator:
             print("[ERROR] Calibration failed.")
             return
         self.mtx, self.dist = mtx, dist
-        per_view_report = self._per_view_reprojection_report(rvecs, tvecs)
-        err = self._reprojection_error(rvecs, tvecs)
-        print(f"[REPORT] Avg Reprojection Error: {err:.4f}px")
-        self._build_result_canv(w, h)
-        self._save_results(
-            w,
-            h,
-            err,
-            per_view_report=per_view_report,
-        )
-        self.state = "SHOWING_RESULT"
-
-    def _reprojection_error(self, rvecs, tvecs):
-        return mean_reprojection_error(
+        residual_views = reprojection_residuals(
             self.objpoints,
             self.imgpoints,
             self.mtx,
@@ -968,6 +957,23 @@ class CameraCalibrator:
             tvecs,
             distortion_model=self.distortion_model,
         )
+        reprojection = reprojection_summary(residual_views)
+        per_view_report = per_view_reprojection_report(
+            residual_views,
+            self.sample_records,
+        )
+        print(
+            f"[REPORT] Global Reprojection RMS: {reprojection['global_rms_px']:.4f}px"
+        )
+        self._build_result_canv(w, h)
+        self._save_results(
+            w,
+            h,
+            reprojection,
+            solver_reported_rms=float(ret),
+            per_view_report=per_view_report,
+        )
+        self.state = "SHOWING_RESULT"
 
     def _build_result_canv(self, w, h):
         print("[INFO] Generating Distortion Comparison View...")
@@ -987,7 +993,15 @@ class CameraCalibrator:
         print(f"[SAVED] {self.comparison_view_path}")
         self.result_canvas = canvas
 
-    def _save_results(self, w, h, error, *, per_view_report):
+    def _save_results(
+        self,
+        w,
+        h,
+        reprojection,
+        *,
+        solver_reported_rms,
+        per_view_report,
+    ):
         self._prepare_run_session(
             dataset_label=self.capture_session.label if self.capture_session else None
         )
@@ -1030,14 +1044,16 @@ class CameraCalibrator:
             per_view_reprojection_summary=_float_list_summary(
                 [float(row["rms_px"]) for row in per_view_report]
             ),
-            avg_reprojection_error=float(error),
+            global_reprojection_rms_px=float(reprojection["global_rms_px"]),
+            solver_reported_rms_px=float(solver_reported_rms),
         )
         with open(fname, "w") as f:
             yaml.dump(data, f, indent=4)
         print(f"[SAVED] Calibration file: {fname}")
         review_artifacts = self._write_review_artifacts(
             fname,
-            avg_error=error,
+            global_reprojection_rms=reprojection["global_rms_px"],
+            solver_reported_rms=solver_reported_rms,
             per_view_report=per_view_report,
             coverage=coverage,
             monotonicity_report=monotonicity_report,

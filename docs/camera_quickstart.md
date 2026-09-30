@@ -142,6 +142,14 @@ Customer review order:
 When `verdict` is not `accepted`, keep the diagnostics directory and recollect
 images according to `next_action`; do not release the intrinsic parameters.
 
+The release gate requires adequate sample/grid/outer-quadrant coverage, a
+consistent native image size, global corner-weighted reprojection RMS no
+greater than `1.0 px`, and the 95th percentile of per-view RMS no greater than
+`1.5 px`. The solver-reported RMS must agree with the recomputed residual RMS
+within `max(0.05 px, 10%)`, and the distortion projection must remain valid
+over the image field. These are review gates, not a substitute for checking
+capture quality and downstream camera performance.
+
 ## Developer build
 
 Container maintainers build the image from the repository root:

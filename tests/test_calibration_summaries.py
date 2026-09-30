@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
 import yaml
 
 from camera.intrinsic_evaluation import write_review_artifacts
@@ -22,10 +21,24 @@ class CalibrationCustomerSummaryTest(unittest.TestCase):
         coverage = {
             "occupied_cell_count": 9,
             "grid_counts": [[1, 1, 1], [1, 1, 1], [1, 1, 1]],
+            "minimum_cell_count": 1,
+            "required_samples_per_cell": 1,
             "horizontal_span_ratio": 0.8,
             "vertical_span_ratio": 0.8,
+            "edge_corner_coverage": {
+                "covered_quadrant_count": 4,
+                "required_quadrant_count": 4,
+            },
         }
-        per_view = [{"sample_index": index + 1, "rms_px": 0.2} for index in range(9)]
+        per_view = [
+            {
+                "sample_id": index + 1,
+                "rms_px": 0.2,
+                "p95_px": 0.3,
+                "point_count": 4,
+            }
+            for index in range(9)
+        ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calibration_path = root / "calibration.yaml"
@@ -38,9 +51,9 @@ class CalibrationCustomerSummaryTest(unittest.TestCase):
                     "actual_capture_resolution": {"width": 640, "height": 480}
                 },
                 calibration_target={"type": "chessboard"},
-                imgpoints=[np.zeros((4, 1, 2)) for _ in sample_records],
                 comparison_view_path=str(root / "comparison_view.png"),
-                avg_error=0.2,
+                global_reprojection_rms=0.2,
+                solver_reported_rms=0.2,
                 per_view_report=per_view,
                 coverage=coverage,
                 monotonicity_report={

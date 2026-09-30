@@ -14,7 +14,7 @@ This document preserves concise, user-facing snippets that were previously locat
 
 - Purpose: Intrinsic camera calibration using a chessboard.
 - Quick start:
-  - Install: `pip install opencv-python numpy pyyaml`
+  - Install: `pip install -e ".[camera]"`
   - Run: `camera-intrinsic-calibrate --config camera_config.yaml`
   - Controls: `S` save frame, `C` run calibration (>=20 frames), `Q` quit.
 - Output: `outputs/camera_intrinsic/runs/<session>/calibration.yaml` plus diagnostics and comparison views.

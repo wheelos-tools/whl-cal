@@ -7,6 +7,33 @@ import time
 import numpy as np
 
 
+def edge_corner_coverage(sample_records, min_radius_ratio=0.7):
+    """Summarize whether observed target corners constrain the image outer field."""
+    quadrants = set()
+    max_radius_ratio = 0.0
+    outer_corner_count = 0
+    for record in sample_records:
+        coverage = record.get("corner_coverage") or {}
+        max_radius_ratio = max(
+            max_radius_ratio,
+            float(coverage.get("max_radius_ratio", 0.0)),
+        )
+        if float(coverage.get("outer_radius_threshold", -1.0)) != float(
+            min_radius_ratio
+        ):
+            continue
+        outer_corner_count += int(coverage.get("outer_corner_count", 0))
+        quadrants.update(str(item) for item in coverage.get("outer_quadrants", []))
+    return {
+        "outer_radius_threshold": float(min_radius_ratio),
+        "max_observed_radius_ratio": float(max_radius_ratio),
+        "outer_corner_count": int(outer_corner_count),
+        "covered_quadrants": sorted(quadrants),
+        "covered_quadrant_count": int(len(quadrants)),
+        "required_quadrant_count": 4,
+    }
+
+
 class IntrinsicSamplingState:
     """Owns accepted samples, coverage, and capture stability state."""
 
@@ -37,6 +64,9 @@ class IntrinsicSamplingState:
         )
         self.pose_novelty_aspect_delta = float(
             auto_capture_cfg.get("pose_novelty_aspect_delta", 0.12)
+        )
+        self.edge_corner_min_radius_ratio = float(
+            auto_capture_cfg.get("edge_corner_min_radius_ratio", 0.7)
         )
         self.reset()
 
@@ -75,7 +105,10 @@ class IntrinsicSamplingState:
     def _cell_label(self, cell_y, cell_x):
         row_names = ["top", "middle", "bottom"]
         col_names = ["left", "center", "right"]
-        if len(row_names) == self.grid_shape[0] and len(col_names) == self.grid_shape[1]:
+        if (
+            len(row_names) == self.grid_shape[0]
+            and len(col_names) == self.grid_shape[1]
+        ):
             return f"{row_names[cell_y]}-{col_names[cell_x]}"
         return f"r{int(cell_y) + 1}c{int(cell_x) + 1}"
 
@@ -92,7 +125,9 @@ class IntrinsicSamplingState:
                         "label": self._cell_label(cell_y, cell_x),
                     }
                 )
-        cells.sort(key=lambda item: (int(item["count"]), int(item["y"]), int(item["x"])))
+        cells.sort(
+            key=lambda item: (int(item["count"]), int(item["y"]), int(item["x"]))
+        )
         return cells
 
     def coverage_complete(self):
@@ -104,121 +139,30 @@ class IntrinsicSamplingState:
     def sample_target_met(self):
         return bool(self.sample_count >= self.min_total_samples)
 
-    def pose_diversity_snapshot(self):
-        target_area_span = max(float(self.pose_novelty_area_delta) * 2.0, 0.08)
-        target_aspect_span = max(float(self.pose_novelty_aspect_delta) * 2.0, 0.24)
-        if not self.sample_records:
-            return {
-                "area_span": 0.0,
-                "aspect_span": 0.0,
-                "center_span_x": 0.0,
-                "center_span_y": 0.0,
-                "scale_diversity_ready": False,
-                "tilt_diversity_ready": False,
-                "target_area_span": float(target_area_span),
-                "target_aspect_span": float(target_aspect_span),
-            }
-
-        pose_summaries = [
-            self._pose_summary_from_record(sample_record)
-            for sample_record in self.sample_records
-        ]
-        area_values = [float(item.get("bbox_area_ratio", 0.0)) for item in pose_summaries]
-        aspect_values = [float(item.get("bbox_aspect_ratio", 0.0)) for item in pose_summaries]
-        center_x_values = [
-            float((item.get("center_xy_normalized") or {}).get("x", 0.0))
-            for item in pose_summaries
-        ]
-        center_y_values = [
-            float((item.get("center_xy_normalized") or {}).get("y", 0.0))
-            for item in pose_summaries
-        ]
-        area_span = float(max(area_values) - min(area_values)) if area_values else 0.0
-        aspect_span = float(max(aspect_values) - min(aspect_values)) if aspect_values else 0.0
-        center_span_x = (
-            float(max(center_x_values) - min(center_x_values)) if center_x_values else 0.0
+    def edge_corner_coverage_snapshot(self):
+        return edge_corner_coverage(
+            self.sample_records,
+            min_radius_ratio=self.edge_corner_min_radius_ratio,
         )
-        center_span_y = (
-            float(max(center_y_values) - min(center_y_values)) if center_y_values else 0.0
+
+    def edge_corner_coverage_complete(self):
+        coverage = self.edge_corner_coverage_snapshot()
+        return bool(
+            coverage["covered_quadrant_count"] >= coverage["required_quadrant_count"]
         )
-        return {
-            "area_span": float(area_span),
-            "aspect_span": float(aspect_span),
-            "center_span_x": float(center_span_x),
-            "center_span_y": float(center_span_y),
-            "scale_diversity_ready": bool(area_span >= target_area_span),
-            "tilt_diversity_ready": bool(aspect_span >= target_aspect_span),
-            "target_area_span": float(target_area_span),
-            "target_aspect_span": float(target_aspect_span),
-        }
-
-    def _build_operator_guidance(
-        self,
-        stage,
-        remaining_coverage_cells,
-        remaining_samples,
-        diversity,
-        sparsest_cells,
-    ):
-        if stage == "collect_coverage":
-            sparsest_preview = ", ".join(
-                f"{cell['label']}={cell['count']}" for cell in sparsest_cells[:3]
-            )
-            guidance_actions = [
-                (
-                    "Target the least-covered cells first: "
-                    f"{sparsest_preview}."
-                    if sparsest_preview
-                    else f"Shift the board into new image regions; {remaining_coverage_cells} coverage cells are still empty."
-                ),
-                "Keep the full board visible and avoid cropping at the image edge.",
-            ]
-            return {
-                "guidance_summary": "Stage 1: fill the remaining image regions first.",
-                "guidance_actions": guidance_actions,
-            }
-
-        if stage == "collect_diverse_samples":
-            guidance_actions = []
-            if not bool(diversity.get("scale_diversity_ready")):
-                guidance_actions.append(
-                    "Add a closer or farther view so the board size changes clearly in the image (about 15-25%)."
-                )
-            if not bool(diversity.get("tilt_diversity_ready")):
-                guidance_actions.append(
-                    "Add an oblique view by tilting the board left/right or up/down (about 10-20 degrees)."
-                )
-            if not guidance_actions:
-                guidance_actions.append(
-                    "Use a clearly different pose; simple translation is no longer enough after coverage is full."
-                )
-            guidance_actions.append(
-                "Hold each new pose steady until it is accepted and keep the full board visible."
-            )
-            return {
-                "guidance_summary": (
-                    f"Stage 2: coverage is complete; collect {remaining_samples} more novel poses."
-                ),
-                "guidance_actions": guidance_actions,
-            }
-
-        return {
-            "guidance_summary": "Coverage and sample target met; calibration can proceed.",
-            "guidance_actions": [
-                "Capture extra samples only if you want redundancy before solving.",
-            ],
-        }
 
     def progress_snapshot(self):
         coverage_complete = self.coverage_complete()
+        edge_coverage_complete = self.edge_corner_coverage_complete()
         sample_target_met = self.sample_target_met()
         if not coverage_complete:
             stage = "collect_coverage"
+        elif not edge_coverage_complete:
+            stage = "collect_edge_coverage"
         elif not sample_target_met:
             stage = "collect_diverse_samples"
         else:
             stage = "ready_to_calibrate"
-        diversity = self.pose_diversity_snapshot()
         heatmap = self.coverage_heatmap_snapshot()
         sparsest_cells = [
             dict(cell)
@@ -228,6 +172,7 @@ class IntrinsicSamplingState:
         progress = {
             "stage": stage,
             "coverage_complete": bool(coverage_complete),
+            "edge_corner_coverage_complete": bool(edge_coverage_complete),
             "sample_target_met": bool(sample_target_met),
             "coverage_cell_count": int(self.coverage_cell_count),
             "coverage_target_cell_count": int(self.coverage_target_cell_count),
@@ -236,18 +181,9 @@ class IntrinsicSamplingState:
             "sample_count": int(self.sample_count),
             "required_sample_count": int(self.min_total_samples),
             "remaining_required_samples": int(self.remaining_required_samples),
-            "pose_diversity": diversity,
+            "edge_corner_coverage": self.edge_corner_coverage_snapshot(),
             "sparsest_cells": sparsest_cells,
         }
-        progress.update(
-            self._build_operator_guidance(
-                stage,
-                int(progress["remaining_coverage_cells"]),
-                int(progress["remaining_required_samples"]),
-                diversity,
-                sparsest_cells,
-            )
-        )
         return progress
 
     def can_capture_now(self, now_s=None):
@@ -340,6 +276,29 @@ class IntrinsicSamplingState:
             "bbox_aspect_ratio": float(span_x / max(span_y, 1e-6)),
         }
 
+    def _corner_coverage(self, refined, image_size_wh):
+        width, height = int(image_size_wh[0]), int(image_size_wh[1])
+        corners = np.asarray(refined, dtype=float).reshape(-1, 2)
+        normalized = np.column_stack(
+            (
+                corners[:, 0] / max(width, 1) - 0.5,
+                corners[:, 1] / max(height, 1) - 0.5,
+            )
+        )
+        radius_ratios = np.linalg.norm(normalized, axis=1) / np.sqrt(0.5)
+        outer = normalized[radius_ratios >= float(self.edge_corner_min_radius_ratio)]
+        quadrants = set()
+        for point in outer:
+            vertical = "top" if point[1] < 0.0 else "bottom"
+            horizontal = "left" if point[0] < 0.0 else "right"
+            quadrants.add(f"{vertical}-{horizontal}")
+        return {
+            "outer_radius_threshold": float(self.edge_corner_min_radius_ratio),
+            "max_radius_ratio": float(np.max(radius_ratios, initial=0.0)),
+            "outer_corner_count": int(outer.shape[0]),
+            "outer_quadrants": sorted(quadrants),
+        }
+
     def _pose_summary_from_record(self, sample_record):
         pose_summary = dict(sample_record.get("pose_summary") or {})
         if pose_summary:
@@ -348,8 +307,12 @@ class IntrinsicSamplingState:
         center = dict(bbox.get("center_xy_normalized") or {})
         min_xy = bbox.get("min_xy_px") or {}
         max_xy = bbox.get("max_xy_px") or {}
-        span_x = float(max(float(max_xy.get("x", 0.0)) - float(min_xy.get("x", 0.0)), 0.0))
-        span_y = float(max(float(max_xy.get("y", 0.0)) - float(min_xy.get("y", 0.0)), 0.0))
+        span_x = float(
+            max(float(max_xy.get("x", 0.0)) - float(min_xy.get("x", 0.0)), 0.0)
+        )
+        span_y = float(
+            max(float(max_xy.get("y", 0.0)) - float(min_xy.get("y", 0.0)), 0.0)
+        )
         return {
             "center_xy_normalized": {
                 "x": float(center.get("x", 0.0)),
@@ -371,7 +334,9 @@ class IntrinsicSamplingState:
             prev_x = float(previous_pose["center_xy_normalized"]["x"])
             prev_y = float(previous_pose["center_xy_normalized"]["y"])
             center_distance = float(
-                np.linalg.norm(np.asarray([center_x - prev_x, center_y - prev_y], dtype=float))
+                np.linalg.norm(
+                    np.asarray([center_x - prev_x, center_y - prev_y], dtype=float)
+                )
             )
             area_delta = abs(
                 float(pose_summary["bbox_area_ratio"])
@@ -381,7 +346,10 @@ class IntrinsicSamplingState:
                 float(pose_summary["bbox_aspect_ratio"])
                 - float(previous_pose["bbox_aspect_ratio"])
             )
-            if closest_center_distance is None or center_distance < closest_center_distance:
+            if (
+                closest_center_distance is None
+                or center_distance < closest_center_distance
+            ):
                 closest_sample_id = int(sample_record.get("sample_id", 0))
                 closest_center_distance = float(center_distance)
                 closest_area_delta = float(area_delta)
@@ -409,6 +377,26 @@ class IntrinsicSamplingState:
             "closest_aspect_delta": closest_aspect_delta,
         }
 
+    def _edge_coverage_candidate(self, refined, image_size_wh):
+        candidate = self._corner_coverage(refined, image_size_wh)
+        current = self.edge_corner_coverage_snapshot()
+        missing = {
+            "top-left",
+            "top-right",
+            "bottom-left",
+            "bottom-right",
+        } - set(current["covered_quadrants"])
+        improves_coverage = bool(set(candidate["outer_quadrants"]) & missing)
+        return {
+            "accept": improves_coverage,
+            "capture_reason": (
+                "edge_coverage_needed"
+                if improves_coverage
+                else "move_to_outer_quadrants"
+            ),
+            "missing_outer_quadrants": sorted(missing),
+        }
+
     def evaluate_capture_candidate(self, refined, image_size_wh):
         occupied_cells = self.occupied_grid_cells(refined, image_size_wh)
         coverage_complete = self.coverage_complete()
@@ -431,6 +419,9 @@ class IntrinsicSamplingState:
                     ),
                 }
             )
+            return decision
+        if not self.edge_corner_coverage_complete():
+            decision.update(self._edge_coverage_candidate(refined, image_size_wh))
             return decision
         if self.sample_count >= self.min_total_samples:
             decision.update(
@@ -494,6 +485,7 @@ class IntrinsicSamplingState:
             ],
             "image_size_wh": {"width": width, "height": height},
             "pose_summary": self._pose_summary(refined, (width, height)),
+            "corner_coverage": self._corner_coverage(refined, (width, height)),
             "image_bbox": {
                 "min_xy_px": {"x": float(bbox_min[0]), "y": float(bbox_min[1])},
                 "max_xy_px": {"x": float(bbox_max[0]), "y": float(bbox_max[1])},

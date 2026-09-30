@@ -42,15 +42,15 @@ Recommended chessboard baseline config is tracked in `conf/camera_config_chess.y
 
 ## 4. Solver/evaluation contract
 
-- Reprojection metric is **2D RMS per view**, then averaged across valid views.
-- Do not use `L2 / N`; correct 2D RMS is `L2 / sqrt(N)`.
-- Quality gates should always include:
-  - sample count
-  - image coverage
-  - average reprojection
-  - per-view reprojection p95
-  - radial monotonicity
-  - sample-image-size consistency
+- Compute one residual vector per view and report global corner-weighted 2D RMS
+  plus per-view RMS and p95 tails. Do not use `L2 / N`; 2D RMS is
+  `L2 / sqrt(N)`.
+- Keep the five release gates aligned with `camera.intrinsic_evaluation`:
+  sample sufficiency/coverage, capture mode and image-size consistency,
+  reprojection fit, solver/residual consistency, and projection validity.
+- Treat solver/residual disagreement and non-monotonic distortion as rejected
+  runs. Reprojection thresholds do not replace image coverage or downstream
+  validation.
 
 ## 5. Artifacts to trust
 
@@ -79,6 +79,7 @@ Critical fields:
 ## 6. Common failure patterns
 
 - Low reprojection with center-heavy samples can still fail downstream robustness.
+- Treat solver/residual disagreement and non-monotonic distortion as rejected runs.
 - Mixed capture resolutions in one run invalidates the intrinsic result.
 - Incorrect lens model selection can present as unstable or non-monotonic distortion.
 - A visually broken `comparison_view.png` means the run is not reviewable.

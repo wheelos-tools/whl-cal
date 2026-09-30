@@ -46,12 +46,29 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+The base package installs only the shared numerical and YAML dependencies. Install
+the extra matching the calibration workflow you need:
+
+```bash
+pip install -e ".[camera]"
+pip install -e ".[camera2camera]"
+pip install -e ".[lidar2lidar]"
+pip install -e ".[lidar2imu]"
+pip install -e ".[lidar2camera]"
+```
+
+To install every calibration workflow in one environment, combine all extras:
+
+```bash
+pip install -e ".[all]"
+```
+
 If the default PyPI route is slow or unstable in this environment, switch pip to
 the Tsinghua mirror inside the active virtual environment first:
 
 ```bash
 python -m pip config --site set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-pip install -e .
+pip install -e ".[all]"
 ```
 
 ## Common workflow

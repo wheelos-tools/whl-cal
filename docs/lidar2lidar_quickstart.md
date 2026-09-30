@@ -11,7 +11,7 @@ P26-06-16
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[lidar2lidar]"
 ```
 
 ## 1. 采集
