@@ -5,7 +5,7 @@ The release surfaces are split by runtime role:
 | Image | User workflow | Runtime |
 | --- | --- | --- |
 | `whl-cal-camera` | Visible live capture or offline image calibration | Python, OpenCV GUI |
-| `whl-cal-lidar2imu` | Apollo record/ROS1 bag to native GRIL result | Python adapter, ROS-free native GRIL |
+| `whl-cal-lidar2imu` | Local review: Apollo record/ROS1 bag to native GRIL result | Python adapter, ROS-free native GRIL |
 
 Both images use read-only `/data` input and writable `/output` artifacts.
 Customer-facing results are written to `customer_summary.yaml`; detailed
@@ -13,7 +13,11 @@ developer evidence remains in diagnostics, manifests, and traces.
 
 ## LiDAR-to-IMU
 
-The publish build uses the validated local runtime bundle under
+This is a controlled local review build, not a published customer image. The
+native GRIL release remains blocked by the algorithm-equivalence,
+physical-validation, and license gates in `third_party/gril_native/README.md`.
+
+The local build uses the validated runtime bundle under
 `docker/lidar2imu/runtime/`. This ignored directory is assembled from cached
 native binaries and their exact `ldd` dependency closure; the build does not
 download or rebuild native dependencies.
@@ -53,9 +57,8 @@ docker run --rm \
 The image does not contain ROS. Its fixed entrypoint supplies the native
 executable and reviewed Vanjee-16 configuration.
 
-The native GRIL source remains `review-only`. Do not push this image to an
-external registry until the physical-accuracy and license/provenance gates in
-`third_party/gril_native/README.md` are approved.
+Record the image digest for every controlled validation run. Do not push this
+image to an external registry until all release gates are approved.
 
 ## Camera intrinsic
 

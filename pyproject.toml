@@ -40,9 +40,9 @@ lidar2lidar = [
 ]
 lidar2imu = [
   "flatbuffers",
-  "open3d",
   "protobuf==3.19.4",
-  "cyber_record"
+  "cyber-record==0.1.8",
+  "rosbags==0.11.5",
 ]
 lidar2camera = [
   "flatbuffers",

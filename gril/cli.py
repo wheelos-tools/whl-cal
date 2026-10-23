@@ -8,7 +8,7 @@ from pathlib import Path
 import yaml
 
 from gril.abtest import build_abtest_report, write_abtest_report
-from gril.adapters import ApolloRecordAdapter, Rosbag1Adapter
+from gril.adapters import create_adapter, supported_input_types
 from gril.adapters.base import AdapterConfig
 from gril.comparison import compare_datasets, compare_results, parse_gril_result
 from gril.dataset_io import load_dataset, write_dataset
@@ -40,12 +40,7 @@ def _prepare(args: argparse.Namespace) -> None:
         start_ns=None if args.start_sec is None else int(args.start_sec * 1e9),
         end_ns=None if args.end_sec is None else int(args.end_sec * 1e9),
     )
-    adapter = (
-        ApolloRecordAdapter(config)
-        if args.input_type == "record"
-        else Rosbag1Adapter(config)
-    )
-    dataset = adapter.read()
+    dataset = create_adapter(args.input_type, config).read()
     manifest = write_dataset(dataset, args.output_dir)
     write_input_contract(dataset, args.output_dir)
     print(manifest)
@@ -141,12 +136,7 @@ def _run_native_frontend_trace(args: argparse.Namespace) -> None:
         start_ns=None,
         end_ns=None,
     )
-    adapter = (
-        ApolloRecordAdapter(adapter_config)
-        if args.input_type == "record"
-        else Rosbag1Adapter(adapter_config)
-    )
-    dataset = adapter.read()
+    dataset = create_adapter(args.input_type, adapter_config).read()
     manifest = write_dataset(dataset, dataset_dir)
     write_input_contract(dataset, dataset_dir)
     result = run_native_frontend(
@@ -177,12 +167,7 @@ def _run_native_full(args: argparse.Namespace) -> None:
             start_ns=None,
             end_ns=None,
         )
-        adapter = (
-            ApolloRecordAdapter(adapter_config)
-            if args.input_type == "record"
-            else Rosbag1Adapter(adapter_config)
-        )
-        dataset = adapter.read()
+        dataset = create_adapter(args.input_type, adapter_config).read()
         dataset_manifest = write_dataset(dataset, dataset_dir)
         write_input_contract(dataset, dataset_dir)
 
@@ -221,7 +206,7 @@ def _add_prepare(subparsers) -> None:
         "prepare", help="Convert record or ROS1 bag input to the canonical dataset"
     )
     parser.add_argument("--input", type=Path, action="append", required=True)
-    parser.add_argument("--input-type", choices=("record", "bag"), required=True)
+    parser.add_argument("--input-type", choices=supported_input_types(), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--lidar-topic",
@@ -325,7 +310,9 @@ def _add_native_frontend_trace_run(subparsers) -> None:
         help="Run only preprocessing/sync/Patchwork migration traces",
     )
     parser.add_argument("--input", type=Path, action="append", required=True)
-    parser.add_argument("--input-type", choices=("record", "bag"), default="record")
+    parser.add_argument(
+        "--input-type", choices=supported_input_types(), default="record"
+    )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--frontend-event-executable", type=Path, required=True)
     parser.add_argument("--ground-executable", type=Path, required=True)
@@ -349,7 +336,7 @@ def _add_native_full_run(subparsers) -> None:
     parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument(
         "--input-type",
-        choices=("record", "bag", "canonical"),
+        choices=(*supported_input_types(), "canonical"),
         default="record",
     )
     parser.add_argument("--config", type=Path, required=True)

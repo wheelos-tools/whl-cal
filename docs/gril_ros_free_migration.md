@@ -104,6 +104,13 @@ gril-migrate prepare \
 The output contains `dataset.yaml`, `lidar.npz`, `imu.npz`, and
 `input_contract.yaml`. Array hashes, frame IDs, point-time semantics, source
 paths, rejected counts, and transform metadata are recorded in the manifest.
+Input-specific decoding is isolated in `gril.adapters`; each adapter returns
+the same validated `CanonicalDataset` consumed by the native runner. Add new
+input formats by adding an adapter and registering its CLI name in
+`gril.adapters`; the CLI choices are derived from that registry. The canonical
+schema's `source_type` is provenance metadata, not an algorithm selector.
+Compare new adapters' canonical arrays against a trusted conversion before
+running the unchanged frontend and solver.
 
 Run the complete native frontend directly from an Apollo record:
 
@@ -406,10 +413,12 @@ visualization publishers are removed from the production target.
 
 The CMake tree is currently a **developer/research source build only**. It
 does not define a distributable install or CPack artifact, and its explicit
-`cmake --install` gate fails until release approval. `pip install` only
-installs the Python `gril-migrate` migration/evidence CLI; it does not compile
-or bundle `gril_native_full_frontend`. There is no native-runtime Docker image,
-installer, or wheel available or implied by this documentation.
+`cmake --install` gate fails until release approval. `pip install -e
+".[lidar2imu]"` installs the Python record/bag adapters and CLI; it does not
+compile or bundle `gril_native_full_frontend`. The repository has a controlled
+local Docker build definition, but it requires ignored native runtime
+artifacts and a local Python dependency-cache image; no public image, installer,
+or wheel is available or implied by this documentation.
 
 Do not create a native installer, publish a binary, or describe a calibration
 result as a production release until all of these are complete:
