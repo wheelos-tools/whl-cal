@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
-from gril.adapters.apollo_record import ApolloRecordAdapter
 from gril.adapters.base import AdapterConfig, InputAdapter
+from gril.adapters.core_record import CoreApolloRecordAdapter
 from gril.adapters.rosbag1 import Rosbag1Adapter
 
 ADAPTERS = MappingProxyType(
     {
-        "record": ApolloRecordAdapter,
+        "record": CoreApolloRecordAdapter,
         "bag": Rosbag1Adapter,
     }
 )
@@ -34,8 +34,8 @@ def create_adapter(input_type: str, config: AdapterConfig) -> InputAdapter:
 
 
 __all__ = [
-    "ApolloRecordAdapter",
     "ADAPTERS",
+    "CoreApolloRecordAdapter",
     "Rosbag1Adapter",
     "create_adapter",
     "supported_input_types",

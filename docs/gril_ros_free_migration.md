@@ -32,7 +32,7 @@ migration oracle, not a fallback production release.
 | Layer | Status |
 | --- | --- |
 | frozen deterministic ROS reference | retained and executable |
-| Apollo record adapter | implemented |
+| Apollo record ingress through Bzlmod `wheelos_core` | implemented; current path |
 | ROS1 bag adapter without ROS runtime | implemented |
 | canonical record/bag equivalence | passed on the 0827 capture |
 | GRIL batch optimizer | migrated to normal CMake without ROS |
@@ -83,12 +83,21 @@ from LI-Init.
 
 ## Canonical input
 
-Both Apollo record and ROS1 bag inputs are converted without starting ROS:
+Apollo records use the Bzlmod `wheelos_core` C++ ingress. ROS1 bag inputs use
+the offline `rosbags` adapter. Both are converted without starting a ROS
+runtime. Build the record ingress first:
 
 ```bash
+cd tools/gril_record_core_reader
+bazel build \
+  --override_module=wheelos_core=/path/to/apollo-lite/pkgs/core \
+  //:record_ingress
+cd ../..
+
 gril-migrate prepare \
   --input capture.record.00000 \
   --input-type record \
+  --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
   --imu-topic /apollo/sensor/gnss/imu \
   --output-dir outputs/gril/datasets/record
@@ -112,14 +121,15 @@ schema's `source_type` is provenance metadata, not an algorithm selector.
 Compare new adapters' canonical arrays against a trusted conversion before
 running the unchanged frontend and solver.
 
-The validated Weilan 0827 direct-record adapter output matches the existing
-ROS1 bag canonical dataset exactly: 1,375 scans, 35,239,034 points, 13,741 IMU
-samples, and zero maximum difference across timestamps and numeric arrays.
-This is data-ingress equivalence evidence only; it does not replace the
-frozen-reference result gate or independent physical holdout. Keep all future
-format support inside adapters and do not change the GRIL native boundary,
-algorithm configuration, preprocessing, frontend, or solver to accommodate
-the input format.
+The validated Weilan 0827 C++ record ingress matches the trusted canonical
+dataset exactly: 1,375 scans, 35,239,034 points, 13,741 IMU samples, and zero
+maximum difference across timestamps and numeric arrays. See the
+[wheelos_core baseline](lidar2imu_wheelos_core_baseline.md) for its pinned
+revision, hashes, runtime, and artifacts. This is data-ingress equivalence
+evidence only; it does not replace the frozen-reference result gate or
+independent physical holdout. Keep future format support inside adapters and
+do not change the GRIL native boundary, algorithm configuration, preprocessing,
+frontend, or solver to accommodate an input format.
 
 Run the complete native frontend directly from an Apollo record:
 
@@ -127,6 +137,7 @@ Run the complete native frontend directly from an Apollo record:
 gril-migrate run-native-frontend \
   --input capture.record.00000 \
   --input-type record \
+  --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
   --executable third_party/gril_native/build/gril_native_full_frontend \
   --output-dir outputs/gril/native
@@ -169,6 +180,8 @@ The earlier partial evidence command remains available under an accurate name:
 ```bash
 gril-migrate run-native-frontend-trace \
   --input capture.record.00000 \
+  --input-type record \
+  --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
   --frontend-event-executable build/gril_native_frontend_event_trace \
   --ground-executable build/gril_native_ground_trace \
@@ -423,14 +436,15 @@ visualization publishers are removed from the production target.
 The CMake tree is currently a **developer/research source build only**. It
 does not define a distributable install or CPack artifact, and its explicit
 `cmake --install` gate fails until release approval. `pip install -e
-".[lidar2imu]"` installs the Python record/bag adapters and CLI; it does not
+".[lidar2imu]"` installs the Python bag/validation dependencies and CLI; it does not
 compile or bundle `gril_native_full_frontend`. The repository has a controlled
 local Docker build definition, but it requires ignored native runtime
 artifacts and a local Python dependency-cache image; no public image, installer,
 or wheel is available or implied by this documentation.
 
-The Python ingress extra is `pip install -e ".[lidar2imu]"`. It supports
-Apollo `.record` and offline ROS1 `.bag` parsing without ROS; live ROS topic
+The Python extra is `pip install -e ".[lidar2imu]"`; it provides dependencies
+for offline bag parsing and ingress validation. Apollo `.record` decoding uses
+the Bzlmod `wheelos_core` C++ adapter, not a Python decoder. Live ROS topic
 subscription is not implemented. The frozen ROS reference is separate and
 uses Docker/ROS Noetic only for migration comparison.
 

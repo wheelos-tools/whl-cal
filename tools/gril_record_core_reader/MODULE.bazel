@@ -1,0 +1,3 @@
+module(name = "gril_record_core_reader_probe", version = "0.1.0")
+
+bazel_dep(name = "wheelos_core", version = "1.0.5")

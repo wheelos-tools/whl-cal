@@ -39,6 +39,7 @@ def _prepare(args: argparse.Namespace) -> None:
         scan_lines=args.scan_lines,
         start_ns=None if args.start_sec is None else int(args.start_sec * 1e9),
         end_ns=None if args.end_sec is None else int(args.end_sec * 1e9),
+        core_record_ingress=args.core_record_ingress,
     )
     dataset = create_adapter(args.input_type, config).read()
     manifest = write_dataset(dataset, args.output_dir)
@@ -135,6 +136,7 @@ def _run_native_frontend_trace(args: argparse.Namespace) -> None:
         scan_lines=args.scan_lines,
         start_ns=None,
         end_ns=None,
+        core_record_ingress=args.core_record_ingress,
     )
     dataset = create_adapter(args.input_type, adapter_config).read()
     manifest = write_dataset(dataset, dataset_dir)
@@ -166,6 +168,7 @@ def _run_native_full(args: argparse.Namespace) -> None:
             scan_lines=args.scan_lines,
             start_ns=None,
             end_ns=None,
+            core_record_ingress=args.core_record_ingress,
         )
         dataset = create_adapter(args.input_type, adapter_config).read()
         dataset_manifest = write_dataset(dataset, dataset_dir)
@@ -207,6 +210,7 @@ def _add_prepare(subparsers) -> None:
     )
     parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument("--input-type", choices=supported_input_types(), required=True)
+    parser.add_argument("--core-record-ingress", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--lidar-topic",
@@ -313,6 +317,7 @@ def _add_native_frontend_trace_run(subparsers) -> None:
     parser.add_argument(
         "--input-type", choices=supported_input_types(), default="record"
     )
+    parser.add_argument("--core-record-ingress", type=Path)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--frontend-event-executable", type=Path, required=True)
     parser.add_argument("--ground-executable", type=Path, required=True)
@@ -339,6 +344,7 @@ def _add_native_full_run(subparsers) -> None:
         choices=(*supported_input_types(), "canonical"),
         default="record",
     )
+    parser.add_argument("--core-record-ingress", type=Path)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--executable", type=Path, required=True)
     parser.add_argument(

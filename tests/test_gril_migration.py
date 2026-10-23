@@ -12,13 +12,13 @@ from common.geometry import euler_xyz_degrees_to_matrix, quaternion_xyzw_to_matr
 from gril.abtest import build_abtest_report
 from gril.adapters import (
     ADAPTERS,
-    ApolloRecordAdapter,
+    CoreApolloRecordAdapter,
     Rosbag1Adapter,
     create_adapter,
     supported_input_types,
 )
-from gril.adapters.apollo_record import _record_paths
 from gril.adapters.base import AdapterConfig
+from gril.adapters.record_files import record_paths
 from gril.cli import build_parser
 from gril.comparison import compare_datasets, compare_results, parse_gril_result
 from gril.config import compare_configs, config_digest, load_algorithm_config
@@ -79,7 +79,8 @@ class GrilDatasetTest(unittest.TestCase):
             lidar_topic="/lidar",
             imu_topic="/imu",
         )
-        self.assertIsInstance(create_adapter("record", config), ApolloRecordAdapter)
+        self.assertIsInstance(create_adapter("record", config), CoreApolloRecordAdapter)
+        self.assertNotIn("record-core", supported_input_types())
         self.assertIsInstance(create_adapter("bag", config), Rosbag1Adapter)
         with self.assertRaisesRegex(ValueError, "Unsupported GRIL input type"):
             create_adapter("canonical", config)
@@ -125,7 +126,7 @@ class GrilDatasetTest(unittest.TestCase):
             for path in expected:
                 path.touch()
             (root / "notes.txt").touch()
-            paths = _record_paths(
+            paths = record_paths(
                 AdapterConfig(
                     inputs=(root,),
                     lidar_topic="/lidar",
