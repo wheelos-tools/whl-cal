@@ -5,32 +5,53 @@ stability: review-only
 
 # LiDAR-to-IMU calibration
 
-The delivered container runs the ROS-free native GRIL pipeline. It includes the
-record adapter, reviewed Vanjee-16 configuration, native frontend, and batch
-solver. The customer does not install ROS, Python, Ceres, Eigen, or PCL.
+Native GRIL consumes a validated canonical dataset. Apollo `.record` and
+offline ROS1 `.bag` have separate adapters and do not require ROS to be
+installed or running. Real-time ROS topic subscription is not implemented.
+The native frontend and solver are shared across input formats.
 
-## 1. Get the image
+This is a developer/research source build, not a published customer installer
+or registry image. The 0827 result remains review-only; successful execution
+does not prove calibration accuracy.
 
-Use the exact version supplied with the release:
-
-```bash
-docker pull <registry>/whl-cal-lidar2imu:<version>
-export WHL_LIDAR2IMU_IMAGE=<registry>/whl-cal-lidar2imu:<version>
-```
-
-For an offline delivery package:
+## 1. Install the data adapters
 
 ```bash
-docker load -i whl-cal-lidar2imu-<version>.tar
-export WHL_LIDAR2IMU_IMAGE=whl-cal-lidar2imu:<version>
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[lidar2imu]"
 ```
 
-Record the immutable image digest together with every calibration result.
+The extra installs Apollo record decoding and ROS1 bag parsing through
+`rosbags`. It does not install ROS or build the native GRIL executable.
 
-## 2. Prepare data
+## 2. Build the native GRIL runtime
 
-Place one Apollo record or all continuous split records from the same capture in
-one directory:
+The complete frontend requires C++14, CMake 3.16+, Eigen 3.3.7, PCL with
+compatible OpenMP support, Ceres 2.0+, and pthreads. Install these from a
+reviewed toolchain, then run:
+
+```bash
+cmake -S third_party/gril_native -B third_party/gril_native/build
+cmake --build third_party/gril_native/build
+ctest --test-dir third_party/gril_native/build --output-on-failure
+```
+
+If the host Eigen version is not 3.3.7, provide the reviewed headers:
+
+```bash
+cmake -S third_party/gril_native -B third_party/gril_native/build \
+  -DGRIL_PINNED_EIGEN_INCLUDE_DIR=/path/to/eigen-3.3.7
+cmake --build third_party/gril_native/build
+```
+
+Do not run `cmake --install`; the native install gate remains closed pending
+algorithm-equivalence, physical-validation, and license/provenance approval.
+
+## 3. Prepare and validate input
+
+For Apollo record, pass one shard or the directory containing all continuous
+split shards:
 
 ```text
 capture/
@@ -39,54 +60,53 @@ capture/
 └── capture.record.00002
 ```
 
-The default topics are:
+Set the capture directory, then use the reviewed Vanjee-16 defaults:
 
 ```text
 LiDAR: /apollo/sensor/vanjeelidar/up/PointCloud2
 IMU:   /apollo/sensor/gnss/imu
 ```
 
-The default sensor profile expects a 16-line Vanjee LiDAR. Do not silently use
-it for another sensor model or installation.
-
-## 3. Run calibration
-
 ```bash
-mkdir -p "$PWD/lidar2imu-output"
-
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --mount type=bind,src="$PWD/capture",dst=/data,readonly \
-  --mount type=bind,src="$PWD/lidar2imu-output",dst=/output \
-  "$WHL_LIDAR2IMU_IMAGE" \
-  --input /data \
-  --input-type record \
-  --output-dir /output
+RECORD_DIR=/path/to/capture
 ```
 
-For alternate topics:
+Create a canonical dataset without running the algorithm:
 
 ```bash
-docker run --rm \
-  --user "$(id -u):$(id -g)" \
-  --mount type=bind,src="$PWD/capture",dst=/data,readonly \
-  --mount type=bind,src="$PWD/lidar2imu-output",dst=/output \
-  "$WHL_LIDAR2IMU_IMAGE" \
-  --input /data \
+gril-migrate prepare \
+  --input "$RECORD_DIR" \
   --input-type record \
-  --output-dir /output \
-  --lidar-topic /apollo/sensor/lidar/PointCloud2 \
+  --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
   --imu-topic /apollo/sensor/gnss/imu \
-  --scan-lines 16
+  --scan-lines 16 \
+  --output-dir outputs/gril/0827-record/dataset
 ```
 
-ROS1 bag and canonical datasets are selected with `--input-type bag` and
-`--input-type canonical`.
+For a ROS1 bag, use `--input-type bag`, the bag path, and its actual LiDAR and
+IMU topics. This is offline bag decoding, not live ROS integration. Check IMU
+timestamp provenance for every capture before selecting the topic. Audit a new
+adapter against trusted canonical arrays with `gril-migrate compare-datasets`;
+do not use the configured extrinsic as conversion truth.
 
-## 4. Read the result
+## 4. Run native GRIL
+
+```bash
+gril-migrate run-native \
+  --input outputs/gril/0827-record/dataset \
+  --input-type canonical \
+  --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
+  --executable third_party/gril_native/build/gril_native_full_frontend \
+  --output-dir outputs/gril/0827-record/run
+```
+
+Using `--input-type canonical` skips extraction only. It does not change or skip
+the GRIL frontend, preprocessing, synchronization, or solver.
+
+## 5. Review outputs
 
 ```text
-lidar2imu-output/
+outputs/gril/0827-record/run/
 ├── customer_summary.yaml
 ├── GRIL_Calib_result.txt
 ├── manifest.yaml
@@ -95,46 +115,24 @@ lidar2imu-output/
 └── GRIL_batch_trace_v1.txt
 ```
 
-Customer review order:
-
-1. `customer_summary.yaml`: complete rotation, translation, time offset, and
-   current verdict.
-2. `GRIL_Calib_result.txt`: native solver result.
-3. Published trajectory and accumulated-point-cloud review artifacts when the
-   release workflow supplies them.
-
-The current native GRIL customer verdict is intentionally `review_required`.
-Solver completion does not prove horizontal lever-arm or yaw/time accuracy.
+Review `customer_summary.yaml`, then the native result and traces. The current
+verdict is intentionally `review_required`; solver completion does not prove
+horizontal lever-arm, yaw/time, or physical accuracy.
 
 ## Release status
 
-The container is ready for local and controlled review. External customer
-distribution remains blocked until:
+There is no public installer or customer registry image. External distribution
+remains blocked until native/reference equivalence, independent physical
+holdout, and GRIL/LI-Init plus transitive dependency license provenance are
+approved.
 
-1. native/reference rotation equivalence is accepted;
-2. independent physical trajectory and point-cloud holdout accepts the result;
-3. GRIL/LI-Init and transitive dependency license provenance is approved.
+## Optional local Docker review
 
-## Developer build
-
-The Docker build consumes the validated bundle under
-`docker/lidar2imu/runtime/`; it does not download or rebuild native
-dependencies. Maintainers create that ignored bundle from the approved cache:
-
-```bash
-python docker/lidar2imu/prepare_cached_runtime.py \
-  --frontend /path/to/cache/gril_native_full_frontend \
-  --batch /path/to/cache/gril_native_batch \
-  --library-prefix /path/to/cache/runtime-prefix
-
-docker build -f docker/lidar2imu/Dockerfile \
-  --network=none \
-  -t whl-cal-lidar2imu:<version> .
-```
-
-Maintainers must rebuild and test native GRIL before creating an image after C++
-source changes. Detailed metrics remain documented in
-[`calibration_metric_layers.md`](calibration_metric_layers.md).
+The Dockerfile uses ignored files under `docker/lidar2imu/runtime/` and the
+local `whl-cal-lidar2imu:slim` dependency-cache image. It is a controlled local
+review path, not a published installer. See [container instructions](../docker/README.md)
+for bundle preparation and image build steps. Rebuild and test native GRIL
+after any C++ source change.
 
 For a research run that produces `GRIL_batch_trace_v1.txt`, inspect timing
 support before using the reported time offset:

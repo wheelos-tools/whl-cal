@@ -10,6 +10,13 @@ import yaml
 
 from common.geometry import euler_xyz_degrees_to_matrix, quaternion_xyzw_to_matrix
 from gril.abtest import build_abtest_report
+from gril.adapters import (
+    ADAPTERS,
+    ApolloRecordAdapter,
+    Rosbag1Adapter,
+    create_adapter,
+    supported_input_types,
+)
 from gril.adapters.apollo_record import _record_paths
 from gril.adapters.base import AdapterConfig
 from gril.cli import build_parser
@@ -66,6 +73,48 @@ def _dataset() -> CanonicalDataset:
 
 
 class GrilDatasetTest(unittest.TestCase):
+    def test_data_source_factory_selects_only_ingress_adapter(self) -> None:
+        config = AdapterConfig(
+            inputs=(Path("capture"),),
+            lidar_topic="/lidar",
+            imu_topic="/imu",
+        )
+        self.assertIsInstance(create_adapter("record", config), ApolloRecordAdapter)
+        self.assertIsInstance(create_adapter("bag", config), Rosbag1Adapter)
+        with self.assertRaisesRegex(ValueError, "Unsupported GRIL input type"):
+            create_adapter("canonical", config)
+
+    def test_cli_source_choices_follow_adapter_registry(self) -> None:
+        expected = supported_input_types()
+        parser = build_parser()
+        subparsers = next(
+            action
+            for action in parser._actions
+            if isinstance(action, __import__("argparse")._SubParsersAction)
+        )
+        prepare = subparsers.choices["prepare"]
+        trace = subparsers.choices["run-native-frontend-trace"]
+        native = subparsers.choices["run-native-frontend"]
+        self.assertEqual(
+            next(
+                action for action in prepare._actions if action.dest == "input_type"
+            ).choices,
+            expected,
+        )
+        self.assertEqual(
+            next(
+                action for action in trace._actions if action.dest == "input_type"
+            ).choices,
+            expected,
+        )
+        self.assertEqual(
+            next(
+                action for action in native._actions if action.dest == "input_type"
+            ).choices,
+            (*expected, "canonical"),
+        )
+        self.assertEqual(set(ADAPTERS), set(expected))
+
     def test_apollo_record_directory_expands_split_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -94,10 +143,23 @@ class GrilDatasetTest(unittest.TestCase):
 
     def test_round_trip_and_equivalence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            manifest = write_dataset(_dataset(), Path(directory))
+            dataset = _dataset()
+            dataset = CanonicalDataset(
+                source_type="future_ros2_adapter",
+                source_files=dataset.source_files,
+                lidar_topic=dataset.lidar_topic,
+                imu_topic=dataset.imu_topic,
+                lidar=dataset.lidar,
+                imu=dataset.imu,
+                transforms=dataset.transforms,
+                metadata=dataset.metadata,
+                schema_version=dataset.schema_version,
+            )
+            manifest = write_dataset(dataset, Path(directory))
             loaded = load_dataset(manifest)
-        comparison = compare_datasets(_dataset(), loaded)
+        comparison = compare_datasets(dataset, loaded)
         self.assertEqual(comparison["verdict"], "equivalent")
+        self.assertEqual(loaded.source_type, "future_ros2_adapter")
 
     def test_hash_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

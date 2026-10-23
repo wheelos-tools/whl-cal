@@ -8,7 +8,7 @@ workflows.
 | Module | Current status | Practical recommendation |
 | --- | --- | --- |
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
-| `gril` / LiDAR-to-IMU | sole LiDAR-to-IMU algorithm; research-only ROS-free source build | iterate on native GRIL only; its 0827 full A/B rotation discrepancy is `0.406964 deg` versus a `0.2 deg` gate, so production release is not yet approved ([release gate](docs/gril_ros_free_migration.md)) |
+| `gril` / LiDAR-to-IMU | sole LiDAR-to-IMU algorithm; research-only ROS-free native build | iterate on native GRIL only; its 0827 full A/B rotation discrepancy is `0.406964 deg` versus a `0.2 deg` gate, so production release is not yet approved ([release gate](docs/gril_ros_free_migration.md)) |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
 | `camera2camera` | target-based stereo baseline exists | use the checkerboard paired-image pipeline as the current production baseline; add ChArUco next |
 | `lidar2camera` | target-based industrial baseline exists | use the target-based pipeline as the current production baseline; keep targetless paths experimental |
@@ -46,8 +46,8 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-The base package installs only the shared numerical and YAML dependencies. Install
-the extra matching the calibration workflow you need:
+The base package installs only the shared numerical and YAML dependencies.
+Install the extra matching the calibration workflow you need:
 
 ```bash
 pip install -e ".[camera]"
@@ -62,6 +62,16 @@ To install every calibration workflow in one environment, combine all extras:
 ```bash
 pip install -e ".[all]"
 ```
+
+The `lidar2imu` extra installs the Apollo record and ROS1 bag data adapters. It
+does not install ROS, compile GRIL, or include the native GRIL executables.
+Offline bag parsing uses `rosbags` without a ROS installation or ROS master.
+Record and bag inputs converge to the same canonical dataset before entering
+the native frontend and solver. The native executable must be built separately
+with CMake and the reviewed Eigen/PCL/Ceres toolchain; this is currently a
+developer/research workflow, not a production installer. See the
+[LiDAR-to-IMU quick start](docs/lidar2imu_quickstart.md) for the exact steps
+and release restrictions.
 
 If the default PyPI route is slow or unstable in this environment, switch pip to
 the Tsinghua mirror inside the active virtual environment first:

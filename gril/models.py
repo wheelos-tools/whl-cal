@@ -138,6 +138,8 @@ class StaticTransform:
 
 @dataclass(frozen=True)
 class CanonicalDataset:
+    """Adapter-neutral GRIL input; source_type records provenance only."""
+
     source_type: str
     source_files: tuple[str, ...]
     lidar_topic: str
@@ -153,8 +155,8 @@ class CanonicalDataset:
             raise ValueError(
                 f"Unsupported GRIL dataset schema version: {self.schema_version}"
             )
-        if self.source_type not in {"apollo_record", "ros1_bag", "synthetic"}:
-            raise ValueError(f"Unsupported source type: {self.source_type}")
+        if not isinstance(self.source_type, str) or not self.source_type.strip():
+            raise ValueError("Dataset source_type must be a non-empty string")
         if not self.source_files:
             raise ValueError("At least one source file is required")
         if not self.lidar_topic or not self.imu_topic:
