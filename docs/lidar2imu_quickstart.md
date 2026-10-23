@@ -5,10 +5,11 @@ stability: review-only
 
 # LiDAR-to-IMU calibration
 
-Native GRIL consumes a validated canonical dataset. Apollo `.record` and
-offline ROS1 `.bag` have separate adapters and do not require ROS to be
-installed or running. Real-time ROS topic subscription is not implemented.
-The native frontend and solver are shared across input formats.
+Native GRIL consumes a validated canonical dataset. Apollo `.record` ingress
+uses the C++ `wheelos_core` adapter; offline ROS1 `.bag` uses the `rosbags`
+adapter. Neither requires a ROS runtime. Real-time ROS topic subscription is
+not implemented. The native frontend and solver are shared across input
+formats.
 
 The `gril.adapters` registry is the data-ingress extension point. A new format
 must produce the existing `CanonicalDataset` contract and pass an input
@@ -28,8 +29,8 @@ source .venv/bin/activate
 python -m pip install -e ".[lidar2imu]"
 ```
 
-The extra installs Apollo record decoding and ROS1 bag parsing through
-`rosbags`. It does not install ROS or build the native GRIL executable.
+The extra provides Python-side offline bag and validation tools. It does not
+install ROS or build the native GRIL executable or C++ record ingress.
 
 ## 2. Build the native GRIL runtime
 
@@ -56,15 +57,8 @@ algorithm-equivalence, physical-validation, and license/provenance approval.
 
 ## 3. Prepare and validate input
 
-For Apollo record, pass one shard or the directory containing all continuous
-split shards:
-
-```text
-capture/
-├── capture.record.00000
-├── capture.record.00001
-└── capture.record.00002
-```
+For Apollo record, build the C++ ingress once using Bzlmod and the local
+`apollo-lite/pkgs/core` checkout:
 
 Set the capture directory, then use the reviewed Vanjee-16 defaults:
 
@@ -74,39 +68,56 @@ IMU:   /apollo/sensor/gnss/imu
 ```
 
 ```bash
-RECORD_DIR=/path/to/capture
+cd tools/gril_record_core_reader
+bazel build \
+  --override_module=wheelos_core=/path/to/apollo-lite/pkgs/core \
+  //:record_ingress
+cd ../..
+```
+
+Pass one record shard or the directory containing all continuous split shards:
+
+```text
+capture/
+├── capture.record.00000
+├── capture.record.00001
+└── capture.record.00002
 ```
 
 Create a canonical dataset without running the algorithm:
 
 ```bash
 gril-migrate prepare \
-  --input "$RECORD_DIR" \
+  --input /path/to/capture \
   --input-type record \
+  --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
   --imu-topic /apollo/sensor/gnss/imu \
   --scan-lines 16 \
-  --output-dir outputs/gril/0827-record/dataset
+  --output-dir outputs/gril/capture01/dataset
 ```
 
-For the validated Weilan 0827 capture, the direct record adapter and existing
-ROS1 bag adapter each decode 1,375 scans, 35,239,034 finite points, and 13,741
-IMU samples. Their canonical arrays matched exactly in the recorded adapter
-comparison. Recheck the equivalence before using any modified adapter:
+For any capture, compare the C++ output against trusted canonical data before
+running GRIL. The Weilan 0827 C++ ingress baseline and its exact Core revision,
+array hashes, native result, and timings are documented in
+[`lidar2imu_wheelos_core_baseline.md`](lidar2imu_wheelos_core_baseline.md).
+Re-run the equivalence gate after changing the ingress code, Core revision,
+topics, or sensor profile:
 
 ```bash
 gril-migrate prepare \
   --input /mnt/synology/weilan/lidar2imu/0827 \
   --input-type record \
+  --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
   --imu-topic /apollo/sensor/gnss/imu \
   --scan-lines 16 \
-  --output-dir outputs/gril/0827-record/dataset
+  --output-dir outputs/gril/0827_wheelos_core_baseline/dataset
 
 gril-migrate compare-datasets \
-  --left outputs/gril/0827-record/dataset \
-  --right outputs/gril/research_0827_aligned_full/dataset \
-  --output outputs/gril/0827-record/adapter_comparison.yaml
+  --left outputs/gril/0827_wheelos_core_baseline/dataset \
+  --right outputs/gril/0827_data_layer_record \
+  --output outputs/gril/0827_wheelos_core_baseline/canonical_comparison.yaml
 ```
 
 The comparison is an ingress check, not a calibration-accuracy verdict. It
@@ -123,11 +134,11 @@ do not use the configured extrinsic as conversion truth.
 
 ```bash
 gril-migrate run-native \
-  --input outputs/gril/0827-record/dataset \
+  --input outputs/gril/capture01/dataset \
   --input-type canonical \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
   --executable third_party/gril_native/build/gril_native_full_frontend \
-  --output-dir outputs/gril/0827-record/run
+  --output-dir outputs/gril/capture01/run
 ```
 
 Using `--input-type canonical` skips extraction only. It does not change or skip
@@ -136,7 +147,7 @@ the GRIL frontend, preprocessing, synchronization, or solver.
 ## 5. Review outputs
 
 ```text
-outputs/gril/0827-record/run/
+outputs/gril/capture01/run/
 ├── customer_summary.yaml
 ├── GRIL_Calib_result.txt
 ├── manifest.yaml

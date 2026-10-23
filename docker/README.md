@@ -47,15 +47,19 @@ docker build -f docker/lidar2imu/Dockerfile -t whl-cal-lidar2imu:local .
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   --mount type=bind,src=/path/to/records,dst=/data,readonly \
+  --mount type=bind,src=/path/to/record_ingress,dst=/opt/whl-cal/bin/record_ingress,readonly \
   --mount type=bind,src="$PWD/output",dst=/output \
   whl-cal-lidar2imu:local \
   --input /data \
   --input-type record \
+  --core-record-ingress /opt/whl-cal/bin/record_ingress \
   --output-dir /output
 ```
 
 The image does not contain ROS. Its fixed entrypoint supplies the native
-executable and reviewed Vanjee-16 configuration.
+executable and reviewed Vanjee-16 configuration. Build the mounted
+`record_ingress` binary using the Bzlmod instructions in the
+[LiDAR-to-IMU quick start](../docs/lidar2imu_quickstart.md).
 
 Record the image digest for every controlled validation run. Do not push this
 image to an external registry until all release gates are approved.

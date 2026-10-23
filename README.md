@@ -63,13 +63,15 @@ To install every calibration workflow in one environment, combine all extras:
 pip install -e ".[all]"
 ```
 
-The `lidar2imu` extra installs the Apollo record and ROS1 bag data adapters. It
-does not install ROS, compile GRIL, or include the native GRIL executables.
-Offline bag parsing uses `rosbags` without a ROS installation or ROS master.
-Record and bag inputs converge to the same canonical dataset before entering
-the native frontend and solver. The native executable must be built separately
-with CMake and the reviewed Eigen/PCL/Ceres toolchain; this is currently a
-developer/research workflow, not a production installer. See the
+The `lidar2imu` extra installs Python dependencies for offline bag parsing and
+validation; it does not install ROS, compile GRIL, or include native
+executables. Apollo `.record` ingress uses the Bzlmod C++ `wheelos_core`
+adapter, which must be built separately. Offline bag parsing uses `rosbags`
+without ROS. Record and bag inputs converge to the same canonical dataset
+before entering the native frontend and solver. The native executable must
+also be built separately with CMake and the reviewed Eigen/PCL/Ceres toolchain;
+this is currently a developer/research workflow, not a production installer.
+See the
 [LiDAR-to-IMU quick start](docs/lidar2imu_quickstart.md) for the exact steps
 and release restrictions. New input formats belong in `gril.adapters`; verify
 canonical data equivalence before running the unchanged GRIL algorithm. Live
@@ -180,6 +182,7 @@ lidar2lidar-rig-dataset \
 gril-migrate run-native \
   --input "$RECORD_DIR" \
   --input-type record \
+  --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
   --executable third_party/gril_native/build/gril_native_full_frontend \
   --output-dir outputs/gril/run01 \

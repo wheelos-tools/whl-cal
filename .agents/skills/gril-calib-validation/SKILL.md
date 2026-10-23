@@ -21,7 +21,7 @@ require ROS. The currently registered offline data adapters are:
 
 | Input type | Adapter | ROS runtime |
 | --- | --- | --- |
-| Apollo `.record` | `ApolloRecordAdapter` | not required |
+| Apollo `.record` | `CoreApolloRecordAdapter` (`record`) | not required |
 | ROS1 `.bag` | `Rosbag1Adapter` using `rosbags` | not required |
 | canonical dataset | dataset reader; extraction is skipped | not required |
 
@@ -38,9 +38,17 @@ source .venv/bin/activate
 python -m pip install -e ".[lidar2imu]"
 ```
 
-This installs record decoding and offline bag parsing, but does not install
-ROS or compile the native GRIL executables. The native source-build toolchain
-is documented in [`docs/lidar2imu_quickstart.md`](../../../docs/lidar2imu_quickstart.md).
+This installs offline bag parsing and data-audit tools, but does not install
+ROS or compile the native GRIL executables. Apollo record ingress is provided
+by the C++ `record` adapter and requires building `//:record_ingress` from
+`tools/gril_record_core_reader` with Bzlmod and a local `apollo-lite/pkgs/core`
+checkout. The native source-build toolchain and adapter command are documented
+in [`docs/lidar2imu_quickstart.md`](../../../docs/lidar2imu_quickstart.md).
+The C++ ingress must pass canonical-dataset equivalence before calibration;
+the 0827 run used about 2.0 GB peak RSS. The exact
+`wheelos_core` revision and regression artifacts are recorded in the
+[GRIL `wheelos_core` baseline](../../../docs/lidar2imu_wheelos_core_baseline.md);
+that baseline is not calibration-accuracy evidence.
 
 ### Frozen reference workflow prerequisites
 
@@ -106,11 +114,11 @@ Before a new adapter is used for calibration:
 4. confirm the native dataset boundary and algorithm configuration are
    unchanged; do not modify the C++ GRIL algorithm to accommodate a file format.
 
-The Weilan 0827 record and its trusted ROS1 bag conversion are a known ingress
-regression fixture: both contain 1,375 scans, 35,239,034 finite points, and
-13,741 IMU samples. The record-vs-bag canonical arrays compared exactly in the
-validated environment. This checks input conversion only; it is not evidence
-of calibration accuracy or physical acceptance.
+The Weilan 0827 C++ record ingress and its trusted canonical conversion are a
+known regression fixture: both contain 1,375 scans, 35,239,034 finite points,
+and 13,741 IMU samples. Their canonical arrays and static transforms compared
+exactly in the validated environment. This checks input conversion only; it is
+not evidence of calibration accuracy or physical acceptance.
 
 Use alternate topics and frames when required:
 
@@ -130,7 +138,7 @@ For Apollo records, choose the IMU topic by timestamp provenance, not by name.
 On the 2026-05-06 capture, `/apollo/sensor/gnss/imu` has no usable
 `measurement_time` and its header is host-publish time; use
 `/apollo/sensor/gnss/corrected_imu`, whose header is converted INS measurement
-time, for calibration timing. The exporter and direct-record adapter unwrap its
+time, for calibration timing. The exporter and C++ record adapter unwrap its
 nested `imu` payload. Verify this policy against each capture before use.
 
 Run individual phases with `setup`, `prepare`, `run`, and `diagnose`. Use

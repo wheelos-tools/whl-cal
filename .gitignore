@@ -38,6 +38,7 @@ __pycache__/
 outputs/
 third_party/gril_native/build/
 lidar2lidar/output_pcds/
+tools/gril_record_core_reader/bazel-*
 
 # ROS-free GRIL generated execution artifacts
 GRIL_Calib_result.txt

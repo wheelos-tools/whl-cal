@@ -1,0 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "record_reader_probe",
+    srcs = ["record_reader_probe.cc"],
+    deps = ["@wheelos_core//cyber/record:record_reader"],
+)
+
+cc_binary(
+    name = "record_ingress",
+    srcs = ["record_ingress.cc"],
+    deps = [
+        "@wheelos_core//cyber/message:protobuf_factory",
+        "@wheelos_core//cyber/record:record_reader",
+    ],
+)

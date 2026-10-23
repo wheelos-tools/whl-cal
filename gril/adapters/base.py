@@ -19,6 +19,7 @@ class AdapterConfig:
     scan_lines: int = 16
     start_ns: int | None = None
     end_ns: int | None = None
+    core_record_ingress: Path | None = None
 
     def includes(self, timestamp_ns: int) -> bool:
         if self.start_ns is not None and timestamp_ns < self.start_ns:

@@ -7,7 +7,7 @@ Read before changing package boundaries, pipeline stages, data extraction, or ou
 - Keep extraction, algorithm, and evaluation as separate responsibilities.
 - Put reusable workflow logic in library packages; keep `tools/` as operational entrypoints.
 - Treat scan-to-scan, temporal calibration, and scan-to-map as distinct algorithm roles.
-- Preserve Apollo record decoding through the repository adapter and supported protobuf wrappers.
+- Route GRIL Apollo record decoding through the Bzlmod `wheelos_core` C++ adapter; keep Python format-specific work at the canonical-dataset boundary.
 
 ## Do NOTs
 - Do not hide extraction or evaluation inside an optimizer.
@@ -21,5 +21,5 @@ Read before changing package boundaries, pipeline stages, data extraction, or ou
 - LiDAR-to-LiDAR design: `docs/lidar2lidar_design.md`
 - LiDAR-to-IMU GRIL design: `docs/gril_ros_free_migration.md`
 - LiDAR-to-camera design: `docs/lidar2camera_design.md`
-- Record adapter: `lidar2lidar/record_adapter.py`
+- GRIL record ingress: `gril/adapters/core_record.py`, `tools/gril_record_core_reader/record_ingress.cc`
 - Supported Apollo messages: `lidar2lidar/apollo_record_messages.py`
