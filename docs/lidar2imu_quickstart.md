@@ -10,6 +10,12 @@ offline ROS1 `.bag` have separate adapters and do not require ROS to be
 installed or running. Real-time ROS topic subscription is not implemented.
 The native frontend and solver are shared across input formats.
 
+The `gril.adapters` registry is the data-ingress extension point. A new format
+must produce the existing `CanonicalDataset` contract and pass an input
+equivalence audit before it is used for calibration; do not modify GRIL
+preprocessing, synchronization, frontend, or solver to accommodate a container
+format.
+
 This is a developer/research source build, not a published customer installer
 or registry image. The 0827 result remains review-only; successful execution
 does not prove calibration accuracy.
@@ -83,6 +89,30 @@ gril-migrate prepare \
   --output-dir outputs/gril/0827-record/dataset
 ```
 
+For the validated Weilan 0827 capture, the direct record adapter and existing
+ROS1 bag adapter each decode 1,375 scans, 35,239,034 finite points, and 13,741
+IMU samples. Their canonical arrays matched exactly in the recorded adapter
+comparison. Recheck the equivalence before using any modified adapter:
+
+```bash
+gril-migrate prepare \
+  --input /mnt/synology/weilan/lidar2imu/0827 \
+  --input-type record \
+  --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
+  --imu-topic /apollo/sensor/gnss/imu \
+  --scan-lines 16 \
+  --output-dir outputs/gril/0827-record/dataset
+
+gril-migrate compare-datasets \
+  --left outputs/gril/0827-record/dataset \
+  --right outputs/gril/research_0827_aligned_full/dataset \
+  --output outputs/gril/0827-record/adapter_comparison.yaml
+```
+
+The comparison is an ingress check, not a calibration-accuracy verdict. It
+passes only when counts, ordering, timestamps, frames, rings, point times, and
+numeric sensor data satisfy the comparison contract.
+
 For a ROS1 bag, use `--input-type bag`, the bag path, and its actual LiDAR and
 IMU topics. This is offline bag decoding, not live ROS integration. Check IMU
 timestamp provenance for every capture before selecting the topic. Audit a new
@@ -124,7 +154,9 @@ horizontal lever-arm, yaw/time, or physical accuracy.
 There is no public installer or customer registry image. External distribution
 remains blocked until native/reference equivalence, independent physical
 holdout, and GRIL/LI-Init plus transitive dependency license provenance are
-approved.
+approved. The 0827 record/bag equivalence and the 20 native CTest / 29 Python
+migration tests establish input-path and component evidence only; they do not
+close the frozen-reference rotation gate or independent physical-accuracy gate.
 
 ## Optional local Docker review
 

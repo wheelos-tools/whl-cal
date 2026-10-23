@@ -14,13 +14,40 @@ configured transform.
 This skill is self-contained. Its `scripts/`, `resources/`, and `patches/`
 directories are part of the workflow, not examples that need to be rewritten.
 
-Prerequisites:
+### Runtime and input paths
 
-- this repository installed in a Python environment
-- Docker
-- `git`
-- Apollo record files containing LiDAR, IMU, static TF, and independent
-  GNSS/INS odometry
+The native GRIL algorithm accepts a validated `CanonicalDataset` and does not
+require ROS. The currently registered offline data adapters are:
+
+| Input type | Adapter | ROS runtime |
+| --- | --- | --- |
+| Apollo `.record` | `ApolloRecordAdapter` | not required |
+| ROS1 `.bag` | `Rosbag1Adapter` using `rosbags` | not required |
+| canonical dataset | dataset reader; extraction is skipped | not required |
+
+Live ROS topic subscription is not implemented. The frozen ROS-GRIL reference
+workflow below is a separate A/B oracle and requires Docker to run its ROS
+Noetic container. Do not make ROS a dependency of the canonical schema, native
+runner, or solver when adding an input adapter.
+
+For data-adapter development, install the Python ingress extra:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[lidar2imu]"
+```
+
+This installs record decoding and offline bag parsing, but does not install
+ROS or compile the native GRIL executables. The native source-build toolchain
+is documented in [`docs/lidar2imu_quickstart.md`](../../../docs/lidar2imu_quickstart.md).
+
+### Frozen reference workflow prerequisites
+
+The complete frozen-reference and physical-diagnostics workflow additionally
+requires Docker, `git`, Apollo records containing LiDAR, IMU, static TF, and
+independent GNSS/INS odometry, plus the native build/runtime for native
+candidate phases.
 
 Run the complete workflow from the repository root:
 
@@ -47,6 +74,43 @@ The command:
 
 The supplied runner delays playback after topic advertisement so the frozen
 reference cannot silently miss the first bag messages while subscribers connect.
+
+### Data-ingress / algorithm boundary
+
+Keep format-specific decoding inside `gril.adapters`. Register each offline
+input name in `ADAPTERS`; CLI input choices are generated from that registry.
+The adapter must produce a validated `CanonicalDataset`, preserving source
+provenance in `source_type` and metadata without using those fields to select
+or alter algorithm behavior. The canonical arrays carry:
+
+- LiDAR frame ID, scan timestamps, scan offsets, native-frame XYZ, intensity,
+  ring indices, and per-point time in seconds relative to each scan timestamp
+- IMU frame ID, timestamps, angular velocity, and linear acceleration in the
+  native IMU frame
+- available static transforms and source metadata
+
+Do not interpolate, filter, transform, reorder, or otherwise “repair” samples
+in a format adapter unless that operation is already part of the audited
+source-to-canonical contract. Reject ambiguous units, coordinate frames,
+point-time references, ring mappings, and IMU clock provenance rather than
+guessing. Keep extraction, algorithm, and evaluation separate.
+
+Before a new adapter is used for calibration:
+
+1. convert the same capture through the new adapter and a trusted adapter;
+2. run `gril-migrate compare-datasets` and require matching counts, ordering,
+   timestamps, frames, ring IDs, point timing, and numeric signals at justified
+   tolerances;
+3. inspect `input_contract.yaml` and resolve any differences as adapter or
+   input-contract issues before invoking native GRIL;
+4. confirm the native dataset boundary and algorithm configuration are
+   unchanged; do not modify the C++ GRIL algorithm to accommodate a file format.
+
+The Weilan 0827 record and its trusted ROS1 bag conversion are a known ingress
+regression fixture: both contain 1,375 scans, 35,239,034 finite points, and
+13,741 IMU samples. The record-vs-bag canonical arrays compared exactly in the
+validated environment. This checks input conversion only; it is not evidence
+of calibration accuracy or physical acceptance.
 
 Use alternate topics and frames when required:
 
