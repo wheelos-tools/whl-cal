@@ -112,6 +112,15 @@ schema's `source_type` is provenance metadata, not an algorithm selector.
 Compare new adapters' canonical arrays against a trusted conversion before
 running the unchanged frontend and solver.
 
+The validated Weilan 0827 direct-record adapter output matches the existing
+ROS1 bag canonical dataset exactly: 1,375 scans, 35,239,034 points, 13,741 IMU
+samples, and zero maximum difference across timestamps and numeric arrays.
+This is data-ingress equivalence evidence only; it does not replace the
+frozen-reference result gate or independent physical holdout. Keep all future
+format support inside adapters and do not change the GRIL native boundary,
+algorithm configuration, preprocessing, frontend, or solver to accommodate
+the input format.
+
 Run the complete native frontend directly from an Apollo record:
 
 ```bash
@@ -419,6 +428,11 @@ compile or bundle `gril_native_full_frontend`. The repository has a controlled
 local Docker build definition, but it requires ignored native runtime
 artifacts and a local Python dependency-cache image; no public image, installer,
 or wheel is available or implied by this documentation.
+
+The Python ingress extra is `pip install -e ".[lidar2imu]"`. It supports
+Apollo `.record` and offline ROS1 `.bag` parsing without ROS; live ROS topic
+subscription is not implemented. The frozen ROS reference is separate and
+uses Docker/ROS Noetic only for migration comparison.
 
 Do not create a native installer, publish a binary, or describe a calibration
 result as a production release until all of these are complete:

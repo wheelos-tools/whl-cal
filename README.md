@@ -71,7 +71,9 @@ the native frontend and solver. The native executable must be built separately
 with CMake and the reviewed Eigen/PCL/Ceres toolchain; this is currently a
 developer/research workflow, not a production installer. See the
 [LiDAR-to-IMU quick start](docs/lidar2imu_quickstart.md) for the exact steps
-and release restrictions.
+and release restrictions. New input formats belong in `gril.adapters`; verify
+canonical data equivalence before running the unchanged GRIL algorithm. Live
+ROS topic subscription is not currently supported.
 
 If the default PyPI route is slow or unstable in this environment, switch pip to
 the Tsinghua mirror inside the active virtual environment first:
