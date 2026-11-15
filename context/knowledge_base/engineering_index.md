@@ -7,7 +7,7 @@ This file is the compact index for the current engineering surfaces in the repo.
 | Area | Data layer | Algorithm layer | Evaluation layer |
 | --- | --- | --- | --- |
 | `lidar2lidar` | `record_utils.py`, `scan2map_dataset.py`, `auto_calib.py` extraction paths | `auto_calib.py`, `scan2map_calib.py`, `temporal_calib.py` | `metrics.yaml`, `diagnostics/*.yaml` |
-| `gril` / LiDAR-to-IMU | `gril/adapters/`, `gril/dataset_io.py` | `third_party/gril_native/` | `gril/validation.py`, GRIL validation skill diagnostics |
+| `lidar2imu` / LiDAR-to-IMU | `lidar2imu/adapters/`, `lidar2imu/models.py`, `lidar2imu/dataset_io.py` | `lidar2imu/algorithms/gril/`, `third_party/gril_native/` | `lidar2imu/evaluation/`, GRIL validation skill diagnostics |
 | `camera` | GUI live capture or offline image-dataset extraction in `camera/intrinsic.py` | OpenCV intrinsic solve (`plumb_bob` + `fisheye`) | calibration YAML + `*_diagnostics/` acceptance/data_quality/visualization artifacts |
 | `lidar2camera` | raw image / PCD pair loading + extraction gating in `reference_pipeline.py` | `reference_pipeline.py`, `learning_based.py` | `metrics.yaml`, `diagnostics/*.yaml`, CSVs, heatmap/scatter/overlay review surfaces |
 
@@ -23,7 +23,7 @@ This file is the compact index for the current engineering surfaces in the repo.
 
 ### GRIL / LiDAR-to-IMU
 
-- `gril-migrate`
+- `lidar2imu`
 
 ### camera / lidar2camera
 
@@ -62,7 +62,7 @@ This file is the compact index for the current engineering surfaces in the repo.
 - `calibrated_tf.yaml`
 - `metrics.yaml`
 - `diagnostics/`
-- standardized input and validation artifacts emitted by `gril-migrate`
+- standardized input and validation artifacts emitted by `lidar2imu`
 
 ### camera / lidar2camera
 

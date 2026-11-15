@@ -8,7 +8,7 @@ workflows.
 | Module | Current status | Practical recommendation |
 | --- | --- | --- |
 | `lidar2lidar` | real-bag validated | keep `scan2scan` as production baseline; use `scan2map` as conditional refinement |
-| `gril` / LiDAR-to-IMU | sole LiDAR-to-IMU algorithm; research-only ROS-free native build | iterate on native GRIL only; its 0827 full A/B rotation discrepancy is `0.406964 deg` versus a `0.2 deg` gate, so production release is not yet approved ([release gate](docs/gril_ros_free_migration.md)) |
+| `gril` / LiDAR-to-IMU | GRIL is the first algorithm baseline; ROS-free native build remains research-only | use Weilan 0827 corrected-IMU as a provisional input/regression fixture, not accuracy truth; its physical check rejects the candidate and native full A/B rotation discrepancy remains `0.406964 deg` versus a `0.2 deg` gate ([method](docs/lidar2imu/07_gril_baseline.md), [release gate](docs/gril_ros_free_migration.md)) |
 | `camera` | standalone intrinsic tool exists | usable as a local intrinsic calibrator |
 | `camera2camera` | target-based stereo baseline exists | use the checkerboard paired-image pipeline as the current production baseline; add ChArUco next |
 | `lidar2camera` | target-based industrial baseline exists | use the target-based pipeline as the current production baseline; keep targetless paths experimental |
@@ -34,7 +34,7 @@ If you are new to the repo, follow the docs in this order:
 | `camera2camera` | paired image directories | two camera image topics if you want Apollo traceability; the current tool itself consumes exported image pairs | parent / child intrinsics, board pattern size, square size, multi-pose board plan |
 | `lidar2camera` | paired `image + .pcd` files | camera image topic, LiDAR `PointCloud2`, `/tf_static`, optional `/tf` | camera intrinsics, distortion, checkerboard size, square size |
 | `lidar2lidar` | Apollo `.record` or prepared dataset | all raw LiDAR `PointCloud2` topics, `/tf_static`, optional `/tf` | sensor topic list, approximate TF tree / initial extrinsics, scene plan |
-| `gril` / LiDAR-to-IMU | Apollo `.record`, ROS1 bag, or canonical GRIL dataset | one raw LiDAR topic, raw IMU topic, `/tf_static`, optional independent GNSS/INS odometry for holdout | LiDAR topic, IMU topic, scan-line count, reviewed sensor configuration |
+| `gril` / LiDAR-to-IMU | Apollo `.record`, ROS1 bag, or canonical GRIL dataset | one raw LiDAR topic, measurement-time IMU topic, `/tf_static`, optional independent GNSS/INS odometry for holdout | LiDAR topic, IMU topic, scan-line count, reviewed sensor configuration |
 
 ## Install
 
@@ -73,9 +73,10 @@ also be built separately with CMake and the reviewed Eigen/PCL/Ceres toolchain;
 this is currently a developer/research workflow, not a production installer.
 See the
 [LiDAR-to-IMU quick start](docs/lidar2imu_quickstart.md) for the exact steps
-and release restrictions. New input formats belong in `gril.adapters`; verify
+and release restrictions. New input formats belong in `lidar2imu.adapters`; verify
 canonical data equivalence before running the unchanged GRIL algorithm. Live
-ROS topic subscription is not currently supported.
+ROS topic subscription is not currently supported. The quick start also documents
+an opt-in TF rotation-seed experiment; the frozen identity seed remains the default.
 
 If the default PyPI route is slow or unstable in this environment, switch pip to
 the Tsinghua mirror inside the active virtual environment first:
@@ -179,15 +180,16 @@ lidar2lidar-rig-dataset \
 ### LiDAR-to-IMU
 
 ```bash
-gril-migrate run-native \
+# Weilan 0827 profile; audit timestamp provenance before choosing another IMU topic.
+lidar2imu run-native \
   --input "$RECORD_DIR" \
   --input-type record \
   --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
   --executable third_party/gril_native/build/gril_native_full_frontend \
-  --output-dir outputs/gril/run01 \
+  --output-dir outputs/gril/0827_corrected_imu_baseline/run_01 \
   --lidar-topic /apollo/sensor/vanjeelidar/up/PointCloud2 \
-  --imu-topic /apollo/sensor/gnss/imu \
+  --imu-topic /apollo/sensor/gnss/corrected_imu \
   --scan-lines 16
 ```
 

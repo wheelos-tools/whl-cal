@@ -74,6 +74,7 @@ where = ["."]
 
 [tool.setuptools.package-data]
 lidar2lidar = ["conf/*.yaml", "conf/*.md"]
+lidar2imu = ["reference/gril/patches/*.patch"]
 
 [tool.isort]
 profile = "black"
@@ -88,7 +89,7 @@ lidar2lidar-scan2map-dataset = "lidar2lidar.scan2map_dataset:main"
 lidar2lidar-temporal = "lidar2lidar.temporal_calib:main"
 lidar2lidar-rig-dataset = "tools.lidar2lidar.prepare_rig_dataset:main"
 lidar2lidar-shared-fov-ablation = "tools.lidar2lidar.run_shared_fov_ablation:main"
-gril-migrate = "gril.cli:main"
+lidar2imu = "lidar2imu.cli:main"
 lidar2camera-calibrate = "lidar2camera.cli:main"
 camera2camera-calibrate = "camera2camera.cli:main"
 lidar2camera-extract-record = "lidar2camera.record_export:main"

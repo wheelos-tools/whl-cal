@@ -89,7 +89,7 @@ generated GRIL output. Recreate the canonical input and require equivalence
 before running the solver:
 
 ```bash
-gril-migrate prepare \
+lidar2imu prepare \
   --input /mnt/synology/weilan/lidar2imu/0827 \
   --input-type record \
   --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
@@ -98,7 +98,7 @@ gril-migrate prepare \
   --scan-lines 16 \
   --output-dir outputs/gril/0827_wheelos_core_baseline/dataset
 
-gril-migrate compare-datasets \
+lidar2imu compare-datasets \
   --left outputs/gril/0827_wheelos_core_baseline/dataset \
   --right outputs/gril/0827_data_layer_record \
   --output outputs/gril/0827_wheelos_core_baseline/canonical_comparison.yaml

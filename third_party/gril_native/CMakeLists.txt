@@ -271,6 +271,10 @@ if(BUILD_TESTING)
       NAME gril_native_trace_rejection
       COMMAND gril_native_trace_test rejection
     )
+    add_test(
+      NAME gril_native_rotation_seed
+      COMMAND gril_native_trace_test rotation_seed
+    )
     add_executable(
       gril_native_full_test tests/full_frontend_test.cpp
     )

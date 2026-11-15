@@ -68,9 +68,13 @@ python .agents/skills/gril-calib-validation/scripts/gril_pipeline.py all \
 
 The command:
 
-1. clones the pinned GRIL revision into `.cache/gril-validation`
-2. applies `patches/gril-validation.patch`
-3. builds the supplied Docker image and deterministic GRIL frontend
+1. clones the pinned GRIL revision into a patch/config-keyed subdirectory of
+   `.cache/gril-validation`
+2. applies the validation and trace patches, then rejects unrecorded source
+   changes rather than repairing or reusing a contaminated checkout
+3. builds the supplied Docker image and deterministic GRIL frontend, recording
+   source/config hashes, catkin build-output hash, Dockerfile hash, and
+   immutable local image ID
 4. converts Apollo records to a ROS1 bag
 5. rejects the run if the conversion contract fails
 6. runs GRIL twice
@@ -82,10 +86,13 @@ The command:
 
 The supplied runner delays playback after topic advertisement so the frozen
 reference cannot silently miss the first bag messages while subscribers connect.
+Reference runs verify the recorded source, catkin build output, and image
+identity before execution; keep the matching local Docker image and
+`reference-environment-*.yaml` together to rerun the same environment.
 
 ### Data-ingress / algorithm boundary
 
-Keep format-specific decoding inside `gril.adapters`. Register each offline
+Keep format-specific decoding inside `lidar2imu.adapters`. Register each offline
 input name in `ADAPTERS`; CLI input choices are generated from that registry.
 The adapter must produce a validated `CanonicalDataset`, preserving source
 provenance in `source_type` and metadata without using those fields to select
@@ -106,7 +113,7 @@ guessing. Keep extraction, algorithm, and evaluation separate.
 Before a new adapter is used for calibration:
 
 1. convert the same capture through the new adapter and a trusted adapter;
-2. run `gril-migrate compare-datasets` and require matching counts, ordering,
+2. run `lidar2imu compare-datasets` and require matching counts, ordering,
    timestamps, frames, ring IDs, point timing, and numeric signals at justified
    tolerances;
 3. inspect `input_contract.yaml` and resolve any differences as adapter or

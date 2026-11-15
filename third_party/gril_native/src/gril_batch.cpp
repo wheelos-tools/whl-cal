@@ -36,6 +36,8 @@ struct NativeConfig {
   double gyro_factor;
   double acc_factor;
   double ground_factor;
+  QD rotation_LI_seed = QD::Identity();
+  bool rotation_LI_seed_provided = false;
 };
 
 double parse_double(const std::string &text, const std::string &key) {
@@ -110,6 +112,15 @@ NativeConfig read_config(const std::string &path) {
   config.gyro_factor = parse_double(take("gyro_factor"), "gyro_factor");
   config.acc_factor = parse_double(take("acc_factor"), "acc_factor");
   config.ground_factor = parse_double(take("ground_factor"), "ground_factor");
+  if (values.count("rotation_LI_qx") || values.count("rotation_LI_qy") ||
+      values.count("rotation_LI_qz") || values.count("rotation_LI_qw")) {
+    const double x = parse_double(take("rotation_LI_qx"), "rotation_LI_qx");
+    const double y = parse_double(take("rotation_LI_qy"), "rotation_LI_qy");
+    const double z = parse_double(take("rotation_LI_qz"), "rotation_LI_qz");
+    const double w = parse_double(take("rotation_LI_qw"), "rotation_LI_qw");
+    config.rotation_LI_seed = QD(w, x, y, z);
+    config.rotation_LI_seed_provided = true;
+  }
   if (!values.empty())
     throw std::runtime_error("unknown config key: " + values.begin()->first);
   return config;
@@ -200,6 +211,12 @@ int main(int argc, char **argv) {
     calibration.bound_th = config.bound_th;
     calibration.set_boundary = config.set_boundary;
     calibration.verbose = config.verbose;
+    if (config.rotation_LI_seed_provided) {
+      calibration.set_rotation_initial_guess(config.rotation_LI_seed);
+      std::cout << "[Rotation initialization] LiDAR to IMU quaternion xyzw = "
+                << std::setprecision(17)
+                << config.rotation_LI_seed.coeffs().transpose() << "\n";
+    }
     GYRO_FACTOR_ = config.gyro_factor;
     ACC_FACTOR_ = config.acc_factor;
     GROUND_FACTOR_ = config.ground_factor;

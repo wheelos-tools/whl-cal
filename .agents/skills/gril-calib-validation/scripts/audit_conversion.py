@@ -83,19 +83,26 @@ for record_path in RECORDS:
             raw_frame_ids.add(str(message.header.frame_id))
             frame_id = str(message.frame_id or message.header.frame_id).strip()
             if points:
-                xyz = np.array(
-                    [(point.x, point.y, point.z) for point in points], dtype=np.float32
-                )
-                timestamps = np.fromiter(
-                    (point.timestamp for point in points),
-                    dtype=np.uint64,
-                    count=len(points),
-                )
-                intensity = np.fromiter(
-                    (point.intensity for point in points),
-                    dtype=np.float32,
-                    count=len(points),
-                )
+                if hasattr(message, "point_records_array"):
+                    records = message.point_records_array()
+                    xyz = np.column_stack([records["x"], records["y"], records["z"]])
+                    timestamps = records["timestamp"]
+                    intensity = records["intensity"].astype(np.float32)
+                else:
+                    xyz = np.array(
+                        [(point.x, point.y, point.z) for point in points],
+                        dtype=np.float32,
+                    )
+                    timestamps = np.fromiter(
+                        (point.timestamp for point in points),
+                        dtype=np.uint64,
+                        count=len(points),
+                    )
+                    intensity = np.fromiter(
+                        (point.intensity for point in points),
+                        dtype=np.float32,
+                        count=len(points),
+                    )
                 finite = np.isfinite(xyz).all(axis=1)
                 minimum_timestamp_ns = int(timestamps.min())
                 maximum_timestamp_ns = int(timestamps.max())

@@ -81,7 +81,7 @@ lidar2lidar-auto \
 ## GRIL / lidar2imu
 
 - Purpose: ROS-free native GRIL LiDAR-to-IMU calibration and validation.
-- Command: `gril-migrate`.
+- Command: `lidar2imu`.
 - Docs:
   - Quick Start: `docs/lidar2imu_quickstart.md`
   - Design and release gate: `docs/gril_ros_free_migration.md`

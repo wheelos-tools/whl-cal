@@ -13,7 +13,7 @@ installable artifacts or CPack configuration. Its sole `install()` rule fails
 so that `cmake --install` cannot accidentally turn the current experimental
 tree into an installer.
 
-The repository's Python wheel only supplies the `gril-migrate` migration and
+The repository's Python wheel only supplies the `lidar2imu` workflow and
 evidence CLI; it neither builds nor bundles this native executable. Build the
 native targets directly with CMake only for controlled reproduction and A/B
 work.
@@ -231,7 +231,7 @@ downsampled point. Numbers use 17 significant digits.
 
 `GRIL_BATCH_TRACE 1` is a strict, versioned, whitespace-delimited text format.
 The reference patch
-`gril/reference_patches/gril-batch-trace-v1.patch` applies after
+`lidar2imu/reference/gril/patches/gril-batch-trace-v1.patch` applies after
 `gril-validation.patch` to upstream revision
 `c09b01a05ec83bc0a361941acf897109aaecf0a6`. It writes
 `result/GRIL_batch_trace_v1.txt` immediately before `LI_Calibration` and does
@@ -284,7 +284,7 @@ git clone https://github.com/Taeyoung96/GRIL-Calib.git
 cd GRIL-Calib
 git checkout c09b01a05ec83bc0a361941acf897109aaecf0a6
 git apply /path/to/whl-cal/.agents/skills/gril-calib-validation/patches/gril-validation.patch
-git apply /path/to/whl-cal/gril/reference_patches/gril-batch-trace-v1.patch
+git apply /path/to/whl-cal/lidar2imu/reference/gril/patches/gril-batch-trace-v1.patch
 ```
 
 ### Native replay usage

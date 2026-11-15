@@ -18,7 +18,7 @@ COPY --from=dependency-cache /usr/local/lib/python3.10/site-packages/ \
      /usr/local/lib/python3.10/site-packages/
 
 COPY common /opt/whl-cal/common
-COPY gril /opt/whl-cal/gril
+COPY lidar2imu /opt/whl-cal/lidar2imu
 COPY lidar2lidar /opt/whl-cal/lidar2lidar
 
 COPY docker/lidar2imu/runtime/bin/ /opt/whl-cal/bin/
@@ -41,5 +41,5 @@ RUN test -x /opt/whl-cal/bin/gril_native_full_frontend \
 USER calibrator
 WORKDIR /output
 
-ENTRYPOINT ["python", "-m", "gril.cli", "run-native", "--config", "/opt/whl-cal/config/vanjeelidar16.yaml", "--executable", "/opt/whl-cal/bin/gril_native_full_frontend"]
+ENTRYPOINT ["python", "-m", "lidar2imu.cli", "run-native", "--config", "/opt/whl-cal/config/vanjeelidar16.yaml", "--executable", "/opt/whl-cal/bin/gril_native_full_frontend"]
 CMD ["--help"]

@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -113,6 +114,38 @@ void rejection() {
   }
 }
 
+void rotation_seed() {
+  const QD seed(Eigen::AngleAxisd(136.0 * std::acos(-1.0) / 180.0,
+                                V3D::UnitZ()));
+  std::deque<CalibState> states;
+  for (int index = 0; index < 5; ++index) {
+    CalibState state;
+    state.ang_vel = V3D(0.0, 0.0, 0.1 * (index + 1));
+    states.push_back(state);
+  }
+  Gril_Calib calibration;
+  calibration.set_IMU_state(states);
+  calibration.set_Lidar_state(states);
+  calibration.solve_Rotation_only();
+  require(calibration.get_R_LI().isApprox(M3D::Identity(), 1e-12),
+          "default rotation initialization changed");
+  calibration.set_rotation_initial_guess(seed);
+  calibration.solve_Rotation_only();
+  require(calibration.get_R_LI().isApprox(seed.matrix(), 1e-12),
+          "yaw-only data did not retain the supplied rotation seed");
+  for (const QD &invalid :
+       {QD(0.0, 0.0, 0.0, 0.0), QD(2.0, 0.0, 0.0, 0.0),
+        QD(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 0.0)}) {
+    bool rejected = false;
+    try {
+      calibration.set_rotation_initial_guess(invalid);
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    require(rejected, "invalid rotation initial guess was accepted");
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -123,6 +156,8 @@ int main(int argc, char **argv) {
       round_trip();
     else if (mode == "rejection")
       rejection();
+    else if (mode == "rotation_seed")
+      rotation_seed();
     else
       throw std::runtime_error("unknown test mode");
     return 0;

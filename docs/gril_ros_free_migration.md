@@ -65,7 +65,7 @@ Two GRIL implementations remain during migration:
 Run the frozen reference through its existing containerized validation workflow:
 
 ```bash
-gril-migrate run-reference \
+lidar2imu run-reference \
   --record-file capture.record.00000 \
   --output-dir outputs/gril/reference
 ```
@@ -75,7 +75,7 @@ container. It is an A/B oracle, not part of the final user runtime.
 
 ## Frozen reference
 
-Run `gril-migrate reference-info` for the machine-readable revision and patch
+Run `lidar2imu reference-info` for the machine-readable revision and patch
 identity. Distribution of migrated GRIL sources or binaries is blocked until
 the upstream licensing provenance is reviewed: `package.xml` declares BSD, but
 the repository includes the GPLv2 LI-Init license and describes GRIL as derived
@@ -94,7 +94,7 @@ bazel build \
   //:record_ingress
 cd ../..
 
-gril-migrate prepare \
+lidar2imu prepare \
   --input capture.record.00000 \
   --input-type record \
   --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
@@ -102,7 +102,7 @@ gril-migrate prepare \
   --imu-topic /apollo/sensor/gnss/imu \
   --output-dir outputs/gril/datasets/record
 
-gril-migrate prepare \
+lidar2imu prepare \
   --input gril_input.bag \
   --input-type bag \
   --lidar-topic /velodyne_points \
@@ -113,10 +113,10 @@ gril-migrate prepare \
 The output contains `dataset.yaml`, `lidar.npz`, `imu.npz`, and
 `input_contract.yaml`. Array hashes, frame IDs, point-time semantics, source
 paths, rejected counts, and transform metadata are recorded in the manifest.
-Input-specific decoding is isolated in `gril.adapters`; each adapter returns
+Input-specific decoding is isolated in `lidar2imu.adapters`; each adapter returns
 the same validated `CanonicalDataset` consumed by the native runner. Add new
 input formats by adding an adapter and registering its CLI name in
-`gril.adapters`; the CLI choices are derived from that registry. The canonical
+`lidar2imu.adapters`; the CLI choices are derived from that registry. The canonical
 schema's `source_type` is provenance metadata, not an algorithm selector.
 Compare new adapters' canonical arrays against a trusted conversion before
 running the unchanged frontend and solver.
@@ -134,7 +134,7 @@ frontend, or solver to accommodate an input format.
 Run the complete native frontend directly from an Apollo record:
 
 ```bash
-gril-migrate run-native-frontend \
+lidar2imu run-native-frontend \
   --input capture.record.00000 \
   --input-type record \
   --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
@@ -161,7 +161,7 @@ Golden-equivalence mode is the default. Production forward-gap reset behavior
 is separate and must be requested explicitly:
 
 ```bash
-gril-migrate run-native \
+lidar2imu run-native \
   --input outputs/gril/datasets/record \
   --input-type canonical \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
@@ -178,7 +178,7 @@ the declared gap. It is intentionally outside golden equivalence.
 The earlier partial evidence command remains available under an accurate name:
 
 ```bash
-gril-migrate run-native-frontend-trace \
+lidar2imu run-native-frontend-trace \
   --input capture.record.00000 \
   --input-type record \
   --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \
@@ -191,7 +191,7 @@ gril-migrate run-native-frontend-trace \
 Compare equivalent record and bag conversions before comparing algorithms:
 
 ```bash
-gril-migrate compare-datasets \
+lidar2imu compare-datasets \
   --left outputs/gril/datasets/record \
   --right outputs/gril/datasets/bag \
   --output outputs/gril/input_equivalence.yaml
@@ -221,14 +221,14 @@ frozen reference's intermediate states and outputs on identical inputs.
 
 ### Native batch replay
 
-After applying `gril/reference_patches/gril-batch-trace-v1.patch` on top of the
+After applying `lidar2imu/reference/gril/patches/gril-batch-trace-v1.patch` on top of the
 frozen validation patch, the reference writes
 `result/GRIL_batch_trace_v1.txt` immediately before `LI_Calibration`.
 
 Replay that exact optimizer input without ROS:
 
 ```bash
-gril-migrate run-native-batch \
+lidar2imu run-native-batch \
   --executable /path/to/gril_native_batch \
   --trace GRIL_batch_trace_v1.txt \
   --config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
@@ -238,6 +238,17 @@ gril-migrate run-native-batch \
 This proves the optimizer migration only. It does not yet prove that the
 ROS-free preprocessing, LiDAR odometry, motion undistortion, or ground
 segmentation frontend is equivalent.
+
+The optional `calibration.rotation_LI_xyzw` YAML field is an opt-in research
+departure from the frozen identity rotation initialization. The generated
+batch config records all four LiDAR-to-IMU quaternion components; malformed,
+non-finite, or non-unit seeds are rejected. The field also applies to the
+batch subprocess of `run-native`, without changing the LiDAR-only frontend.
+Default configurations emit the original native config unchanged. Compare
+seeded and unseeded solves on the identical frozen batch trace before
+interpreting a result; a seed-supported yaw in planar motion is not evidence
+that the data identified yaw. See the [quick start](lidar2imu_quickstart.md)
+for frame direction and inverse translation conventions.
 
 ### Native Velodyne preprocessing
 
@@ -348,14 +359,14 @@ target. This exact-state limitation does **not** waive the final-result
 comparison: the candidate remains not review-ready until the frozen-reference
 rotation gate passes.
 
-Run `gril-migrate review-full` only after the candidate and repeat executions
+Run `lidar2imu review-full` only after the candidate and repeat executions
 finish. It reads completed manifests, traces, result files, component evidence,
 and physical-holdout evidence to write `full_ab_review.yaml` and
 `equivalence.yaml`; it never invokes GRIL or changes its inputs, configuration,
 quality thresholds, or scheduling.
 
 ```bash
-gril-migrate review-full \
+lidar2imu review-full \
   --reference-trace-archive outputs/gril/reference/reference_frontend_trace_manifest.yaml \
   --reference-result outputs/gril/reference/run_1/GRIL_Calib_result.txt \
   --reference-config .agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml \
@@ -372,7 +383,7 @@ evidence. Its output is a migration review, not an acceptance certificate.
 
 ### Frozen full-frontend trace
 
-`gril/reference_patches/gril-full-frontend-reference-trace-v2.patch` is applied
+`lidar2imu/reference/gril/patches/gril-full-frontend-reference-trace-v2.patch` is applied
 after the validation, batch, preprocessing, propagation, and ground trace
 patches. It does not alter gates or mathematics. The ROS runner archives
 `GRIL_full_frontend_reference_trace_v2.txt` for every run and writes
@@ -391,7 +402,7 @@ identities hash the ordered float bit patterns stated in the trace header.
 ## Result comparison
 
 ```bash
-gril-migrate compare-results \
+lidar2imu compare-results \
   --reference outputs/reference/GRIL_Calib_result.txt \
   --candidate outputs/native/GRIL_Calib_result.txt \
   --output outputs/gril/result_equivalence.yaml
@@ -406,7 +417,7 @@ physical holdout must also agree.
 Build the combined migration report after both implementations have run:
 
 ```bash
-gril-migrate abtest \
+lidar2imu abtest \
   --reference-dataset outputs/gril/datasets/bag \
   --candidate-dataset outputs/gril/datasets/bag \
   --reference-result outputs/reference/GRIL_Calib_result.txt \

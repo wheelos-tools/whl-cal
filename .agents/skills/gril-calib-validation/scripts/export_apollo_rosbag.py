@@ -40,21 +40,29 @@ def _pointcloud_message(msg, sequence: int, types):
     if not points:
         return None, None
 
-    x = np.fromiter((point.x for point in points), np.float32, len(points))
-    y = np.fromiter((point.y for point in points), np.float32, len(points))
-    z = np.fromiter((point.z for point in points), np.float32, len(points))
+    if hasattr(msg, "point_records_array"):
+        records = msg.point_records_array()
+        x = records["x"]
+        y = records["y"]
+        z = records["z"]
+        point_timestamps = records["timestamp"]
+        intensity = records["intensity"].astype(np.float32)
+    else:
+        x = np.fromiter((point.x for point in points), np.float32, len(points))
+        y = np.fromiter((point.y for point in points), np.float32, len(points))
+        z = np.fromiter((point.z for point in points), np.float32, len(points))
+        point_timestamps = np.fromiter(
+            (point.timestamp for point in points), dtype=np.uint64, count=len(points)
+        )
+        intensity = np.fromiter(
+            (point.intensity for point in points), np.float32, len(points)
+        )
     valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-    point_timestamps = np.fromiter(
-        (point.timestamp for point in points), dtype=np.uint64, count=len(points)
-    )
     timestamp_ns = int(point_timestamps.min())
     cloud = np.empty(int(valid.sum()), dtype=POINT_DTYPE)
     cloud["x"] = x[valid]
     cloud["y"] = y[valid]
     cloud["z"] = z[valid]
-    intensity = np.fromiter(
-        (point.intensity for point in points), np.float32, len(points)
-    )
     cloud["intensity"] = intensity[valid]
     cloud["time"] = (point_timestamps[valid] - np.uint64(timestamp_ns)).astype(
         np.float64

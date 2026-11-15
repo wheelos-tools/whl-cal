@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -20,14 +21,17 @@ DEFAULT_REPOSITORY = "https://github.com/Taeyoung96/GRIL-Calib.git"
 DEFAULT_IMAGE = "gril-calib-validation:2026-08"
 REFERENCE_FRONTEND_TRACE_PATCH = (
     SKILL_DIR.parents[2]
-    / "gril/reference_patches/gril-full-frontend-reference-trace-v2.patch"
+    / "lidar2imu/reference/gril/patches/gril-full-frontend-reference-trace-v2.patch"
 )
 REFERENCE_PATCHES = (
     SKILL_DIR / "patches/gril-validation.patch",
-    SKILL_DIR.parents[2] / "gril/reference_patches/gril-batch-trace-v1.patch",
-    SKILL_DIR.parents[2] / "gril/reference_patches/gril-preprocess-trace-v1.patch",
-    SKILL_DIR.parents[2] / "gril/reference_patches/gril-frontend-cv-trace-v1.patch",
-    SKILL_DIR.parents[2] / "gril/reference_patches/gril-ground-trace-v1.patch",
+    SKILL_DIR.parents[2] / "lidar2imu/reference/gril/patches/gril-batch-trace-v1.patch",
+    SKILL_DIR.parents[2]
+    / "lidar2imu/reference/gril/patches/gril-preprocess-trace-v1.patch",
+    SKILL_DIR.parents[2]
+    / "lidar2imu/reference/gril/patches/gril-frontend-cv-trace-v1.patch",
+    SKILL_DIR.parents[2]
+    / "lidar2imu/reference/gril/patches/gril-ground-trace-v1.patch",
     REFERENCE_FRONTEND_TRACE_PATCH,
 )
 
@@ -50,8 +54,25 @@ def repeated(flag: str, values: list[str]) -> list[str]:
     return result
 
 
+def reference_source_id() -> str:
+    digest = hashlib.sha256(PINNED_REVISION.encode())
+    inputs = (*REFERENCE_PATCHES, SKILL_DIR / "resources/vanjeelidar16.yaml")
+    for path in inputs:
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:16]
+
+
 def paths(workspace: Path) -> tuple[Path, Path]:
-    return workspace / "GRIL-Calib", workspace / "catkin_ws"
+    source_id = reference_source_id()
+    return (
+        workspace / f"GRIL-Calib-{source_id}",
+        workspace / f"catkin_ws-{source_id}",
+    )
+
+
+def environment_manifest_path(workspace: Path) -> Path:
+    return workspace / f"reference-environment-{reference_source_id()}.yaml"
 
 
 def apply_patch(repository: Path, patch: Path) -> None:
@@ -82,6 +103,173 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_tree(root: Path) -> str:
+    if not root.is_dir():
+        raise FileNotFoundError(f"Reference build output is missing: {root}")
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    for path in files:
+        relative_path = path.relative_to(root).as_posix()
+        digest.update(relative_path.encode())
+        digest.update(b"\0")
+        digest.update(f"{path.stat().st_mode & 0o777:o}\0".encode())
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def expected_reference_diff(repository: Path) -> bytes:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        environment = os.environ.copy()
+        environment["GIT_INDEX_FILE"] = str(
+            Path(temporary_directory) / "expected.index"
+        )
+        subprocess.run(
+            ["git", "-C", str(repository), "read-tree", PINNED_REVISION],
+            check=True,
+            env=environment,
+        )
+        for patch in REFERENCE_PATCHES:
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "apply",
+                    "--cached",
+                    str(patch),
+                ],
+                check=True,
+                env=environment,
+            )
+        config_blob = (
+            subprocess.check_output(
+                ["git", "-C", str(repository), "hash-object", "-w", "--stdin"],
+                input=(SKILL_DIR / "resources/vanjeelidar16.yaml").read_bytes(),
+                env=environment,
+                text=False,
+            )
+            .decode()
+            .strip()
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"100644,{config_blob},config/velodyne16.yaml",
+            ],
+            check=True,
+            env=environment,
+        )
+        return subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "diff",
+                "--cached",
+                "--binary",
+                PINNED_REVISION,
+            ],
+            env=environment,
+        )
+
+
+def verify_reference_source(repository: Path) -> dict[str, str]:
+    revision = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    if revision != PINNED_REVISION:
+        raise RuntimeError(
+            f"Reference source revision is {revision}, expected {PINNED_REVISION}"
+        )
+    expected_diff = expected_reference_diff(repository)
+    actual_diff = subprocess.check_output(
+        ["git", "-C", str(repository), "diff", "--binary", PINNED_REVISION]
+    )
+    if actual_diff != expected_diff:
+        raise RuntimeError(
+            "Reference checkout contains unrecorded tracked changes; "
+            "preserve it and select a fresh --workspace"
+        )
+    untracked = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ],
+        text=True,
+    ).splitlines()
+    unexpected = [
+        path for path in untracked if not path.startswith(("Log/", "result/"))
+    ]
+    if unexpected:
+        raise RuntimeError(
+            "Reference checkout contains unrecorded untracked files: "
+            + ", ".join(unexpected[:10])
+        )
+    return {
+        "revision": revision,
+        "worktree_diff_sha256": hashlib.sha256(actual_diff).hexdigest(),
+        "config_sha256": sha256(SKILL_DIR / "resources/vanjeelidar16.yaml"),
+        "source_id": reference_source_id(),
+    }
+
+
+def docker_image_id(image: str) -> str:
+    return subprocess.check_output(
+        ["docker", "image", "inspect", "--format={{.Id}}", image], text=True
+    ).strip()
+
+
+def load_reference_environment(
+    workspace: Path,
+    image: str,
+    source_evidence: dict[str, str],
+    catkin_ws: Path,
+) -> dict:
+    manifest_path = environment_manifest_path(workspace)
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Reference environment is not recorded; run setup first: {manifest_path}"
+        )
+    manifest = yaml.safe_load(manifest_path.read_text())
+    if manifest["source"] != source_evidence:
+        raise RuntimeError(
+            "Reference source no longer matches the recorded environment; run setup"
+        )
+    if manifest["dockerfile_sha256"] != sha256(SKILL_DIR / "resources/Dockerfile"):
+        raise RuntimeError(
+            "Reference Dockerfile changed since setup; "
+            "rebuild and record the environment"
+        )
+    if manifest["image"]["tag"] != image:
+        raise RuntimeError(
+            f"Environment was set up for image {manifest['image']['tag']}, not {image}"
+        )
+    actual_image_id = docker_image_id(image)
+    if actual_image_id != manifest["image"]["id"]:
+        raise RuntimeError(
+            f"Reference image changed: expected {manifest['image']['id']}, "
+            f"found {actual_image_id}; run setup and preserve the resulting manifest"
+        )
+    actual_build_hash = sha256_tree(catkin_ws / "devel")
+    if actual_build_hash != manifest["catkin_devel_sha256"]:
+        raise RuntimeError(
+            "Reference catkin build output changed since setup; rebuild and record "
+            "the environment"
+        )
+    return manifest
+
+
 def trace_event_counts(path: Path) -> dict[str, int]:
     labels = (
         "package",
@@ -107,7 +295,13 @@ def trace_event_counts(path: Path) -> dict[str, int]:
     return counts
 
 
-def write_reference_trace_manifest(output: Path, repository: Path, bag: Path) -> None:
+def write_reference_trace_manifest(
+    output: Path,
+    repository: Path,
+    bag: Path,
+    source_evidence: dict[str, str],
+    environment_manifest: dict,
+) -> None:
     traces = []
     for run_dir in sorted(output.glob("run_*")):
         trace = run_dir / "GRIL_full_frontend_reference_trace_v2.txt"
@@ -130,11 +324,15 @@ def write_reference_trace_manifest(output: Path, repository: Path, bag: Path) ->
             ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
         ).strip(),
         "source_revision_expected": PINNED_REVISION,
+        "source_worktree_diff_sha256": source_evidence["worktree_diff_sha256"],
+        "effective_config_sha256": source_evidence["config_sha256"],
+        "catkin_devel_sha256": environment_manifest["catkin_devel_sha256"],
         "source_archive_sha256": hashlib.sha256(
             subprocess.check_output(
                 ["git", "-C", str(repository), "archive", "--format=tar", "HEAD"]
             )
         ).hexdigest(),
+        "reference_image": environment_manifest["image"],
         "patches": [
             {"path": str(patch), "sha256": sha256(patch)} for patch in REFERENCE_PATCHES
         ],
@@ -151,8 +349,17 @@ def setup(arguments) -> None:
     workspace.mkdir(parents=True, exist_ok=True)
     if not repository.exists():
         run(["git", "clone", arguments.repository, str(repository)])
-    run(["git", "-C", str(repository), "fetch", "--all", "--tags"])
-    run(["git", "-C", str(repository), "checkout", "--detach", PINNED_REVISION])
+        run(["git", "-C", str(repository), "checkout", "--detach", PINNED_REVISION])
+    elif (
+        subprocess.check_output(
+            ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+        ).strip()
+        != PINNED_REVISION
+    ):
+        raise RuntimeError(
+            f"Refusing to change existing reference checkout {repository}; "
+            "select a fresh --workspace"
+        )
 
     for patch in REFERENCE_PATCHES:
         apply_patch(repository, patch)
@@ -160,6 +367,7 @@ def setup(arguments) -> None:
         SKILL_DIR / "resources/vanjeelidar16.yaml",
         repository / "config/velodyne16.yaml",
     )
+    source_evidence = verify_reference_source(repository)
     (repository / "Log").mkdir(exist_ok=True)
     (repository / "result").mkdir(exist_ok=True)
     (catkin_ws / "src").mkdir(parents=True, exist_ok=True)
@@ -195,6 +403,17 @@ def setup(arguments) -> None:
                 "-DGRIL_DETERMINISTIC_FRONTEND=ON"
             ),
         ]
+    )
+    environment_manifest = {
+        "schema_version": 1,
+        "source": source_evidence,
+        "dockerfile_sha256": sha256(SKILL_DIR / "resources/Dockerfile"),
+        "image": {"tag": arguments.image, "id": docker_image_id(arguments.image)},
+        "catkin_devel_sha256": sha256_tree(catkin_ws / "devel"),
+        "build_command": "catkin_make -j4 --quiet -DGRIL_DETERMINISTIC_FRONTEND=ON",
+    }
+    environment_manifest_path(workspace).write_text(
+        yaml.safe_dump(environment_manifest, sort_keys=False)
     )
 
 
@@ -249,6 +468,13 @@ def calibrate(arguments) -> None:
     if not bag.exists():
         raise FileNotFoundError(f"Run prepare first: {bag}")
     repository, catkin_ws = paths(arguments.workspace.resolve())
+    source_evidence = verify_reference_source(repository)
+    environment_manifest = load_reference_environment(
+        arguments.workspace.resolve(),
+        arguments.image,
+        source_evidence,
+        catkin_ws,
+    )
     run(
         [
             "docker",
@@ -274,7 +500,9 @@ def calibrate(arguments) -> None:
             str(arguments.runs),
         ]
     )
-    write_reference_trace_manifest(output, repository, bag)
+    write_reference_trace_manifest(
+        output, repository, bag, source_evidence, environment_manifest
+    )
 
 
 def parse_result(path: Path) -> tuple[list[float], list[float], float]:
@@ -562,5 +790,6 @@ def all_steps(arguments) -> None:
 
 
 all_parser.set_defaults(function=all_steps)
-arguments = parser.parse_args()
-arguments.function(arguments)
+if __name__ == "__main__":
+    arguments = parser.parse_args()
+    arguments.function(arguments)

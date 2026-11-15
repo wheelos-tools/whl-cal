@@ -24,7 +24,7 @@ bazel build \
 From the repository root:
 
 ```bash
-gril-migrate prepare \
+lidar2imu prepare \
   --input /path/to/capture \
   --input-type record \
   --core-record-ingress tools/gril_record_core_reader/bazel-bin/record_ingress \

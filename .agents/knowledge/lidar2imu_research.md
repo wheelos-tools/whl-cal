@@ -37,6 +37,34 @@ files. The original GRIL executable digest is an *archived run identity*; a
 later instrumented executable is different and must not silently replace it
 in an A/B test.
 
+## Weilan 0827 corrected-IMU working fixture
+
+**Decision: use this as the current GRIL working input profile, not as an
+accuracy benchmark.** This is a separate dataset identity from the historical
+`/apollo/sensor/gnss/imu` experiment above. It uses
+`/apollo/sensor/gnss/corrected_imu`, whose header was audited as converted INS
+measurement time for this capture. Do not combine result rows, canonical
+hashes, or repeatability claims across the two topics.
+
+The corrected-IMU Apollo record and trusted ROSbag canonical datasets matched
+exactly in the validated comparison: 1,375 scans, 35,239,034 finite points,
+13,741 IMU samples, plus ordering, timestamps, frames, rings, point times,
+numeric LiDAR/IMU arrays, and static transforms. This verifies extraction
+equivalence only. The frozen GRIL reference produced identical result bytes
+in two runs, but the independent physical diagnostics rejected the candidate:
+held-out lever-arm residual improved only 1.13%, and contiguous yaw/time
+holdouts did not support a unique generalizing solution. Verdict:
+`rejected` for the reported extrinsic; `review-only` as a reproducible
+conversion/reference fixture. Artifacts are stored outside the repository at
+`/mnt/synology/whl-cal-gril-validation-20261114/weilan_0827_gril_reference/`.
+
+The prior `wheelos_core` ingress baseline and its array hashes use the raw IMU
+topic and remain useful for their original ingress/runtime regression purpose.
+They are not the corrected-IMU comparison target. The current native ROS-free
+implementation has a separate migration gate: its full A/B rotation
+discrepancy is 0.406964 deg versus a 0.2 deg gate. It must not be described as
+validated by either frozen-reference run above.
+
 ## P0-P3 method matrix and next experiment
 
 These priorities are **experiment order, not an accuracy ranking**. A
@@ -49,13 +77,14 @@ and AFLI-Calib revision `2fc27e4dab0ef43302a27ff49b4e1f1735a19414`.
 
 | Priority / method | Weilan 0827 evidence and status | Admission gate / smallest next experiment |
 | --- | --- | --- |
-| P0 native GRIL | `result`, but three full runs fail the 3 cm translation-repeatability gate; time-offset windows disagree. Independent x/y/yaw accuracy unknown. | Retain the archived baseline. On the frozen 0827 input, pin executable/config/input digests, repeat the **full** frontend and evaluate an independent physical holdout; first isolate the source of frontend dispersion without tuning the solver to 0827. |
+| P0 native GRIL | Historical raw-IMU runs fail the 3 cm translation-repeatability gate and disagree in time windows. Separately, corrected-IMU frozen-reference runs match each other but fail independent physical checks; native full A/B remains above its rotation gate. | Keep these experiment identities separate. Pin corrected-IMU canonical/config/executable digests, repeat the native **full** frontend, pass frozen-reference equivalence, then evaluate an independent physical holdout. |
 | P1 LI-Init | `no_result`, not a spatial-error value: displayed X/Y/Z progress 2%/2%/37%, IMU ~100 Hz versus its suggested >150 Hz. The [gate reconstruction](../../outputs/gril/research_0827_repeatability/diagnostics/li_init_gate_audit.yaml) reproduces the failure from its own LiDAR-only state log; a one-factor voxel rerun removes frontend warnings but still yields no result. Related to GRIL, so no independent-family win is implied. | **0827 failure diagnosis complete, calibration incomplete**: retain the unmodified sufficiency gate and the no-result. Independently assess LiDAR odometry motion quality before claiming the physical input rather than its odometry is insufficient; do not inflate frame count or resample IMU to manufacture sufficiency. |
 | P2 LI-Calib | `blocked_input_adapter`, not run, accuracy/runtime unknown. The actual 0827 `/velodyne_points` first message is **unorganized** `PointCloud2`, `height=1`, `width=25291`, with `x/y/z/intensity/time(float32 relative seconds)/ring`. LI-Calib's [reader](https://github.com/APRIL-ZJU/lidar_IMU_calib/blob/master/include/utils/dataset_reader.h) accepts PointCloud2 (the default launch selects `/velodyne_packets`), but its [PointCloud2 path](https://github.com/APRIL-ZJU/lidar_IMU_calib/blob/master/include/utils/vlp_common.h) ignores `time`/`ring` and calls `getExactTime(h,w)` from a VLP-16 table `[1824][16]`: on this first scan `h=0, w>=1824` is out of range. | Implement/test a sensor-aware PointCloud2 input path preserving each point's measured time/ring and require source-to-decoded timestamp/geometry agreement **before** optimization. Do not relabel Vanjee as VLP-16 or fabricate packets; after adapter acceptance check motion sufficiency. |
 | P3 AFLI-Calib | `blocked_input_adapter`, not run, accuracy/runtime unknown. Official [selector](https://github.com/DCSI2022/AFLI_Calib/blob/main/Parameter_Descrip.md) lists Livox, Velodyne, Ouster, Hesai. The [Velodyne and Ouster branches](https://github.com/DCSI2022/AFLI_Calib/blob/main/include/io.cpp) currently only print a label, without appending scans. Its Hesai parser expects `time` as **float64 absolute timestamp**, whereas 0827 has float32 relative seconds. Its intended capture is fast portable/non-repetitive motion. | Check physical sensor and motion fit; only then provide a validated Vanjee parser mapping relative time and ring, and independently audit IMU stream selection/still start. Never select `HESAI` solely because it loads PointCloud2; else record `not_applicable`, **not** algorithm failure. |
 
-**Dataset matrix:** 0827 is the same-bag P0/P1 negative/unstable case,
-not an accuracy benchmark for P2/P3; Weilan 0612 lacks usable Z-turn
+**Dataset matrix:** 0827 has separate raw-IMU historical negative/unstable
+evidence and a corrected-IMU working fixture whose physical verdict is
+rejected; neither is an accuracy benchmark for P2/P3. Weilan 0612 lacks usable Z-turn
 excitation after overlap cropping. Zhongji 05-06 has verified corrected
 INS-IMU time and 32 rings, but GRIL timing/seed sensitivity and frontend
 instability; Zhongji 05-07 short runs lack turns and its first-five-shard

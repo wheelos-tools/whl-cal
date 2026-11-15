@@ -380,6 +380,7 @@ public:
                                int &cut_frame_num, QD &lidar_q, QD &imu_q,
                                double &lidar_estimate_height);
   void solve_Rotation_only();
+  void set_rotation_initial_guess(const QD &rotation_lidar_to_imu);
   void printProgress(double percentage, int axis_ascii);
   void clear();
   void fout_before_filter();
@@ -421,6 +422,7 @@ public:
   bool verbose = false;
 
 private:
+  QD rotation_initial_guess_LI = QD::Identity();
   std::deque<CalibState> IMU_state_group;
   std::deque<CalibState> Lidar_state_group;
   std::deque<CalibState> IMU_state_group_ALL;

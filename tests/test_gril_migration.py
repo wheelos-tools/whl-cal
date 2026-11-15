@@ -1,49 +1,65 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import yaml
 
 from common.geometry import euler_xyz_degrees_to_matrix, quaternion_xyzw_to_matrix
-from gril.abtest import build_abtest_report
-from gril.adapters import (
+from lidar2imu.adapters import (
     ADAPTERS,
     CoreApolloRecordAdapter,
     Rosbag1Adapter,
     create_adapter,
     supported_input_types,
 )
-from gril.adapters.base import AdapterConfig
-from gril.adapters.record_files import record_paths
-from gril.cli import build_parser
-from gril.comparison import compare_datasets, compare_results, parse_gril_result
-from gril.config import compare_configs, config_digest, load_algorithm_config
-from gril.dataset_io import load_dataset, write_dataset
-from gril.evaluation import build_customer_summary, build_input_contract
-from gril.frontend_event import write_frontend_event_input
-from gril.frontend_runner import NativeFrontendRunConfig, build_native_frontend_commands
-from gril.frontend_trace import compare_frontend_traces
-from gril.full_runner import (
+from lidar2imu.adapters.base import AdapterConfig
+from lidar2imu.adapters.record_files import record_paths
+from lidar2imu.algorithms.gril.config import (
+    compare_configs,
+    config_digest,
+    load_algorithm_config,
+)
+from lidar2imu.algorithms.gril.frontend_event import write_frontend_event_input
+from lidar2imu.algorithms.gril.frontend_runner import (
+    NativeFrontendRunConfig,
+    build_native_frontend_commands,
+)
+from lidar2imu.algorithms.gril.full_runner import (
     NativeFullRunConfig,
     build_full_native_command,
     write_full_native_config,
     write_full_native_input,
 )
-from gril.models import CanonicalDataset, ImuBatch, LidarBatch
-from gril.native_runner import (
+from lidar2imu.algorithms.gril.native_runner import (
     NativeBatchRunConfig,
     build_native_command,
     native_config_values,
     write_native_config,
 )
-from gril.preprocess_trace import write_preprocess_input
-from gril.reference import REFERENCE
-from gril.reference_runner import ReferenceRunConfig, build_reference_command
-from gril.validation import build_full_ab_review, write_full_ab_review
+from lidar2imu.algorithms.gril.preprocess_trace import write_preprocess_input
+from lidar2imu.cli import build_parser
+from lidar2imu.dataset_io import load_dataset, write_dataset
+from lidar2imu.evaluation import build_customer_summary, build_input_contract
+from lidar2imu.evaluation.abtest import build_abtest_report
+from lidar2imu.evaluation.comparison import (
+    compare_datasets,
+    compare_results,
+    parse_gril_result,
+)
+from lidar2imu.evaluation.frontend_trace import compare_frontend_traces
+from lidar2imu.evaluation.migration_review import (
+    build_full_ab_review,
+    write_full_ab_review,
+)
+from lidar2imu.models import CanonicalDataset, ImuBatch, LidarBatch
+from lidar2imu.reference.gril.identity import REFERENCE
+from lidar2imu.reference.gril.runner import ReferenceRunConfig, build_reference_command
 
 
 def _dataset() -> CanonicalDataset:
@@ -230,14 +246,12 @@ Time Lag IMU to LiDAR = 0.004
             reference_trace.write_text("GRIL_BATCH_TRACE 1\n")
             candidate_trace.write_text("GRIL_BATCH_TRACE 1\n")
             config = root / "gril.yaml"
-            config.write_text(
-                """
+            config.write_text("""
 preprocess: {lidar_type: 2}
 calibration: {cut_frame: true}
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.0}
-"""
-            )
+""")
             report = build_abtest_report(
                 reference_dataset,
                 candidate_dataset,
@@ -249,7 +263,12 @@ patchworkpp: {sensor_height: 1.0}
                 candidate_trace,
             )
         self.assertEqual(report["verdict"], "equivalent")
-        self.assertNotIn("lidar2imu", str(report["methods"]))
+        self.assertEqual(report["methods"]["reference"]["name"], "gril_ros_reference")
+        self.assertEqual(report["methods"]["candidate"]["name"], "gril_native")
+        self.assertIn(
+            "lidar2imu/reference/gril/patches",
+            report["methods"]["reference"]["batch_trace_patch"],
+        )
 
     def test_abtest_rejects_same_trace_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -265,15 +284,13 @@ patchworkpp: {sensor_height: 1.0}
             trace = root / "trace.txt"
             trace.write_text("GRIL_BATCH_TRACE 1\n")
             config = root / "gril.yaml"
-            config.write_text(
-                """
+            config.write_text("""
 preprocess: {}
 calibration: {}
 mapping: {}
 patchworkpp: {}
 launch: {}
-"""
-            )
+""")
             with self.assertRaisesRegex(ValueError, "distinct run artifacts"):
                 build_abtest_report(
                     dataset,
@@ -356,8 +373,7 @@ patchworkpp: {sensor_height: 1.0}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "gril.yaml"
-            source.write_text(
-                """
+            source.write_text("""
 preprocess: {lidar_type: 2}
 calibration:
   cut_frame: true
@@ -366,8 +382,7 @@ calibration:
   gyro_factor: 13.0
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.117}
-"""
-            )
+""")
             values = native_config_values(source)
             native = write_native_config(source, root / "native.conf")
             native_content = native.read_text()
@@ -375,6 +390,33 @@ patchworkpp: {sensor_height: 1.117}
         self.assertEqual(values["trans_IL_x"], -0.34)
         self.assertEqual(values["gyro_factor"], 13.0)
         self.assertIn("svd_threshold 0.01", native_content)
+        self.assertNotIn("rotation_LI_q", native_content)
+
+    def test_native_config_preserves_optional_rotation_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "gril.yaml"
+            algorithm = {
+                "preprocess": {},
+                "calibration": {"rotation_LI_xyzw": [0.0, 0.0, 0.8, 0.6]},
+                "mapping": {},
+                "patchworkpp": {},
+            }
+            source.write_text(yaml.safe_dump(algorithm))
+            content = write_native_config(source, root / "native.conf").read_text()
+            self.assertIn("rotation_LI_qz 0.8", content)
+            self.assertIn("rotation_LI_qw 0.6", content)
+            for invalid in (
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, float("nan"), 1.0],
+                [False, 0.0, 0.0, 1.0],
+            ):
+                with self.subTest(rotation=invalid):
+                    algorithm["calibration"]["rotation_LI_xyzw"] = invalid
+                    source.write_text(yaml.safe_dump(algorithm))
+                    with self.assertRaisesRegex(ValueError, "rotation_LI_xyzw"):
+                        write_native_config(source, root / "native.conf")
 
     def test_native_command_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -417,8 +459,7 @@ patchworkpp: {sensor_height: 1.117}
             root = Path(directory)
             write_dataset(repeated, root / "dataset")
             config = root / "gril.yaml"
-            config.write_text(
-                """
+            config.write_text("""
 preprocess:
   blind: 0.5
   point_filter_num: 3
@@ -426,8 +467,7 @@ preprocess:
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-"""
-            )
+""")
             output = write_preprocess_input(
                 root / "dataset",
                 config,
@@ -459,14 +499,12 @@ patchworkpp: {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "gril.yaml"
-            config.write_text(
-                """
+            config.write_text("""
 preprocess: {blind: 0.5}
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-"""
-            )
+""")
             with self.assertRaisesRegex(ValueError, "point_filter_num"):
                 write_frontend_event_input(
                     root / "missing-dataset",
@@ -480,14 +518,12 @@ patchworkpp: {}
             dataset = root / "dataset"
             write_dataset(_dataset(), dataset)
             gril_config = root / "gril.yaml"
-            gril_config.write_text(
-                """
+            gril_config.write_text("""
 preprocess: {blind: 0.5, point_filter_num: 3, scan_line: 16}
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-"""
-            )
+""")
             frontend = root / "gril_native_frontend_event_trace"
             ground = root / "gril_native_ground_trace"
             frontend.touch()
@@ -687,14 +723,12 @@ patchworkpp: {}
             root = Path(directory)
             dataset = write_dataset(_dataset(), root / "dataset")
             config = root / "gril.yaml"
-            config.write_text(
-                """
+            config.write_text("""
 preprocess: {lidar_type: 2}
 calibration: {cut_frame: true}
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.0}
-"""
-            )
+""")
             result_template = (
                 "Rotation LiDAR to IMU = {rotation} 0 0\n"
                 "Translation LiDAR to IMU = 0 0 0\n"
@@ -849,6 +883,65 @@ patchworkpp: {sensor_height: 1.0}
         self.assertTrue(report["gates"]["native_repeatability"])
         self.assertFalse(report["gates"]["exact_full_state_equality_required"])
         self.assertEqual(report["verdict"]["calibration_physical_quality"], "not_run")
+
+
+class GrilFlatCloudExportTest(unittest.TestCase):
+    def test_array_export_preserves_object_path_fields_and_invalid_point_rings(self):
+        from lidar2lidar.apollo_flatbuffer_messages import (
+            FlatHeaderMessage,
+            FlatPointCloudMessage,
+        )
+
+        script = (
+            Path(__file__).resolve().parents[1]
+            / ".agents/skills/gril-calib-validation/scripts/export_apollo_rosbag.py"
+        )
+        spec = importlib.util.spec_from_file_location("gril_bag_export", script)
+        exporter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(exporter)
+        exporter.SCAN_LINES = 32
+        dtype = np.dtype(
+            [
+                ("x", "<f4"),
+                ("y", "<f4"),
+                ("z", "<f4"),
+                ("intensity", "<u4"),
+                ("timestamp", "<u8"),
+            ]
+        )
+        records = np.zeros(35, dtype=dtype)
+        records["x"] = 1.0
+        records["intensity"] = np.arange(35)
+        records["timestamp"] = 1_794_359_541_000_000_000 + np.arange(35) * 1000
+        records["x"][0] = np.nan
+        records["z"][17] = np.inf
+        message = FlatPointCloudMessage(
+            header=FlatHeaderMessage(0.0, "", 0, "left_front"),
+            frame_id="left_front",
+            is_dense=False,
+            measurement_time=0.0,
+            width=35,
+            height=1,
+            point_records=records,
+        )
+        object_message = SimpleNamespace(
+            point=message.point, frame_id=message.frame_id, header=message.header
+        )
+        types = {
+            name: lambda *args: args for name in ("Header", "PointField", "PointCloud2")
+        }
+        types["Time"] = lambda **kwargs: kwargs
+        timestamp, fast = exporter._pointcloud_message(message, 7, types)
+        old_timestamp, original = exporter._pointcloud_message(object_message, 7, types)
+        self.assertEqual(timestamp, old_timestamp)
+        self.assertEqual(timestamp, int(records["timestamp"][0]))
+        self.assertEqual(fast[:7], original[:7])
+        fast_points = np.frombuffer(fast[7], dtype=exporter.POINT_DTYPE)
+        old_points = np.frombuffer(original[7], dtype=exporter.POINT_DTYPE)
+        for field in exporter.POINT_DTYPE.names:
+            np.testing.assert_array_equal(fast_points[field], old_points[field])
+        self.assertEqual(int(fast_points["ring"][0]), 1)
+        self.assertEqual(int(fast_points["ring"][-1]), 2)
 
 
 if __name__ == "__main__":

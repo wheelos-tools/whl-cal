@@ -436,8 +436,18 @@ void Gril_Calib::zero_phase_filt(const std::deque<CalibState> &signal_in,
   std::reverse(signal_out.begin(), signal_out.end());
 }
 
+void Gril_Calib::set_rotation_initial_guess(const QD &rotation_lidar_to_imu) {
+  if (!rotation_lidar_to_imu.coeffs().allFinite() ||
+      std::abs(rotation_lidar_to_imu.norm() - 1.0) > 1e-6)
+    throw std::invalid_argument(
+        "rotation initial guess must be a finite unit quaternion (LiDAR to IMU)");
+  rotation_initial_guess_LI = rotation_lidar_to_imu;
+}
+
 void Gril_Calib::solve_Rotation_only() {
-  double R_LI_quat[4] = {1.0, 0.0, 0.0, 0.0};
+  double R_LI_quat[4] = {
+      rotation_initial_guess_LI.w(), rotation_initial_guess_LI.x(),
+      rotation_initial_guess_LI.y(), rotation_initial_guess_LI.z()};
   auto *quaternion_parameterization = new ceres::QuaternionParameterization();
   ceres::Problem problem;
   problem.AddParameterBlock(R_LI_quat, 4, quaternion_parameterization);
