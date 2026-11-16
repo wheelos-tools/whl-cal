@@ -46,6 +46,38 @@ def compare_datasets(
             left.imu.timestamps_ns, right.imu.timestamps_ns
         ),
     }
+    time_provenance = {}
+    for name, left_times, right_times in (
+        (
+            "lidar_measurement_timestamps_ns",
+            left.lidar.measurement_timestamps_ns,
+            right.lidar.measurement_timestamps_ns,
+        ),
+        (
+            "lidar_dispatch_timestamps_ns",
+            left.lidar.dispatch_timestamps_ns,
+            right.lidar.dispatch_timestamps_ns,
+        ),
+        (
+            "imu_dispatch_timestamps_ns",
+            left.imu.dispatch_timestamps_ns,
+            right.imu.dispatch_timestamps_ns,
+        ),
+    ):
+        left_present = left_times is not None
+        right_present = right_times is not None
+        if not left_present and not right_present:
+            status = "both_absent"
+        elif left_present != right_present:
+            status = "presence_mismatch"
+        else:
+            status = "equal" if np.array_equal(left_times, right_times) else "different"
+        checks[name] = status in {"both_absent", "equal"}
+        time_provenance[name] = {
+            "left_present": left_present,
+            "right_present": right_present,
+            "status": status,
+        }
     errors = {
         "xyz_max_absolute_error": _max_error(left.lidar.xyz, right.lidar.xyz),
         "intensity_max_absolute_error": _max_error(
@@ -80,6 +112,7 @@ def compare_datasets(
         "verdict": "equivalent" if all(checks.values()) else "different",
         "checks": checks,
         "errors": errors,
+        "time_provenance": time_provenance,
         "tolerances": {
             "point": point_tolerance,
             "point_time_s": point_time_tolerance_s,

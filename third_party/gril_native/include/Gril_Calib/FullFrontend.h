@@ -96,6 +96,7 @@ struct FullFrontendRunConfig {
 class HardTimeCompensator {
 public:
   explicit HardTimeCompensator(double configured_time_lag_s = 0.0);
+  void initialize_hard_offset(double hard_offset_s);
 
   bool lidar_rolled_back(double raw_timestamp_s) const;
   bool observe_lidar(double raw_timestamp_s, bool imu_queue_nonempty);

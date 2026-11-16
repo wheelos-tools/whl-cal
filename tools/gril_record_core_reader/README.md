@@ -5,8 +5,17 @@ adapter for GRIL. It uses `wheelos_core::RecordReader` and the record-provided
 protobuf descriptors to decode LiDAR, IMU, and static TF data. The output is a
 versioned canonical interchange file; the Python adapter loads it into the
 existing canonical model and writes the established NPZ/YAML artifacts. GRIL
-preprocessing, synchronization, frontend, solver, and native dataset boundary
-are unchanged.
+preprocessing and optimization are not part of this adapter.
+
+Interchange v2 appends three signed-int64 nanosecond arrays after IMU values
+and before transforms: LiDAR `measurement_time` (scan end), LiDAR publication
+header, IMU independent publication header. Zero means unavailable; an IMU
+header used as measurement fallback is not independent publication evidence.
+Canonical scan starts, point offsets and IMU measurement signals are unchanged.
+The Python reader also accepts v1 (without these arrays); canonical schema 1
+stores them as optional NPZ fields. See the
+[clock contract](../../docs/lidar2imu_quickstart.md#measurement-clocks-and-publication-time)
+before replaying different sensor epochs.
 
 ## Build
 

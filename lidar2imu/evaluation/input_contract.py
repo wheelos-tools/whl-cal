@@ -21,6 +21,18 @@ def _percentiles(values: np.ndarray) -> dict[str, float] | None:
     }
 
 
+def _time_provenance(values: np.ndarray | None) -> dict[str, Any]:
+    if values is None:
+        return {"available": False}
+    valid = values[values > 0]
+    return {
+        "available": bool(len(valid)),
+        "valid_count": int(len(valid)),
+        "missing_count": int(len(values) - len(valid)),
+        "backward_steps": int(np.count_nonzero(np.diff(valid) < 0)),
+    }
+
+
 def build_input_contract(dataset: CanonicalDataset) -> dict[str, Any]:
     dataset.validate()
     lidar = dataset.lidar.normalized()
@@ -65,6 +77,11 @@ def build_input_contract(dataset: CanonicalDataset) -> dict[str, Any]:
             "imu_monotonic": bool(np.all(imu_gaps >= 0.0)),
             "lidar_gap_s": _percentiles(lidar_gaps),
             "imu_gap_s": _percentiles(imu_gaps),
+            "lidar_scan_end_measurement": _time_provenance(
+                lidar.measurement_timestamps_ns
+            ),
+            "lidar_dispatch": _time_provenance(lidar.dispatch_timestamps_ns),
+            "imu_dispatch": _time_provenance(imu.dispatch_timestamps_ns),
         },
         "imu_contract": {
             "all_values_finite": bool(

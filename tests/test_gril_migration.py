@@ -554,8 +554,9 @@ patchworkpp: {}
             with output.open("rb") as stream:
                 self.assertEqual(
                     stream.readline(),
-                    b"GRIL_NATIVE_DATASET 1\n",
+                    b"GRIL_NATIVE_DATASET 2\n",
                 )
+                self.assertEqual(int.from_bytes(stream.read(8), "little"), 0)
                 self.assertEqual(
                     int.from_bytes(stream.read(8), "little"),
                     3,
@@ -590,6 +591,7 @@ patchworkpp: {}
             output = write_full_native_input(manifest, root / "input.bin")
             with output.open("rb") as stream:
                 stream.readline()
+                stream.read(8)  # fixed H
                 event_count = int.from_bytes(stream.read(8), "little")
         self.assertEqual(event_count, 4)
 

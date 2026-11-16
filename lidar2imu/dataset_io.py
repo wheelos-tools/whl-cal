@@ -52,12 +52,22 @@ def write_dataset(dataset: CanonicalDataset, output_dir: Path) -> Path:
         intensity=lidar.intensity,
         ring=lidar.ring,
         point_time_s=lidar.point_time_s,
+        **{
+            name: value
+            for name in ("measurement_timestamps_ns", "dispatch_timestamps_ns")
+            if (value := getattr(lidar, name)) is not None
+        },
     )
     np.savez(
         imu_path,
         timestamps_ns=imu.timestamps_ns,
         angular_velocity=imu.angular_velocity,
         linear_acceleration=imu.linear_acceleration,
+        **(
+            {"dispatch_timestamps_ns": imu.dispatch_timestamps_ns}
+            if imu.dispatch_timestamps_ns is not None
+            else {}
+        ),
     )
 
     manifest = {
@@ -130,6 +140,16 @@ def load_dataset(path: Path, verify_hashes: bool = True) -> CanonicalDataset:
             intensity=values["intensity"],
             ring=values["ring"],
             point_time_s=values["point_time_s"],
+            measurement_timestamps_ns=(
+                values["measurement_timestamps_ns"]
+                if "measurement_timestamps_ns" in values
+                else None
+            ),
+            dispatch_timestamps_ns=(
+                values["dispatch_timestamps_ns"]
+                if "dispatch_timestamps_ns" in values
+                else None
+            ),
         )
     with np.load(imu_path, allow_pickle=False) as values:
         imu = ImuBatch(
@@ -137,6 +157,11 @@ def load_dataset(path: Path, verify_hashes: bool = True) -> CanonicalDataset:
             timestamps_ns=values["timestamps_ns"],
             angular_velocity=values["angular_velocity"],
             linear_acceleration=values["linear_acceleration"],
+            dispatch_timestamps_ns=(
+                values["dispatch_timestamps_ns"]
+                if "dispatch_timestamps_ns" in values
+                else None
+            ),
         )
 
     dataset = CanonicalDataset(

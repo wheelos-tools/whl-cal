@@ -198,6 +198,11 @@ class Rosbag1Adapter:
                 "adapter": "Rosbag1Adapter",
                 "reader": "rosbags",
                 "ros_runtime_required": False,
+                "time_provenance": {
+                    "measurement": "ROS header stamp, else bag timestamp",
+                    "dispatch": "unavailable; bag time is not verified publication",
+                    "cross_epoch_replay": "requires independent dispatch evidence",
+                },
                 "rejected": dict(rejected),
                 "point_time": {
                     "field": "time",

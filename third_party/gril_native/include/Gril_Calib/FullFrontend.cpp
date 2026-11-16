@@ -600,7 +600,9 @@ void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
         trace << "odometry_quiesced\n";
         pipeline.calibration.dump_batch_trace_v1(
             run.batch_trace_path, pipeline.config.orig_odom_freq,
-            pipeline.config.cut_frame_num, pipeline.hard_time.hard_offset_s(),
+            pipeline.config.cut_frame_num,
+            pipeline.hard_time.hard_offset_s() +
+                pipeline.config.configured_time_lag_s,
             pipeline.move_start_time_s);
         trace << "batch_handoff " << pipeline.calibration.all_imu_sample_count()
               << " " << pipeline.calibration.lidar_state_count() << " "
@@ -621,6 +623,13 @@ void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
 
 HardTimeCompensator::HardTimeCompensator(double configured_time_lag_s)
     : configured_time_lag_s_(configured_time_lag_s) {}
+
+void HardTimeCompensator::initialize_hard_offset(double hard_offset_s) {
+  if (!std::isfinite(hard_offset_s) || hard_offset_locked_)
+    throw std::runtime_error("invalid or repeated fixed clock initialization");
+  hard_offset_s_ = hard_offset_s;
+  hard_offset_locked_ = true;
+}
 
 bool HardTimeCompensator::lidar_rolled_back(double raw_timestamp_s) const {
   return raw_timestamp_s < last_lidar_timestamp_s_;
@@ -757,13 +766,22 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
 
   std::string magic;
   std::getline(input, magic);
-  if (magic != "GRIL_NATIVE_DATASET 1")
+  const bool fixed_time_axis = magic == "GRIL_NATIVE_DATASET 2";
+  if (!fixed_time_axis && magic != "GRIL_NATIVE_DATASET 1")
     throw std::runtime_error("unsupported native dataset version");
+  std::int64_t hard_offset_ns = 0;
+  if (fixed_time_axis)
+    read_binary(input, hard_offset_ns, "fixed hard time offset");
+  const double hard_offset_s = static_cast<double>(hard_offset_ns) * 1e-9;
+  trace << "time_axis " << (fixed_time_axis ? "fixed" : "legacy") << " "
+        << hard_offset_s << " " << config.configured_time_lag_s << "\n";
   std::uint64_t event_count = 0;
   read_binary(input, event_count, "event count");
   trace << "events " << event_count << "\n";
 
   std::unique_ptr<PipelineState> pipeline(new PipelineState(config));
+  if (fixed_time_axis)
+    pipeline->hard_time.initialize_hard_offset(hard_offset_s);
   double previous_event_timestamp_s = 0.0;
   bool have_previous_event = false;
   for (std::uint64_t event_index = 0; event_index < event_count;
@@ -779,14 +797,17 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
       if (!input)
         throw std::runtime_error("truncated native dataset at IMU values");
       const double raw_timestamp_s = ros_time_to_seconds(timestamp_ns);
+      const double event_timestamp_s = raw_timestamp_s - hard_offset_s;
       if (run.forward_gap_policy == ForwardGapPolicy::Reset &&
           have_previous_event &&
-          raw_timestamp_s - previous_event_timestamp_s > run.forward_gap_s) {
+          event_timestamp_s - previous_event_timestamp_s > run.forward_gap_s) {
         trace << "forward_gap_reset " << event_index << " "
-              << previous_event_timestamp_s << " " << raw_timestamp_s << "\n";
+              << previous_event_timestamp_s << " " << event_timestamp_s << "\n";
         pipeline.reset(new PipelineState(config));
+        if (fixed_time_axis)
+          pipeline->hard_time.initialize_hard_offset(hard_offset_s);
       }
-      previous_event_timestamp_s = raw_timestamp_s;
+      previous_event_timestamp_s = event_timestamp_s;
       have_previous_event = true;
 
       const double compensated_timestamp_s =
@@ -847,6 +868,8 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
         trace << "forward_gap_reset " << event_index << " "
               << previous_event_timestamp_s << " " << raw_timestamp_s << "\n";
         pipeline.reset(new PipelineState(config));
+        if (fixed_time_axis)
+          pipeline->hard_time.initialize_hard_offset(hard_offset_s);
       }
       previous_event_timestamp_s = raw_timestamp_s;
       have_previous_event = true;

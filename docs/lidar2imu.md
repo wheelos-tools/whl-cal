@@ -13,6 +13,7 @@ stability: proposal
 - **方案定位**：GV-MultiCalib 是后续研究候选，目标为地面车辆、多 Session、共享 LiDAR→IMU 外参的连续时间标定。先证明坐标/残差/可观测性，再实现单段与多段优化。
 - **三段流水线**：数据提取与质量筛选 → 算法求解 → 指标验证与可视化。质量门限用于解释、拒收和发布决策，不改写求解器行为。
 - **数据边界**：Weilan 0827 corrected-IMU profile 已通过 Apollo/ROSbag canonical 等价检查，可作为工作输入 fixture；物理外参仍 rejected。中集及其他 Weilan capture 仍须分别审计时钟、连续性、点时间和传感器通道。
+- **时钟边界**：测量时间与独立发布时间分别持久化；跨历元仅在回放入口一次初始化固定 H，绝不逐消息 header 重锚。旧同钟数据兼容，缺独立发布时间的跨历元数据明确拒绝；约定与限制见 [quick start](lidar2imu_quickstart.md#measurement-clocks-and-publication-time)。
 - **精度结论**：0827 raw-IMU 历史结果与 corrected-IMU 新工作 profile 是不同输入身份；二者及 native/frozen migration 证据不可合并。缺少独立物理验证时结果只能是研究候选。
 
 ## 子文档

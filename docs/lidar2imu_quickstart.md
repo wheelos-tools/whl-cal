@@ -153,6 +153,58 @@ in [GRIL baseline method](lidar2imu/07_gril_baseline.md). Do not use the
 historical raw-IMU canonical dataset as the corrected-IMU run input or as its
 comparison target.
 
+### Measurement clocks and publication time
+
+Canonical measurement timestamps are never replaced with host headers:
+Apollo point timestamps define the scan start and relative point times;
+`measurement_time` defines the LiDAR **scan end** and, when valid, raw IMU
+measurement time. Optional NPZ arrays preserve the original LiDAR scan-end
+`measurement_timestamps_ns` and independent `dispatch_timestamps_ns` for both
+streams (zero means unavailable). IMU headers used as measurement-time fallback
+are not also claimed as independent dispatch evidence. The corrected-IMU topic
+selection above is unchanged.
+
+With complete independent publication evidence in a shared host clock and
+overlapping publication ranges, native replay first computes one coarse offset
+candidate, even when the original measurement ranges overlap:
+
+```text
+candidate = median(IMU measurement - IMU publication)
+          - median(LiDAR scan_end measurement - LiDAR publication)
+H = candidate if abs(candidate) > 1 second, otherwise 0
+native IMU time = original IMU measurement - H - configured C
+reported total IMU-to-LiDAR lag = H + C + GRIL tau1 + GRIL tau2
+```
+
+Events merge on fixed-H aligned measurement time; raw payload timestamps,
+point intervals and IMU signals remain unchanged. Backward host headers are
+retained and contribute only to the one-shot median, never to per-message
+synchronization or a drift model. Publication latency asymmetry can bias this
+coarse initializer: it is not a calibrated time offset or accuracy evidence.
+H is locked before either stream enters native synchronization and survives
+explicit forward-gap resets. Runtime trace/manifest record H and C separately;
+the existing batch-trace `timediff_imu_wrt_lidar` field carries their sum.
+The one-second threshold retains GRIL's hard-offset semantics and leaves
+same-clock/small-offset replay unchanged. A ten-second capture with a five-second
+clock offset still needs H, despite overlapping raw timestamp ranges.
+
+Schema-1 canonical datasets and old C++ interchange-v1 files still load.
+Without complete independent evidence, legacy canonical and ROS bags retain
+H=0 compatibility when their measurement ranges are not separated by more than
+one second; this is not proof of a shared clock. Larger range separation fails
+explicitly: re-extract the original record instead of guessing an offset.
+Bags do not establish independent publication timing from storage timestamps.
+
+`compare-datasets` compares the three optional time-provenance arrays exactly,
+without retiming either input, and reports each side's presence and comparison
+status. Differing values or a field present on only one side produce
+`different`, even if all measurement/signal arrays match. Both sides lacking
+a field retain legacy equivalence checks, with explicit `both_absent` status;
+this is not evidence that missing publication times are equivalent. A new
+record extraction compared against an older canonical/bag dataset can therefore
+require re-extraction of the trusted provenance rather than a full-equivalence
+claim based only on matching measurement arrays.
+
 ## 4. Run native GRIL
 
 ```bash

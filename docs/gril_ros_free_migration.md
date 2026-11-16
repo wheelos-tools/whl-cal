@@ -312,8 +312,11 @@ configuration, first-frame tree construction, and the second-frame iterated
 EKF/map update.
 
 The integrated executable adds the deterministic
-`GRIL_NATIVE_DATASET 1` binary input and `GRIL_FULL_FRONTEND_TRACE 1` output
-boundaries. Nanosecond timestamps are converted with ROS `Time::toSec`
+`GRIL_NATIVE_DATASET 2` binary input (v1 remains readable) and
+`GRIL_FULL_FRONTEND_TRACE 1` output boundaries. The
+[fixed-clock replay contract](lidar2imu_quickstart.md#measurement-clocks-and-publication-time)
+locks coarse H before synchronization and keeps publication times out of the
+measurement intervals. Nanosecond timestamps are converted with ROS `Time::toSec`
 arithmetic, Fusion AHRS is updated before the odometry ground update, and every
 cut retains the Patchwork++ state from its own source full scan. Thus all cuts
 from one source scan reuse one ground estimate even if a later scan arrives

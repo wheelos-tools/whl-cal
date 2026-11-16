@@ -14,12 +14,24 @@ def _array(value: np.ndarray, dtype: np.dtype) -> np.ndarray:
     return np.ascontiguousarray(np.asarray(value, dtype=dtype))
 
 
+def _optional_times(value: np.ndarray | None) -> np.ndarray | None:
+    return None if value is None else _array(value, np.int64)
+
+
+def _validate_times(value: np.ndarray | None, count: int) -> None:
+    if value is not None and (value.shape != (count,) or np.any(value < 0)):
+        raise ValueError("Time provenance must have one non-negative value per sample")
+
+
 @dataclass(frozen=True)
 class LidarBatch:
     """Packed ragged LiDAR scans.
 
     ``scan_offsets`` indexes the flattened per-point arrays. Point time is
-    relative to the scan timestamp and expressed in seconds.
+    relative to the scan timestamp and expressed in seconds. Optional source
+    measurement timestamps are scan ends, not canonical scan starts. Optional
+    dispatch timestamps are independent host publication times. Zero denotes
+    unavailable provenance; neither changes the canonical measurement clock.
     """
 
     frame_id: str
@@ -29,6 +41,8 @@ class LidarBatch:
     intensity: np.ndarray
     ring: np.ndarray
     point_time_s: np.ndarray
+    measurement_timestamps_ns: np.ndarray | None = None
+    dispatch_timestamps_ns: np.ndarray | None = None
 
     def normalized(self) -> "LidarBatch":
         return LidarBatch(
@@ -39,11 +53,15 @@ class LidarBatch:
             intensity=_array(self.intensity, np.float32),
             ring=_array(self.ring, np.uint16),
             point_time_s=_array(self.point_time_s, np.float32),
+            measurement_timestamps_ns=_optional_times(self.measurement_timestamps_ns),
+            dispatch_timestamps_ns=_optional_times(self.dispatch_timestamps_ns),
         )
 
     def validate(self) -> None:
         lidar = self.normalized()
         scan_count = len(lidar.scan_timestamps_ns)
+        _validate_times(lidar.measurement_timestamps_ns, scan_count)
+        _validate_times(lidar.dispatch_timestamps_ns, scan_count)
         point_count = len(lidar.xyz)
         if not lidar.frame_id:
             raise ValueError("LiDAR frame_id is required")
@@ -83,6 +101,7 @@ class ImuBatch:
     timestamps_ns: np.ndarray
     angular_velocity: np.ndarray
     linear_acceleration: np.ndarray
+    dispatch_timestamps_ns: np.ndarray | None = None
 
     def normalized(self) -> "ImuBatch":
         return ImuBatch(
@@ -90,11 +109,13 @@ class ImuBatch:
             timestamps_ns=_array(self.timestamps_ns, np.int64),
             angular_velocity=_array(self.angular_velocity, np.float64),
             linear_acceleration=_array(self.linear_acceleration, np.float64),
+            dispatch_timestamps_ns=_optional_times(self.dispatch_timestamps_ns),
         )
 
     def validate(self) -> None:
         imu = self.normalized()
         sample_count = len(imu.timestamps_ns)
+        _validate_times(imu.dispatch_timestamps_ns, sample_count)
         if not imu.frame_id:
             raise ValueError("IMU frame_id is required")
         if np.any(np.diff(imu.timestamps_ns) < 0):

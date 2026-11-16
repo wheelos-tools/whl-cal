@@ -17,6 +17,7 @@ from lidar2imu.algorithms.gril.native_runner import write_native_config
 from lidar2imu.dataset_io import file_sha256, load_dataset
 from lidar2imu.evaluation.customer_summary import write_customer_summary
 from lidar2imu.models import CanonicalDataset
+from lidar2imu.time_axis import replay_hard_offset_ns
 
 _EVENT_COUNT = struct.Struct("<Q")
 _IMU_EVENT = struct.Struct("<Bq6d")
@@ -315,6 +316,8 @@ def write_full_native_input(
         if isinstance(dataset_path, CanonicalDataset)
         else load_dataset(dataset_path)
     )
+    dataset.validate()
+    hard_offset_ns = replay_hard_offset_ns(dataset)
     lidar = dataset.lidar.normalized()
     imu = dataset.imu.normalized()
     selected_scans = len(lidar.scan_timestamps_ns) if scan_count is None else scan_count
@@ -328,26 +331,25 @@ def write_full_native_input(
         (int(lidar.scan_timestamps_ns[index]), 1, index)
         for index in range(selected_scans)
     ]
-    # Preserve the complete IMU stream.  A source may require fallback
-    # azimuth timing or discover a hard sensor-clock offset only after the
-    # first LiDAR event, so a raw point-time-derived cutoff can omit samples
-    # needed to synchronize the final selected scan.
+    # Keep all IMU samples, including the tail needed to finish the last scan
+    # when preprocessing uses azimuth-derived point timing.
     events.extend(
-        (int(imu.timestamps_ns[index]), 0, index)
+        (int(imu.timestamps_ns[index]) - hard_offset_ns, 0, index)
         for index in range(len(imu.timestamps_ns))
     )
     events.sort()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as output:
-        output.write(b"GRIL_NATIVE_DATASET 1\n")
+        output.write(b"GRIL_NATIVE_DATASET 2\n")
+        output.write(struct.pack("<q", hard_offset_ns))
         output.write(_EVENT_COUNT.pack(len(events)))
         for timestamp_ns, event_type, index in events:
             if event_type == 0:
                 output.write(
                     _IMU_EVENT.pack(
                         0,
-                        timestamp_ns,
+                        int(imu.timestamps_ns[index]),
                         *imu.angular_velocity[index],
                         *imu.linear_acceleration[index],
                     )
@@ -449,7 +451,7 @@ def run_full_native(config: NativeFullRunConfig) -> Path:
             "dataset_sha256": file_sha256(dataset_manifest),
             "native_boundary": str(input_path.resolve()),
             "native_boundary_sha256": file_sha256(input_path),
-            "native_boundary_schema": "GRIL_NATIVE_DATASET 1",
+            "native_boundary_schema": "GRIL_NATIVE_DATASET 2",
             "scan_count": config.scan_count,
         },
         "algorithm_config": {
@@ -466,6 +468,9 @@ def run_full_native(config: NativeFullRunConfig) -> Path:
             "gap_policy": config.gap_policy,
             "forward_gap_s": config.forward_gap_s,
             "configured_time_lag_s": config.configured_time_lag_s,
+            "hard_time_offset_s": replay_hard_offset_ns(dataset) / 1e9,
+            "time_convention": "t_imu_aligned = t_imu - H - C; total = H+C+tau1+tau2",
+            "event_order": "fixed-H aligned measurement time; never per-message header",
             "quality_gating_applied": False,
             "batch_handoff": "live_trace_to_clean_native_process",
         },
