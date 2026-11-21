@@ -315,7 +315,30 @@ The current update also makes that pattern more explicit in artifacts:
 - `metrics.yaml` now exposes both `coarse_metrics` and `fine_metrics`
 - degenerate or poor-quality edges can now be rejected by quality gates
 
-## 7. Current gaps for future iteration
+## 7. Semantic / Intensity / 3D-FoV Upgrade & Joint L2I+L2L Integration
+
+To address raw-cloud ICP corridor degeneracy, ground-point dominance, and
+sensor-gain intensity mismatch on diagonal corner LiDARs,
+`lidar2lidar/semantic_registration.py` provides:
+
+- **4-channel primitive extraction (`extract_geometric_primitives`)**: balanced
+  ground planes, structural vertical facades, vertical poles/edges (`2D`
+  point-to-line residuals), and range/incidence-compensated robust-normalized
+  reflectivity landmarks (`normalize_reflectivity`), while rejecting
+  high-sphericity foliage/clutter.
+- **3D visibility & self-occlusion gating (`compute_3d_shared_visibility_mask`)**:
+  ego-chassis AABB ray intersection (`ray_intersects_aabb_mask`),
+  uncertainty-buffered 3D azimuth/elevation/range frustum checks, and same-side
+  normal co-visibility.
+- **X-ICP localizability diagnostics**: `6×6` physical Fisher matrix and
+  translational/rotational eigen-decomposition (`corridor_degenerate`,
+  `weakest_translation_direction_target`).
+
+For dual-LiDAR + IMU rigs, these upgraded `L2L` factors are fused with `2 × L2I`
+and turn-window `100 Hz` IMU-preintegrated BA in
+[docs/dual_lidar_imu_joint_calibration_design.md](dual_lidar_imu_joint_calibration_design.md).
+
+## 8. Current gaps for future iteration
 
 1. The extraction layer is still implicit inside `lidar2lidar-auto`; there is no
    standalone serialized “standardized sample” artifact for offline iteration.

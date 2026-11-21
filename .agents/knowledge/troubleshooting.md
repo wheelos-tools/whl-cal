@@ -9,12 +9,16 @@ Read when calibration diverges, produces inconsistent transforms, passes fitness
 - Inspect explicit skip reasons, coarse/fine metrics, information diagnostics, and visualizations.
 - For timing failures, verify acquisition/header/point timestamps and gap boundaries before tuning an optimizer.
 - For GRIL, run the executable GRIL validation skill rather than recreating conversion or diagnostic scripts.
+- For GRIL run-to-run divergence, isolate both asynchronous `ikd-Tree` background rebuilds and Eigen 3.3.7's `-fopenmp` multi-threaded GEMM 1-ULP race (`--ikd-rebuild sync`, which locks synchronous tree rebuilds and single-thread Eigen/OpenMP GEMM) before diagnosing correspondence or solver issues.
+- For GRIL start/end trajectory spurs ("首尾毛刺"), mid-window vertical "banana" drift, or seconds-scale time-lag jumps (`xcorr_temporal_init`), inspect equal-count sub-frame cuts on blind-sector corner LiDARs, pseudo-ground EKF frame mixing, feature starvation near close walls, and unnormalized cross-correlation lags (`lidar2imu/evaluation/quality_gates.py`).
+- Separate **Data Sufficiency** (valid state count, continuity, tilt), **Motion Excitation** (path length, bidirectional yaw, angular/linear acceleration), and **Parameter Observability** (rotation Hessian, 2D/3D lever-arm singular values + boundary hits, time-offset angular-acceleration energy) rather than relying on GRIL's single `pct_z > 0.99` stop condition.
 
 ## Do NOTs
 - Do not differentiate motion across a record gap.
 - Do not infer temporal bias from publish order.
 - Do not blame scan-to-map until the input contract and LiDAR frontend are independently checked.
-- Do not accept a result solely because Ceres converged or a map appears bounded.
+- Do not accept a result solely because Ceres converged, `pct_z > 0.99` triggered early stop, or a map appears bounded.
+- Do not alter frozen GRIL defaults to enforce quality thresholds; keep stabilization flags opt-in and quality gates strictly post-run (`lidar2imu evaluate-quality-gates`).
 
 ## Sources
 - General review ladder: `docs/calibration_review_guide.md`

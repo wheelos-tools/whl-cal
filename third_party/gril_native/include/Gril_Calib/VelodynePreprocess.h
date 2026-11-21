@@ -31,12 +31,19 @@ struct VelodynePoint {
   std::uint16_t ring = 0;
 };
 
+enum class VelodyneCutMode {
+  EqualPointCount,
+  EqualTime,
+};
+
 struct VelodynePreprocessConfig {
   double blind = 1.0;
   int point_filter_num = 1;
   int n_scans = 16;
   int required_frame_num = 1;
   int scan_count = 0;
+  VelodyneCutMode cut_mode = VelodyneCutMode::EqualPointCount;
+  int min_cut_points = 0;
 };
 
 struct VelodynePreprocessResult {

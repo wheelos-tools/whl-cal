@@ -158,6 +158,29 @@ void cut_frame() {
                "third steady timestamp mismatch");
   require_near(steady.cut_clouds[1][0].curvature, 10.0, 1e-4,
                "second cut point time was not rebased");
+
+  // EqualTime + min_cut_points merges blind-sector-starved cuts cleanly while
+  // keeping absolute point times (cut_timestamp_ms + curvature) invariant.
+  std::vector<VelodynePoint> uneven;
+  for (int i = 0; i < 6; i++)
+    uneven.push_back(
+        point(2.0, 80.0 - i * 5.0, static_cast<float>(i * 0.004), 0, 1.0F));
+  for (int i = 0; i < 4; i++)
+    uneven.push_back(point(2.0, 40.0 - i * 5.0,
+                           static_cast<float>(0.040 + i * 0.004), 0, 2.0F));
+  uneven.push_back(point(2.0, 10.0, 0.090F, 0, 3.0F));
+  auto equal_time_cfg = config;
+  equal_time_cfg.cut_mode = VelodyneCutMode::EqualTime;
+  equal_time_cfg.min_cut_points = 3;
+  const auto merged = preprocess_velodyne_scan(uneven, 5.0, equal_time_cfg);
+  require(merged.cut_clouds.size() == 2,
+          "starved EqualTime 3rd cut should merge into 2nd cut");
+  require(merged.cut_clouds[0].size() + merged.cut_clouds[1].size() == 10,
+          "merged EqualTime cuts lost surface points");
+  require_near(merged.cut_timestamps_ms[1] +
+                   merged.cut_clouds[1].back().curvature,
+               5090.0, 1e-3,
+               "merged EqualTime cut altered point absolute timestamp");
 }
 
 } // namespace

@@ -117,22 +117,87 @@ process_validated_velodyne_scan(const std::vector<VelodynePoint> &pl_orig,
   if (config.scan_count < 20)
     required_cut_num = 1;
 
-  PointCloudXYZI pcl_cut;
-  for (unsigned int i = 1; i < valid_pcl_size; i++) {
-    valid_num++;
-    result.surface[i].curvature +=
-        scan_timestamp_s * 1000 - last_frame_end_time;
-    pcl_cut.push_back(result.surface[i]);
+  if (config.cut_mode == VelodyneCutMode::EqualPointCount &&
+      config.min_cut_points <= 0) {
+    PointCloudXYZI pcl_cut;
+    for (unsigned int i = 1; i < valid_pcl_size; i++) {
+      valid_num++;
+      result.surface[i].curvature +=
+          scan_timestamp_s * 1000 - last_frame_end_time;
+      pcl_cut.push_back(result.surface[i]);
 
-    if (valid_num ==
-        (int((cut_num + 1) * valid_pcl_size / required_cut_num) - 1)) {
-      cut_num++;
-      result.cut_timestamps_ms.push_back(last_frame_end_time);
-      result.cut_clouds.push_back(pcl_cut);
-      last_frame_end_time += result.surface[i].curvature;
-      pcl_cut.clear();
-      pcl_cut.reserve(valid_pcl_size * 2 / config.required_frame_num);
+      if (valid_num ==
+          (int((cut_num + 1) * valid_pcl_size / required_cut_num) - 1)) {
+        cut_num++;
+        result.cut_timestamps_ms.push_back(last_frame_end_time);
+        result.cut_clouds.push_back(pcl_cut);
+        last_frame_end_time += result.surface[i].curvature;
+        pcl_cut.clear();
+        pcl_cut.reserve(valid_pcl_size * 2 / config.required_frame_num);
+      }
     }
+    return result;
+  }
+
+  if (valid_pcl_size <= 1)
+    return result;
+
+  const int min_pts = std::max(1, config.min_cut_points);
+  const double t_min_ms = result.surface[1].curvature;
+  const double t_max_ms = result.surface[valid_pcl_size - 1].curvature;
+  const double span_ms = std::max(0.0, t_max_ms - t_min_ms);
+
+  std::vector<PointCloudXYZI> raw_cuts;
+  raw_cuts.reserve(static_cast<std::size_t>(required_cut_num));
+  PointCloudXYZI current_cut;
+  current_cut.reserve(valid_pcl_size / std::max(1, required_cut_num) + 16);
+  int cut_idx = 0;
+
+  for (unsigned int i = 1; i < valid_pcl_size; i++) {
+    current_cut.push_back(result.surface[i]);
+    const bool has_more_cuts = (cut_idx + 1) < required_cut_num;
+    bool boundary_reached = false;
+    if (has_more_cuts) {
+      if (config.cut_mode == VelodyneCutMode::EqualTime && span_ms > 1e-6) {
+        const double bound_ms =
+            t_min_ms +
+            span_ms * static_cast<double>(cut_idx + 1) / required_cut_num;
+        boundary_reached = (result.surface[i].curvature >= bound_ms);
+      } else {
+        valid_num++;
+        boundary_reached =
+            (static_cast<int>(valid_num) >=
+             (int((cut_idx + 1) * valid_pcl_size / required_cut_num) - 1));
+      }
+    }
+    if (boundary_reached &&
+        static_cast<int>(current_cut.size()) >= min_pts) {
+      raw_cuts.push_back(current_cut);
+      current_cut.clear();
+      current_cut.reserve(valid_pcl_size / std::max(1, required_cut_num) + 16);
+      ++cut_idx;
+    }
+  }
+  if (!current_cut.empty()) {
+    if (static_cast<int>(current_cut.size()) < min_pts && !raw_cuts.empty()) {
+      for (const auto &pt : current_cut.points)
+        raw_cuts.back().push_back(pt);
+    } else {
+      raw_cuts.push_back(current_cut);
+    }
+  }
+
+  double prev_end_offset_ms = 0.0;
+  for (auto &cut : raw_cuts) {
+    if (cut.empty())
+      continue;
+    const double next_end_offset_ms = cut.points.back().curvature;
+    for (auto &pt : cut.points)
+      pt.curvature = static_cast<float>(pt.curvature - prev_end_offset_ms);
+    result.cut_timestamps_ms.push_back(scan_timestamp_s * 1000.0 +
+                                       prev_end_offset_ms);
+    result.cut_clouds.push_back(cut);
+    prev_end_offset_ms = next_end_offset_ms;
   }
   return result;
 }

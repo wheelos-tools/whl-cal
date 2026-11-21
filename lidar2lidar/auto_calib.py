@@ -1528,7 +1528,10 @@ def main() -> None:
         nargs="+",
         type=int,
         default=[2, 3],
-        help="Calibration methods to compare (1: point-to-plane, 2: GICP, 3: point-to-point).",
+        help=(
+            "Calibration methods to compare "
+            "(1: point-to-plane, 2: GICP, 3: point-to-point, 4: semantic-4ch)."
+        ),
     )
     parser.add_argument(
         "--voxel-size",

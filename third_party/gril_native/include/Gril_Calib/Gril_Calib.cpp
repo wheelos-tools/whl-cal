@@ -276,22 +276,56 @@ void Gril_Calib::xcorr_temporal_init(const double &odom_freq) {
     mean_lidar += (Lidar_state_group[i].ang_vel.norm() - mean_lidar) / (i + 1);
   }
 
-  double max_correlation = -DBL_MAX;
-  for (int lag = -count + 1; lag < count; lag++) {
-    double correlation = 0.0;
-    int cnt = 0;
-    for (int i = 0; i < count; i++) {
-      const int j = i + lag;
-      if (j < 0 || j > count - 1) {
-        continue;
+  if (max_xcorr_lag_s < 0.0) {
+    double max_correlation = -DBL_MAX;
+    for (int lag = -count + 1; lag < count; lag++) {
+      double correlation = 0.0;
+      int cnt = 0;
+      for (int i = 0; i < count; i++) {
+        const int j = i + lag;
+        if (j < 0 || j > count - 1) {
+          continue;
+        }
+        cnt++;
+        correlation += (IMU_state_group[i].ang_vel.norm() - mean_imu) *
+                       (Lidar_state_group[j].ang_vel.norm() - mean_lidar);
       }
-      cnt++;
-      correlation += (IMU_state_group[i].ang_vel.norm() - mean_imu) *
-                     (Lidar_state_group[j].ang_vel.norm() - mean_lidar);
+      if (correlation > max_correlation) {
+        max_correlation = correlation;
+        lag_IMU_wtr_Lidar = -lag;
+      }
     }
-    if (correlation > max_correlation) {
-      max_correlation = correlation;
-      lag_IMU_wtr_Lidar = -lag;
+  } else {
+    const int max_lag = std::min(
+        std::max(0, count - 1),
+        static_cast<int>(std::ceil(max_xcorr_lag_s * std::max(1.0, odom_freq))));
+    const int min_overlap = std::max(1, count / 2);
+    double best_pearson = -2.0;
+    lag_IMU_wtr_Lidar = 0;
+    for (int lag = -max_lag; lag <= max_lag; ++lag) {
+      double num = 0.0;
+      double var_imu = 0.0;
+      double var_lidar = 0.0;
+      int cnt = 0;
+      for (int i = 0; i < count; ++i) {
+        const int j = i + lag;
+        if (j < 0 || j >= count)
+          continue;
+        ++cnt;
+        const double di = IMU_state_group[i].ang_vel.norm() - mean_imu;
+        const double dl = Lidar_state_group[j].ang_vel.norm() - mean_lidar;
+        num += di * dl;
+        var_imu += di * di;
+        var_lidar += dl * dl;
+      }
+      if (cnt < min_overlap)
+        continue;
+      const double denom = std::sqrt(var_imu * var_lidar);
+      const double pearson = (denom > 1e-12) ? (num / denom) : 0.0;
+      if (pearson > best_pearson) {
+        best_pearson = pearson;
+        lag_IMU_wtr_Lidar = -lag;
+      }
     }
   }
 
@@ -339,7 +373,9 @@ void Gril_Calib::IMU_time_compensate(const double &lag_time,
 }
 
 void Gril_Calib::cut_sequence_tail() {
-  for (int i = 0; i < 20; i++) {
+  for (int i = 0; i < tail_trim_states && !Lidar_state_group.empty() &&
+                  !IMU_state_group.empty();
+       i++) {
     Lidar_state_group.pop_back();
     IMU_state_group.pop_back();
   }
@@ -458,6 +494,7 @@ void Gril_Calib::solve_Rotation_only() {
         nullptr, R_LI_quat);
   }
   ceres::Solver::Options options;
+  options.max_num_iterations = std::max(1, rot_init_max_iters);
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
   Rot_Lidar_wrt_IMU =
@@ -512,7 +549,10 @@ void Gril_Calib::solve_Rot_Trans_calib(double &timediff_imu_wrt_lidar,
     problem.AddResidualBlock(Linear_acc_Rot_Cost_without_Gravity::Create(
                                  Lidar_state_group[i],
                                  IMU_state_group[i].linear_acc,
-                                 Lidar_wrt_ground_group[i]),
+                                 Lidar_wrt_ground_group[i],
+                                 use_imu_angular_in_acc_cost,
+                                 IMU_state_group[i].ang_vel,
+                                 IMU_state_group[i].ang_acc),
                              acceleration_loss, R_IL_quat, bias_aL, Trans_IL);
 
     Jacobian.block<3, 3>(3 * i, 0) = -Lidar_state_group[i].rot_end;
@@ -537,6 +577,10 @@ void Gril_Calib::solve_Rot_Trans_calib(double &timediff_imu_wrt_lidar,
       problem.SetParameterLowerBound(Trans_IL, index,
                                      Trans_IL[index] - bound_th);
     }
+  }
+  if (max_time_lag_2_s >= 0.0 && !IMU_state_group.empty()) {
+    problem.SetParameterUpperBound(&time_lag2, 0, max_time_lag_2_s);
+    problem.SetParameterLowerBound(&time_lag2, 0, -max_time_lag_2_s);
   }
 
   ceres::Solver::Options options;
@@ -764,7 +808,8 @@ void Gril_Calib::LI_Calibration(int &orig_odom_freq, int &cut_frame_num,
   std::deque<CalibState> imu_first_filter;
   std::deque<CalibState> lidar_first_filter;
   zero_phase_filt(get_IMU_state(), imu_first_filter);
-  normalize_acc(imu_first_filter);
+  if (!skip_secondary_acc_norm)
+    normalize_acc(imu_first_filter);
   zero_phase_filt(get_Lidar_state(), lidar_first_filter);
   set_IMU_state(imu_first_filter);
   set_Lidar_state(lidar_first_filter);

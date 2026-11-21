@@ -111,6 +111,39 @@ float64 per-point time rather than 0827's relative float32 field. These are
   INS odometry is coupled to the input IMU and cannot establish independent
   extrinsic ground truth.
 
+### GRIL 2026-11-17 Zhongce dual-corner FlatBuffer LiDAR + corrected-IMU stabilization
+
+- Capture `/mnt/synology/中策/2026-11-17/bag` provides two raw 32-line corner
+  FlatBuffer LiDARs (`left_front`, `right_back`, `10,912` scans each; fused
+  cloud excluded) and `108,621` `/apollo/sensor/gnss/corrected_imu` samples at
+  `100 Hz` on `measurement_time` (`H = 0`), with a continuous `[0, 680 s]`
+  pre-gap segment and an independent `[785, 1005 s]` post-gap holdout.
+- Unmodified GRIL failed repeatability and physical checks due to: (1) async
+  `ikd-Tree` rebuild threads + Eigen 3.3.7 `-fopenmp` multi-threaded GEMM 1-ULP
+  races, (2) equal-point-count `cut_frame=3` + `kImuHz=200` `dt=0` triggering a
+  stationary start spur at `t ≈ 3.7 s`, (3) frame-inconsistent pseudo-ground EKF
+  rows + close-wall feature starvation causing vertical "banana" drift and a
+  `+244.4 m` Z blow-up / premature ~13% stop, and (4) unbounded `xcorr` lag
+  jumps (`+48.4 s` / `-2.5 s`) + EIV lever-arm dilution from 30 Hz LiDAR
+  angular derivatives.
+- With strictly opt-in frontend/batch stabilization controls (preserving 100%
+  golden defaults when omitted) and post-run Stage 3 gating
+  (`lidar2imu evaluate-quality-gates`), both corners reach
+  `state: converged_and_verified` (`verdict: accepted`) on `[0, 680 s]`:
+  - `left_front`: `R_LI = [+0.036°, -0.075°, +132.687°]`,
+    `T_LI = [-0.1513, +2.0156, +0.4767] m`, `tau = -22.109 ms` (3x SHA-256
+    bit-exact `0.0° / 0.0 m / 0.0 s`; 4-seed spread `0.46° / 5.9 cm / 0.002 ms`
+    including blind `I + [0,0,0]`; holdout acc RMSE `0.6442 -> 0.6118 m/s²`).
+  - `right_back`: `R_LI = [-0.006°, -0.295°, -46.376°]`,
+    `T_LI = [+1.6166, -3.7449, +0.4565] m`, `tau = -22.792 ms` (3x SHA-256
+    bit-exact `0.0° / 0.0 m / 0.0 s`; 4-seed spread `0.53° / 2.2 cm / 0.035 ms`
+    including blind `I + [0,0,0]`; holdout acc RMSE `0.8249 -> 0.7113 m/s²`).
+  - Independent dual-corner cross-checks agree to `ΔYaw = 179.06°` (opposite
+    45° RFU/FLU corners), `Δz = 2.0 cm`, and `Δtau = 0.68 ms` on the shared
+    `corrected_imu` clock. Evidence:
+    `outputs/gril/stage2b_stabilization_20261120/exp2_windows_holdout/` and
+    `outputs/gril/stage2b_stabilization_20261120/diagnostics/`.
+
 ### Gravity source
 
 - pose-derived gravity is the current default

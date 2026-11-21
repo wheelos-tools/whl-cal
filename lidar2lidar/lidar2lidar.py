@@ -550,19 +550,56 @@ def calibrate_lidar_extrinsic(
         return None, None, None
 
     logging.info("--- Step 4: Fine Registration (Multi-stage Refinement) ---")
-    registration_result, source_final_stage, target_final_stage = (
-        perform_multistage_refinement(
-            source_cloud,
-            target_cloud,
+    if int(method) == 4:
+        from lidar2lidar.semantic_registration import (
+            LidarFrameData,
+            SemanticRegistrationConfig,
+            register_semantic_l2l,
+        )
+
+        sem_res = register_semantic_l2l(
+            LidarFrameData(points=np.asarray(source_cloud.points, dtype=np.float64)),
+            LidarFrameData(points=np.asarray(target_cloud.points, dtype=np.float64)),
             initial_guess_transform,
-            preprocessing_params,
-            method,
+            reg_cfg=SemanticRegistrationConfig(enable_coarse_fallback=True),
+        )
+        if not sem_res.get("success"):
+            logging.error("Semantic L2L registration failed: %s", sem_res.get("reason"))
+            return None, initial_guess_transform, None
+        final_extrinsic_transform = np.asarray(
+            sem_res["transformation"], dtype=np.float64
+        )
+        voxel_eval = max(float(preprocessing_params.get("voxel_size", 0.04)), 0.05)
+        source_final_stage = _preprocess_point_cloud_cached(
+            source_cloud,
+            {**preprocessing_params, "voxel_size": voxel_eval},
             preprocessing_cache,
         )
-    )
-    if registration_result is None:
-        return None, initial_guess_transform, None
-    final_extrinsic_transform = registration_result.transformation
+        target_final_stage = _preprocess_point_cloud_cached(
+            target_cloud,
+            {**preprocessing_params, "voxel_size": voxel_eval},
+            preprocessing_cache,
+        )
+        registration_result = o3d.pipelines.registration.evaluate_registration(
+            source_final_stage,
+            target_final_stage,
+            0.25,
+            final_extrinsic_transform,
+        )
+    else:
+        registration_result, source_final_stage, target_final_stage = (
+            perform_multistage_refinement(
+                source_cloud,
+                target_cloud,
+                initial_guess_transform,
+                preprocessing_params,
+                method,
+                preprocessing_cache,
+            )
+        )
+        if registration_result is None:
+            return None, initial_guess_transform, None
+        final_extrinsic_transform = registration_result.transformation
 
     if not np.isfinite(final_extrinsic_transform).all():
         logging.error("Fine registration failed, invalid transformation matrix.")

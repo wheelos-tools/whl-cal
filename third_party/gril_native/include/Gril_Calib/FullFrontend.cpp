@@ -290,14 +290,17 @@ struct RawGroundState {
 
 class AhrsEstimator {
 public:
-  AhrsEstimator() {
-    FusionOffsetInitialise(&offset_, kImuHz);
+  explicit AhrsEstimator(unsigned int imu_hz = kImuHz,
+                         bool preserve_sample_dt = false)
+      : preserve_sample_dt_(preserve_sample_dt) {
+    const unsigned int effective_hz = imu_hz > 0 ? imu_hz : kImuHz;
+    FusionOffsetInitialise(&offset_, effective_hz);
     FusionAhrsInitialise(&ahrs_);
     FusionAhrsSettings settings;
     settings.gain = 0.5F;
     settings.accelerationRejection = 10.0F;
     settings.magneticRejection = 0.0F;
-    settings.rejectionTimeout = 5 * kImuHz;
+    settings.rejectionTimeout = 5 * effective_hz;
     FusionAhrsSetSettings(&ahrs_, &settings);
 
     std::memset(&identity_, 0, sizeof(identity_));
@@ -318,10 +321,14 @@ public:
       throw std::runtime_error(
           "synchronized GRIL package contains no IMU samples");
     double estimate_timestamp_s = samples.front().timestamp_s;
+    if (preserve_sample_dt_ && has_last_timestamp_)
+      estimate_timestamp_s = last_timestamp_s_;
     bool initialized = false;
     for (const auto &sample : samples) {
-      const float delta_time =
+      float delta_time =
           static_cast<float>(sample.timestamp_s - estimate_timestamp_s);
+      if (preserve_sample_dt_)
+        delta_time = std::clamp(delta_time, 0.0F, 0.1F);
 
       FusionVector gyroscope;
       gyroscope.axis.x =
@@ -360,6 +367,8 @@ public:
         initialized = true;
       }
       estimate_timestamp_s = sample.timestamp_s;
+      last_timestamp_s_ = sample.timestamp_s;
+      has_last_timestamp_ = true;
     }
     return initialized;
   }
@@ -370,6 +379,9 @@ private:
   FusionMatrix identity_;
   FusionVector sensitivity_;
   FusionVector zero_;
+  bool preserve_sample_dt_ = false;
+  bool has_last_timestamp_ = false;
+  double last_timestamp_s_ = 0.0;
 };
 
 void configure_calibration(Gril_Calib &calibration,
@@ -420,12 +432,27 @@ PatchworkppConfig patchwork_config(const FullPatchworkConfig &input) {
   return output;
 }
 
+FullFrontendConfig apply_run_overrides(FullFrontendConfig config,
+                                       const FullFrontendRunConfig &run) {
+  if (run.sync_ikd_rebuild)
+    config.odometry.async_tree_rebuild = false;
+  if (run.disable_odom_ground_constraint)
+    config.odometry.enable_pseudo_ground_constraint = false;
+  if (run.min_effective_features > 0)
+    config.odometry.min_effective_features = run.min_effective_features;
+  if (run.cut_frame_num_override > 0)
+    config.cut_frame_num = run.cut_frame_num_override;
+  return config;
+}
+
 class PipelineState {
 public:
-  explicit PipelineState(const FullFrontendConfig &value)
+  PipelineState(const FullFrontendConfig &value,
+                const FullFrontendRunConfig &run)
       : config(value), propagator(value.gyr_cov, value.acc_cov),
         odometry(new LidarOdometryCore(value.odometry)),
         patchwork(patchwork_config(value.patchwork)),
+        ahrs(run.ahrs_imu_hz, run.ahrs_preserve_sample_dt),
         hard_time(value.configured_time_lag_s),
         jacobian(Eigen::MatrixXd::Zero(kJacobianRows, 3)) {
     configure_calibration(calibration, config);
@@ -487,6 +514,26 @@ public:
   bool data_accumulation_finished = false;
   double move_start_time_s = 0.0;
 };
+
+void execute_batch_handoff(PipelineState &pipeline,
+                           const FullFrontendRunConfig &run,
+                           std::ostream &trace) {
+  pipeline.odometry.reset();
+  trace << "odometry_quiesced\n";
+  pipeline.calibration.dump_batch_trace_v1(
+      run.batch_trace_path, pipeline.config.orig_odom_freq,
+      pipeline.config.cut_frame_num,
+      pipeline.hard_time.hard_offset_s() +
+          pipeline.config.configured_time_lag_s,
+      pipeline.move_start_time_s);
+  trace << "batch_handoff " << pipeline.calibration.all_imu_sample_count()
+        << " " << pipeline.calibration.lidar_state_count() << " "
+        << pipeline.calibration.plane_constraint_count() << " "
+        << pipeline.hard_time.hard_offset_s() << " "
+        << pipeline.move_start_time_s << "\n";
+  trace.flush();
+  run_batch_process(run);
+}
 
 void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
                     std::ostream &trace) {
@@ -557,16 +604,33 @@ void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
     write_state(trace, "updated", pipeline.state);
 
     if (!odometry_result.update_performed) {
-      trace << "frame_skipped map_not_ready\n"
+      trace << "frame_skipped "
+            << (odometry_result.degenerate_skipped ? "degenerate_features"
+                                                   : "map_not_ready")
+            << "\n"
             << "end_package\n";
       continue;
     }
 
-    if (!pipeline.data_accumulation_started &&
-        pipeline.state.pos_end.norm() > 0.05) {
-      pipeline.data_accumulation_started = true;
-      pipeline.move_start_time_s = lidar_end_time_s;
-      trace << "motion_start " << pipeline.move_start_time_s << "\n";
+    if (!pipeline.data_accumulation_started) {
+      bool motion_gate_ok = pipeline.state.pos_end.norm() > 0.05;
+      if (motion_gate_ok &&
+          (run.motion_start_min_speed_mps > 0.0 ||
+           run.motion_start_min_imu_omega_rad_s > 0.0)) {
+        double max_pkg_imu_omega = 0.0;
+        for (const auto &imu_sample : measure.imu) {
+          max_pkg_imu_omega =
+              std::max(max_pkg_imu_omega, imu_sample.angular_velocity.norm());
+        }
+        motion_gate_ok =
+            pipeline.state.vel_end.norm() >= run.motion_start_min_speed_mps &&
+            max_pkg_imu_omega >= run.motion_start_min_imu_omega_rad_s;
+      }
+      if (motion_gate_ok) {
+        pipeline.data_accumulation_started = true;
+        pipeline.move_start_time_s = lidar_end_time_s;
+        trace << "motion_start " << pipeline.move_start_time_s << "\n";
+      }
     }
 
     ++pipeline.frame_num;
@@ -583,34 +647,35 @@ void drain_packages(PipelineState &pipeline, const FullFrontendRunConfig &run,
             << " " << pipeline.calibration.plane_constraint_count() << "\n";
 
       if (3 * pipeline.frame_num + 2 >=
-          static_cast<int>(pipeline.jacobian.rows()))
-        throw std::runtime_error(
-            "GRIL data-sufficiency Jacobian capacity exceeded");
-      pipeline.data_accumulation_finished =
+          static_cast<int>(pipeline.jacobian.rows())) {
+        const Eigen::Index old_rows = pipeline.jacobian.rows();
+        const Eigen::Index new_rows = std::max<Eigen::Index>(
+            old_rows * 2, static_cast<Eigen::Index>(3 * pipeline.frame_num + 300));
+        pipeline.jacobian.conservativeResize(new_rows, 3);
+        pipeline.jacobian.bottomRows(new_rows - old_rows).setZero();
+      }
+      const bool raw_sufficient =
           pipeline.calibration.data_sufficiency_assess(
               pipeline.jacobian, pipeline.frame_num, pipeline.state.bias_g,
               pipeline.config.orig_odom_freq, pipeline.config.cut_frame_num,
               pipeline.lidar_wrt_ground, pipeline.imu_wrt_ground,
               pipeline.lidar_height);
+      const double accum_duration_s =
+          lidar_end_time_s - pipeline.move_start_time_s;
+      const bool min_duration_ok =
+          (run.min_accum_duration_s <= 0.0) ||
+          (accum_duration_s >= run.min_accum_duration_s);
+      const bool max_duration_hit =
+          (run.max_accum_duration_s > 0.0) &&
+          (accum_duration_s >= run.max_accum_duration_s) &&
+          (pipeline.calibration.lidar_state_count() >= 100);
+      pipeline.data_accumulation_finished =
+          (raw_sufficient && min_duration_ok) || max_duration_hit;
       trace << "data_sufficiency "
             << (pipeline.data_accumulation_finished ? 1 : 0) << "\n";
 
       if (pipeline.data_accumulation_finished) {
-        pipeline.odometry.reset();
-        trace << "odometry_quiesced\n";
-        pipeline.calibration.dump_batch_trace_v1(
-            run.batch_trace_path, pipeline.config.orig_odom_freq,
-            pipeline.config.cut_frame_num,
-            pipeline.hard_time.hard_offset_s() +
-                pipeline.config.configured_time_lag_s,
-            pipeline.move_start_time_s);
-        trace << "batch_handoff " << pipeline.calibration.all_imu_sample_count()
-              << " " << pipeline.calibration.lidar_state_count() << " "
-              << pipeline.calibration.plane_constraint_count() << " "
-              << pipeline.hard_time.hard_offset_s() << " "
-              << pipeline.move_start_time_s << "\n";
-        trace.flush();
-        run_batch_process(run);
+        execute_batch_handoff(pipeline, run, trace);
         trace << "batch_complete\nend_package\nEND\n";
         return;
       }
@@ -748,7 +813,24 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
     throw std::runtime_error(
         "reset gap policy requires positive --forward-gap-s");
 
-  const FullFrontendConfig config = read_full_frontend_config(run.config_path);
+  const FullFrontendConfig config =
+      apply_run_overrides(read_full_frontend_config(run.config_path), run);
+  validate_config(config);
+
+  struct ScopedSingleThreadEigen {
+    bool active = false;
+    int prev_threads = 0;
+    explicit ScopedSingleThreadEigen(bool enable) : active(enable) {
+      if (active) {
+        prev_threads = Eigen::nbThreads();
+        Eigen::setNbThreads(1);
+      }
+    }
+    ~ScopedSingleThreadEigen() {
+      if (active)
+        Eigen::setNbThreads(prev_threads);
+    }
+  } eigen_thread_guard(!config.odometry.async_tree_rebuild);
   std::ifstream input(run.input_path, std::ios::binary);
   if (!input)
     throw std::runtime_error("cannot open native dataset: " + run.input_path);
@@ -779,7 +861,7 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
   read_binary(input, event_count, "event count");
   trace << "events " << event_count << "\n";
 
-  std::unique_ptr<PipelineState> pipeline(new PipelineState(config));
+  std::unique_ptr<PipelineState> pipeline(new PipelineState(config, run));
   if (fixed_time_axis)
     pipeline->hard_time.initialize_hard_offset(hard_offset_s);
   double previous_event_timestamp_s = 0.0;
@@ -803,7 +885,7 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
           event_timestamp_s - previous_event_timestamp_s > run.forward_gap_s) {
         trace << "forward_gap_reset " << event_index << " "
               << previous_event_timestamp_s << " " << event_timestamp_s << "\n";
-        pipeline.reset(new PipelineState(config));
+        pipeline.reset(new PipelineState(config, run));
         if (fixed_time_axis)
           pipeline->hard_time.initialize_hard_offset(hard_offset_s);
       }
@@ -867,7 +949,7 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
           raw_timestamp_s - previous_event_timestamp_s > run.forward_gap_s) {
         trace << "forward_gap_reset " << event_index << " "
               << previous_event_timestamp_s << " " << raw_timestamp_s << "\n";
-        pipeline.reset(new PipelineState(config));
+        pipeline.reset(new PipelineState(config, run));
         if (fixed_time_axis)
           pipeline->hard_time.initialize_hard_offset(hard_offset_s);
       }
@@ -892,6 +974,8 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
       preprocess.n_scans = pipeline->config.scan_line;
       preprocess.required_frame_num = pipeline->config.cut_frame_num;
       preprocess.scan_count = ++pipeline->preprocess_scan_count;
+      preprocess.cut_mode = run.cut_mode;
+      preprocess.min_cut_points = run.min_cut_points;
       const VelodynePreprocessResult result =
           preprocess_velodyne_scan(points, raw_timestamp_s, preprocess);
       if (!result.cut_clouds.empty()) {
@@ -927,6 +1011,15 @@ void run_full_frontend(const FullFrontendRunConfig &run) {
 
   if (input.peek() != std::char_traits<char>::eof())
     throw std::runtime_error("content after native dataset events");
+  if (run.calibrate_on_eof && pipeline->data_accumulation_started &&
+      pipeline->calibration.lidar_state_count() >= 100) {
+    pipeline->data_accumulation_finished = true;
+    trace << "eof_handoff " << pipeline->frame_num << " "
+          << pipeline->calibration.lidar_state_count() << "\n";
+    execute_batch_handoff(*pipeline, run, trace);
+    trace << "batch_complete\nEND\n";
+    return;
+  }
   trace << "insufficient_data " << pipeline->frame_num << " "
         << pipeline->calibration.all_imu_sample_count() << " "
         << pipeline->calibration.lidar_state_count() << "\nEND\n";

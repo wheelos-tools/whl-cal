@@ -38,6 +38,12 @@ struct NativeConfig {
   double ground_factor;
   QD rotation_LI_seed = QD::Identity();
   bool rotation_LI_seed_provided = false;
+  double max_xcorr_lag_s = -1.0;
+  double max_time_lag_2_s = -1.0;
+  int rot_init_max_iters = 50;
+  bool use_imu_angular_in_acc_cost = false;
+  bool skip_secondary_acc_norm = false;
+  int tail_trim_states = 20;
 };
 
 double parse_double(const std::string &text, const std::string &key) {
@@ -45,6 +51,14 @@ double parse_double(const std::string &text, const std::string &key) {
   const double value = std::stod(text, &consumed);
   if (consumed != text.size() || !std::isfinite(value))
     throw std::runtime_error("invalid value for " + key);
+  return value;
+}
+
+int parse_int(const std::string &text, const std::string &key) {
+  std::size_t consumed = 0;
+  const int value = std::stoi(text, &consumed);
+  if (consumed != text.size())
+    throw std::runtime_error("invalid integer for " + key);
   return value;
 }
 
@@ -121,6 +135,24 @@ NativeConfig read_config(const std::string &path) {
     config.rotation_LI_seed = QD(w, x, y, z);
     config.rotation_LI_seed_provided = true;
   }
+  if (values.count("max_xcorr_lag_s"))
+    config.max_xcorr_lag_s =
+        parse_double(take("max_xcorr_lag_s"), "max_xcorr_lag_s");
+  if (values.count("max_time_lag_2_s"))
+    config.max_time_lag_2_s =
+        parse_double(take("max_time_lag_2_s"), "max_time_lag_2_s");
+  if (values.count("rot_init_max_iters"))
+    config.rot_init_max_iters =
+        parse_int(take("rot_init_max_iters"), "rot_init_max_iters");
+  if (values.count("use_imu_angular_in_acc_cost"))
+    config.use_imu_angular_in_acc_cost = parse_bool(
+        take("use_imu_angular_in_acc_cost"), "use_imu_angular_in_acc_cost");
+  if (values.count("skip_secondary_acc_norm"))
+    config.skip_secondary_acc_norm =
+        parse_bool(take("skip_secondary_acc_norm"), "skip_secondary_acc_norm");
+  if (values.count("tail_trim_states"))
+    config.tail_trim_states =
+        parse_int(take("tail_trim_states"), "tail_trim_states");
   if (!values.empty())
     throw std::runtime_error("unknown config key: " + values.begin()->first);
   return config;
@@ -211,6 +243,13 @@ int main(int argc, char **argv) {
     calibration.bound_th = config.bound_th;
     calibration.set_boundary = config.set_boundary;
     calibration.verbose = config.verbose;
+    calibration.max_xcorr_lag_s = config.max_xcorr_lag_s;
+    calibration.max_time_lag_2_s = config.max_time_lag_2_s;
+    calibration.rot_init_max_iters = config.rot_init_max_iters;
+    calibration.use_imu_angular_in_acc_cost =
+        config.use_imu_angular_in_acc_cost;
+    calibration.skip_secondary_acc_norm = config.skip_secondary_acc_norm;
+    calibration.tail_trim_states = config.tail_trim_states;
     if (config.rotation_LI_seed_provided) {
       calibration.set_rotation_initial_guess(config.rotation_LI_seed);
       std::cout << "[Rotation initialization] LiDAR to IMU quaternion xyzw = "

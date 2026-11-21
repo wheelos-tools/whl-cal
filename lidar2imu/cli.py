@@ -18,6 +18,10 @@ from lidar2imu.algorithms.gril.native_runner import (
     NativeBatchRunConfig,
     run_native_batch,
 )
+from lidar2imu.algorithms.joint_dual_calib import (
+    JointCalibrationConfig,
+    run_joint_dual_calibration,
+)
 from lidar2imu.dataset_io import load_dataset, write_dataset
 from lidar2imu.evaluation import write_input_contract
 from lidar2imu.evaluation.abtest import build_abtest_report, write_abtest_report
@@ -26,12 +30,20 @@ from lidar2imu.evaluation.comparison import (
     compare_results,
     parse_gril_result,
 )
+from lidar2imu.evaluation.dual_sensor_diagnostics import (
+    evaluate_dual_lidar2imu_diagnostics,
+)
 from lidar2imu.evaluation.migration_review import (
     build_full_ab_review,
     write_full_ab_review,
 )
+from lidar2imu.evaluation.quality_gates import (
+    evaluate_run_quality_gates,
+    write_quality_gate_report,
+)
 from lidar2imu.reference.gril.identity import REFERENCE
 from lidar2imu.reference.gril.runner import ReferenceRunConfig, run_reference
+from lidar2imu.segments import extract_segment
 
 
 def _write_yaml(value: dict, path: Path | None) -> None:
@@ -57,6 +69,24 @@ def _prepare(args: argparse.Namespace) -> None:
     dataset = create_adapter(args.input_type, config).read()
     manifest = write_dataset(dataset, args.output_dir)
     write_input_contract(dataset, args.output_dir)
+    print(manifest)
+
+
+def _prepare_segment(args: argparse.Namespace) -> None:
+    manifest_path = args.input if args.input.is_file() else args.input / "dataset.yaml"
+    if args.output_dir.exists():
+        raise FileExistsError(f"Segment output already exists: {args.output_dir}")
+    dataset = load_dataset(manifest_path)
+    segment = extract_segment(
+        dataset,
+        start_ns=args.start_ns,
+        end_ns=args.end_ns,
+        max_lidar_gap_ns=args.max_lidar_gap_ns,
+        max_imu_gap_ns=args.max_imu_gap_ns,
+        parent_manifest=manifest_path,
+    )
+    manifest = write_dataset(segment, args.output_dir)
+    write_input_contract(segment, args.output_dir)
     print(manifest)
 
 
@@ -194,10 +224,24 @@ def _run_native_full(args: argparse.Namespace) -> None:
             executable=args.executable,
             output_dir=args.output_dir,
             batch_executable=args.batch_executable,
+            start_scan=args.start_scan,
             scan_count=args.scan_count,
             gap_policy=args.gap_policy,
             forward_gap_s=args.forward_gap_s,
             configured_time_lag_s=args.configured_time_lag_s,
+            ikd_rebuild=args.ikd_rebuild,
+            cut_mode=args.cut_mode,
+            min_cut_points=args.min_cut_points,
+            cut_frame_num=args.cut_frame_num,
+            odom_ground_mode=args.odom_ground_mode,
+            min_effective_features=args.min_effective_features,
+            ahrs_imu_hz=args.ahrs_imu_hz,
+            ahrs_dt_mode=args.ahrs_dt_mode,
+            motion_start_min_speed_mps=args.motion_start_min_speed_mps,
+            motion_start_min_omega_rad_s=args.motion_start_min_omega_rad_s,
+            min_accum_duration_s=args.min_accum_duration_s,
+            max_accum_duration_s=args.max_accum_duration_s,
+            eof_policy=args.eof_policy,
         )
     )
     print(result)
@@ -234,6 +278,19 @@ def _add_prepare(subparsers) -> None:
     parser.add_argument("--start-sec", type=float)
     parser.add_argument("--end-sec", type=float)
     parser.set_defaults(handler=_prepare)
+
+
+def _add_prepare_segment(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "prepare-segment", help="Extract a bounded canonical research segment"
+    )
+    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--start-ns", type=int, required=True)
+    parser.add_argument("--end-ns", type=int, required=True)
+    parser.add_argument("--max-lidar-gap-ns", type=int, required=True)
+    parser.add_argument("--max-imu-gap-ns", type=int, required=True)
+    parser.set_defaults(handler=_prepare_segment)
 
 
 def _add_dataset_comparison(subparsers) -> None:
@@ -367,6 +424,12 @@ def _add_native_full_run(subparsers) -> None:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
+        "--start-scan",
+        type=int,
+        default=0,
+        help="0-based scan index to start window extraction; default 0",
+    )
+    parser.add_argument(
         "--scan-count",
         type=int,
         help="Limit scans for deterministic debugging; default consumes all",
@@ -383,6 +446,39 @@ def _add_native_full_run(subparsers) -> None:
         help="Required reset threshold when --gap-policy=reset",
     )
     parser.add_argument("--configured-time-lag-s", type=float, default=0.0)
+    parser.add_argument(
+        "--ikd-rebuild",
+        choices=("async", "sync"),
+        default="async",
+    )
+    parser.add_argument(
+        "--cut-mode",
+        choices=("equal_count", "equal_time"),
+        default="equal_count",
+    )
+    parser.add_argument("--min-cut-points", type=int, default=0)
+    parser.add_argument("--cut-frame-num", type=int)
+    parser.add_argument(
+        "--odom-ground-mode",
+        choices=("golden", "disabled"),
+        default="golden",
+    )
+    parser.add_argument("--min-effective-features", type=int, default=0)
+    parser.add_argument("--ahrs-imu-hz", type=int, default=200)
+    parser.add_argument(
+        "--ahrs-dt-mode",
+        choices=("package_reset", "continuous"),
+        default="package_reset",
+    )
+    parser.add_argument("--motion-start-min-speed-mps", type=float, default=0.0)
+    parser.add_argument("--motion-start-min-omega-rad-s", type=float, default=0.0)
+    parser.add_argument("--min-accum-duration-s", type=float, default=0.0)
+    parser.add_argument("--max-accum-duration-s", type=float, default=0.0)
+    parser.add_argument(
+        "--eof-policy",
+        choices=("fail", "calibrate"),
+        default="fail",
+    )
     parser.add_argument(
         "--lidar-topic",
         default="/apollo/sensor/vanjeelidar/up/PointCloud2",
@@ -412,12 +508,130 @@ def _add_full_review(subparsers) -> None:
     parser.set_defaults(handler=_review_full)
 
 
+def _evaluate_quality_gates(args: argparse.Namespace) -> None:
+    report = evaluate_run_quality_gates(
+        args.run_dir,
+        repeat_run_dirs=args.repeat_run_dir,
+        seed_run_dirs=args.seed_run_dir,
+        window_run_dirs=args.window_run_dir,
+        holdout_batch_trace=args.holdout_batch_trace,
+    )
+    if args.output is not None:
+        print(write_quality_gate_report(report, args.output))
+    else:
+        _write_yaml(report, None)
+
+
+def _add_quality_gates(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "evaluate-quality-gates",
+        help=(
+            "Evaluate post-run data sufficiency, excitation, observability, "
+            "repeatability, and holdout gates"
+        ),
+    )
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--repeat-run-dir", type=Path, action="append")
+    parser.add_argument("--seed-run-dir", type=Path, action="append")
+    parser.add_argument("--window-run-dir", type=Path, action="append")
+    parser.add_argument("--holdout-batch-trace", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.set_defaults(handler=_evaluate_quality_gates)
+
+
+def _evaluate_dual_diagnostics(args: argparse.Namespace) -> None:
+    evaluate_dual_lidar2imu_diagnostics(
+        dataset_a=args.dataset_a,
+        run_dir_a=args.run_dir_a,
+        dataset_b=args.dataset_b,
+        run_dir_b=args.run_dir_b,
+        output_dir=args.output_dir,
+        label_a=args.label_a,
+        label_b=args.label_b,
+        static_time_s=args.static_time_s,
+        turn_time_s=args.turn_time_s,
+        extrinsic_a_yaml=args.extrinsic_a_yaml,
+        extrinsic_b_yaml=args.extrinsic_b_yaml,
+    )
+    print(args.output_dir / "dual_diagnostics.yaml")
+
+
+def _add_dual_diagnostics(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "evaluate-dual-diagnostics",
+        help=(
+            "Run 5-pillar dual-LiDAR-to-IMU visual and quantitative diagnostics "
+            "(colored PCDs, 2D slices, turn IMU submap, L2L loop, gravity, dynamics)"
+        ),
+    )
+    parser.add_argument("--dataset-a", type=Path, required=True)
+    parser.add_argument("--run-dir-a", type=Path, required=True)
+    parser.add_argument("--dataset-b", type=Path, required=True)
+    parser.add_argument("--run-dir-b", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--label-a", default="left_front")
+    parser.add_argument("--label-b", default="right_back")
+    parser.add_argument("--static-time-s", type=float)
+    parser.add_argument("--turn-time-s", type=float)
+    parser.add_argument("--extrinsic-a-yaml", type=Path)
+    parser.add_argument("--extrinsic-b-yaml", type=Path)
+    parser.set_defaults(handler=_evaluate_dual_diagnostics)
+
+
+def _calibrate_dual_joint(args: argparse.Namespace) -> None:
+    cfg = JointCalibrationConfig(
+        z_cm_prior_m=args.z_cm_prior_m,
+        max_static_windows=args.max_static_windows,
+        max_turn_windows=args.max_turn_windows,
+    )
+    run_joint_dual_calibration(
+        dataset_a=args.dataset_a,
+        run_dir_a=args.run_dir_a,
+        dataset_b=args.dataset_b,
+        run_dir_b=args.run_dir_b,
+        output_dir=args.output_dir,
+        label_a=args.label_a,
+        label_b=args.label_b,
+        mode=args.mode,
+        config=cfg,
+    )
+    print(args.output_dir / "joint_calibration_result.yaml")
+
+
+def _add_calibrate_dual_joint(subparsers) -> None:
+    parser = subparsers.add_parser(
+        "calibrate-dual-joint",
+        help=(
+            "Run staged joint 2x L2I + upgraded L2L spatiotemporal calibration "
+            "(v1 anisotropic factor graph, v2 semantic/intensity 3D-FoV L2L, "
+            "v3 turn-window IMU-preintegrated dual-LiDAR BA)"
+        ),
+    )
+    parser.add_argument("--dataset-a", type=Path, required=True)
+    parser.add_argument("--run-dir-a", type=Path, required=True)
+    parser.add_argument("--dataset-b", type=Path, required=True)
+    parser.add_argument("--run-dir-b", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--label-a", default="left_front")
+    parser.add_argument("--label-b", default="right_back")
+    parser.add_argument(
+        "--mode",
+        choices=("v1", "v2", "v3", "all"),
+        default="v2",
+    )
+    parser.add_argument("--z-cm-prior-m", type=float)
+    parser.add_argument("--max-static-windows", type=int, default=5)
+    parser.add_argument("--max-turn-windows", type=int, default=4)
+    parser.set_defaults(handler=_calibrate_dual_joint)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prepare and compare ROS-independent GRIL migration inputs"
     )
     subparsers = parser.add_subparsers(required=True)
     _add_prepare(subparsers)
+    _add_prepare_segment(subparsers)
     _add_dataset_comparison(subparsers)
     _add_result_comparison(subparsers)
     _add_abtest(subparsers)
@@ -426,6 +640,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_native_frontend_trace_run(subparsers)
     _add_native_full_run(subparsers)
     _add_full_review(subparsers)
+    _add_quality_gates(subparsers)
+    _add_dual_diagnostics(subparsers)
+    _add_calibrate_dual_joint(subparsers)
     reference = subparsers.add_parser(
         "reference-info", help="Print the frozen ROS-GRIL reference identity"
     )

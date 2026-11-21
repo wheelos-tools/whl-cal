@@ -25,6 +25,9 @@ struct LidarOdometryConfig {
   double filter_size_map = 0.5;
   float detection_range = 100.0F;
   double ground_covariance = 100.0;
+  bool async_tree_rebuild = true;
+  bool enable_pseudo_ground_constraint = true;
+  int min_effective_features = 0;
 };
 
 struct LidarGroundEstimate {
@@ -38,6 +41,7 @@ using LidarNeighborSet =
 struct LidarOdometryResult {
   bool map_initialized_this_frame = false;
   bool update_performed = false;
+  bool degenerate_skipped = false;
   int iterations = 0;
   int rematch_count = 0;
   int effective_feature_count = 0;

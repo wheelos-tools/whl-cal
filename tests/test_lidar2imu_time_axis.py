@@ -19,6 +19,7 @@ from lidar2imu.algorithms.gril.full_runner import (
 from lidar2imu.dataset_io import load_dataset, write_dataset
 from lidar2imu.evaluation.comparison import compare_datasets
 from lidar2imu.models import CanonicalDataset, ImuBatch, LidarBatch
+from lidar2imu.segments import extract_segment
 from lidar2imu.time_axis import replay_hard_offset_ns
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,6 +208,17 @@ class TimeAxisTest(unittest.TestCase):
                 )
                 expected = offset if abs(offset) > SECOND else 0
                 self.assertEqual(replay_hard_offset_ns(source), expected)
+                if expected:
+                    manifest = write_dataset(source, self.root / "overlapping")
+                    with self.assertRaisesRegex(ValueError, "shared measurement clock"):
+                        extract_segment(
+                            source,
+                            start_ns=YEAR_2000 + 5 * SECOND,
+                            end_ns=YEAR_2000 + 10 * SECOND + 200_000_000,
+                            max_lidar_gap_ns=6 * SECOND,
+                            max_imu_gap_ns=11_000_000,
+                            parent_manifest=manifest,
+                        )
 
     def test_comparison_includes_time_values_and_presence_without_retiming(self):
         source = overlapping_capture(5 * SECOND)
@@ -279,6 +291,36 @@ class TimeAxisTest(unittest.TestCase):
         self.assertIsNone(loaded.lidar.dispatch_timestamps_ns)
         self.assertEqual(replay_hard_offset_ns(loaded), 0)
         write_full_native_input(loaded, self.root / "legacy.bin")
+
+    def test_segment_slices_provenance_and_rejects_cross_epoch_window(self):
+        source = capture()
+        manifest = write_dataset(source, self.root / "parent")
+        arguments = dict(
+            start_ns=YEAR_2000,
+            end_ns=YEAR_2000 + 300_000_000,
+            max_lidar_gap_ns=110_000_000,
+            max_imu_gap_ns=11_000_000,
+            parent_manifest=manifest,
+        )
+        with self.assertRaisesRegex(ValueError, "shared measurement clock"):
+            extract_segment(source, **arguments)
+        shared = replace(
+            source,
+            imu=replace(
+                source.imu,
+                timestamps_ns=source.imu.timestamps_ns - YEAR_2023 + YEAR_2000,
+            ),
+        )
+        segment = extract_segment(shared, **arguments)
+        segment.validate()
+        np.testing.assert_array_equal(
+            segment.lidar.dispatch_timestamps_ns,
+            source.lidar.dispatch_timestamps_ns[:2],
+        )
+        np.testing.assert_array_equal(
+            segment.imu.dispatch_timestamps_ns,
+            source.imu.dispatch_timestamps_ns[2:32],
+        )
 
     @unittest.skipUnless(
         os.environ.get("GRIL_NATIVE_FULL_TEST_EXECUTABLE"), "native opt-in"

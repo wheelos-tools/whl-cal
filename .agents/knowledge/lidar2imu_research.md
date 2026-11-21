@@ -249,3 +249,140 @@ See the [benchmark matrix](../../outputs/gril/research_multicapture_20260929/dat
 for other captures and the [GRIL iteration report](../../outputs/gril/research_20260506_canonical_32line_corrected_imu/iteration_report.yaml)
 for a rejected one-factor frontend ablation. Reuse their schemas; do not
 introduce a second record-decoding stack.
+
+## Zhongce 2026-11-17 dual-corner FlatBuffer LiDAR + corrected-IMU stabilization
+
+**Decision: `converged_and_verified` (`verdict: accepted` under post-run Stage 3
+quality gates) on the `[0, 680 s]` pre-gap window for both `left_front` and
+`right_back` 32-line corner LiDARs against `/apollo/sensor/gnss/corrected_imu`
+(`measurement_time`, `H = 0`), while preserving frozen GRIL defaults.**
+
+- **Source & canonical ingress:** `/mnt/synology/中策/2026-11-17/bag` (`10,912`
+  FlatBuffer corner scans each on `left_front` and `right_back`, `108,621`
+  `corrected_imu` samples at `100 Hz`, 32 elevation rings, continuous `[0, 680 s]`
+  pre-gap calibration segment and `[785, 1005 s]` post-gap unseen holdout; fused
+  LiDAR excluded). Canonical datasets live at
+  `/mnt/synology/whl-cal-gril-validation-20261119/{left_front,right_back}/dataset`.
+- **Diagnosed failure mechanisms in unmodified baseline GRIL:**
+  1. **Dual-layer frontend non-determinism:** asynchronous `ikd-Tree` background
+     `pthread_create` swaps cause immediate trajectory divergence across reruns,
+     and `-fopenmp` from `${PCL_DEFINITIONS}` triggers Eigen 3.3.7's multi-threaded
+     `GeneralMatrixMatrix.h` 1-ULP (`~1e-16`) race when `effective_feature_count >= 174`,
+     compounding over `~20,000` EKF updates. Opt-in `--ikd-rebuild sync` disables
+     async tree threads and locks single-thread Eigen/OpenMP GEMM, achieving
+     **3/3 bit-exact SHA-256** across both `[0, 160 s]` and `[0, 680 s]` runs.
+  2. **Start spur ("起点毛刺"):** `cut_frame=3` equal-point-count splitting on
+     occluded corner FOV + hardcoded `kImuHz=200` `dt=0` resets trip
+     `pos_end.norm() > 0.05 m` at `t ≈ 3.7 s` while parked (actual departure
+     `t ≈ 19.2 s`). Fixed opt-in via `--cut-mode equal_time --min-cut-points 80`,
+     `--ahrs-imu-hz 100 --ahrs-dt-mode continuous`, and speed/omega motion gates.
+  3. **Mid-window vertical "banana" drift & end blow-up ("终点毛刺"):**
+     frame-inconsistent pseudo-ground EKF rows in `LidarOdometry.cpp` + close-wall
+     feature starvation (`< 1.5 m` wall starving `cut3` to `0..12` features ->
+     `+244.4 m` Z spike and premature `pct_z > 0.99` stop at ~13% of the bag).
+     Fixed opt-in via `--odom-ground-mode disabled` and
+     `--min-effective-features 30` (`max_step`: `15.24 m -> 0.21 m`; `p95` tilt:
+     `3.36°` / `5.68°`).
+  4. **Batch lag & lever-arm EIV dilution:** unbounded unnormalized
+     `xcorr_temporal_init` (`+48.37 s` / `-2.54 s`) and noisy 30 Hz differentiated
+     LiDAR `ang_vel`/`ang_acc` in `Linear_acc_Rot_Cost_without_Gravity` (~90%
+     lever-arm shrinkage when unbounded). Fixed opt-in via bounded Pearson
+     `max_xcorr_lag_s`, `max_time_lag_2_s`, `rot_init_max_iters`,
+     `use_imu_angular_in_acc_cost: true`, and `skip_secondary_acc_norm: true`.
+- **Stage 3 post-run quality-gate evidence (`lidar2imu evaluate-quality-gates`):**
+  - **`left_front` (`[0, 680 s]`, unbounded):** `R_LI` XYZ `[+0.036°, -0.075°, +132.687°]`,
+    `T_LI = [-0.1513, +2.0156, +0.4767] m`, `tau = -22.109 ms`. 3x repeatability:
+    `0.0° / 0.0 m / 0.0 s` (`SHA-256 241fdeba...`); 4-seed basin (including blind
+    `I + [0,0,0]`): `0.46° / 5.9 cm / 0.002 ms`; 3-window spread:
+    `2.09° / 8.3 cm XY / 2.19 ms`; unseen `[785, 1005 s]` holdout (`6,519` states):
+    gyro RMSE `0.0252 -> 0.0141 rad/s`, acc RMSE `0.6442 -> 0.6118 m/s²`.
+  - **`right_back` (`[0, 680 s]`, unbounded):** `R_LI` XYZ `[-0.006°, -0.295°, -46.376°]`,
+    `T_LI = [+1.6166, -3.7449, +0.4565] m`, `tau = -22.792 ms`. 3x repeatability:
+    `0.0° / 0.0 m / 0.0 s` (`SHA-256 7d479f06...`); 4-seed basin (including blind
+    `I + [0,0,0]`): `0.53° / 2.2 cm / 0.035 ms`; 3-window spread:
+    `1.64° / 31.3 cm XY / 4.92 ms`; unseen `[785, 1005 s]` holdout (`6,520` states):
+    gyro RMSE `0.0171 -> 0.0146 rad/s`, acc RMSE `0.8249 -> 0.7113 m/s²` (`-13.8%`).
+  - **Dual-corner physical agreement & 5-pillar cross-diagnostic (`lidar2imu evaluate-dual-diagnostics`):**
+    `Yaw_LF - Yaw_RB = +179.05°` (`0.95°` from nominal `180°` opposite-corner
+    geometry), `Δz = 2.0 cm`, and independent shared-IMU clock offset agreement
+    `Δtau = 0.68 ms` (`-22.11 ms` vs `-22.79 ms`). Running the 5-pillar
+    dual-sensor diagnostic (`outputs/gril/stage2b_stabilization_20261120/dual_sensor_diagnostics/`)
+    established two durable validation lessons:
+    1. **Turn pure-IMU submap confirms crisp single-sensor `R_LI` & `tau` while breaking the static gauge blind spot:**
+       over `[508.5, 511.1 s]` (`Δψ = 54.0°`), `100 Hz` IMU-deskewed wall
+       thickness is `5.60 cm` (`1.85x` sharper than zero lever/lag `10.34 cm` and
+       `1.32x` sharper than an injected common-mode IMU bias that is invisible in
+       static dual-PCDs); road-slope-cancelled IMU tilt bias across 12 headings
+       is `0.51°`; 3-curve yaw-rate RMSE is `0.0129 / 0.0185 rad/s` and active-turn
+       opposite-corner acceleration discrepancy drops `-63.3%` (`1.138 -> 0.417 m/s²`).
+    2. **Colored dual-PCD + orthogonal wall slices + direct `L2L` GICP expose ~13.5% loose-coupled EKF lever-arm scale shrinkage (`verdict: review_only` for joint cloud fusion):**
+       although single-sensor `lidar2imu` repeatability (`0.0 m`), seed basin
+       (`2–6 cm`), and EKF holdout (`-13.8%`) all pass, direct 3D wall overlays
+       and 5 independent stationary GICP stops (`t = 8.7..1080 s`, `±2.5 cm`
+       consistency) prove the physical sensor baseline in IMU RFU is
+       `[+2.16, -6.65, -0.13] m` vs `lidar2imu`-induced `[+1.77, -5.76, -0.02] m`
+       (`Δx = +38.3 cm`, `Δy = -89.0 cm`, `Δyaw = -0.95°`). Finite-bandwidth
+       30 Hz LiDAR EKF velocity differentiation attenuates tangential `Δa_L`
+       peaks relative to `α_IMU × T` on low-acceleration trucks (`|ω_z| <= 0.4 rad/s`),
+       shrinking `T_LI` equally in training and holdout.        Therefore, for multi-LiDAR point-cloud fusion, `lidar2imu` provides the
+       shared IMU gravity/yaw/timing gauge while relative `T_{A<-B}` must be
+       cross-checked (or locked) with structured `lidar2lidar` registration.
+
+### Joint `2 × L2I + upgraded L2L` calibration validation (`calibrate-dual-joint`)
+
+Implemented and validated on Zhongce `2026-11-17` (`[0, 680 s]` calibration,
+`[0, 340 s]` vs `[340, 680 s]` split-half, and unseen `[785, 1005 s]` holdout;
+see [design doc](../../docs/dual_lidar_imu_joint_calibration_design.md)):
+- **Unseen holdout `[785, 1005 s]` comparison (`evaluate-dual-diagnostics`)**:
+  - Baseline independent GRIL (`review_only`, `2/6` checks): static ground
+    Z-gap `13.79 cm` (`1.59°`), static wall gap `49.42 cm`, turn cross-sensor
+    wall gap `46.68 cm`, L2L loop residual `58.50 cm / 1.77°`.
+  - Joint `v1` (anisotropic `SE(3)^2` + GICP L2L + gravity): static ground Z-gap
+    `0.87 cm`, wall gap `0.23 cm`, turn A-B gap `9.17 cm`, semantic L2L residual
+    `14.92 cm / 0.42°`, gravity normal alignment `0.46°`.
+  - Joint `v2` (upgraded 4-channel semantic + dense ground + intensity +
+    3D-FoV L2L + dynamic-traffic window filtering + multi-window consensus):
+    static ground Z-gap `4.53 cm`, wall gap **`0.40 cm`**, semantic L2L loop
+    residual drops **24× vs baseline** to **`2.37 cm / 0.219°`** (vs bare GICP
+    corridor slip `35.9 cm`), gravity tilt bias **`0.272°`**, and split-half
+    `w1 [0, 340 s]` vs `w2 [340, 680 s]` `T_A_B` repeatability improves **5.8×**
+    over initial `v1` (`67.56 cm -> 11.62 cm`, `0.373°`; `v1` with dynamic filter
+    also improves to `8.04 cm / 0.161°`).
+  - Joint `v3` (`100 Hz` turn-IMU preintegrated dual-LiDAR BA + velocity-level
+    kinematics + `0.8 ms` shared-clock constraint + frozen `z_cm` +
+    Leave-One-Turn-Out cross-validation guard): achieves `6/6` in-sample on
+    `[0, 680 s]`, while LOTO out-of-sample CV detects `4.388 cm -> 4.513 cm`
+    and **automatically reverts final selection to `v2`** (no out-of-sample
+    overfitting leaked into exported `extrinsics/`).
+- **Full 23-shard (`1092.2 s`) empirical validation, alternative-paradigm
+  elimination, and Common-Mode Excitation Gate (2026-11-21):**
+  - Across all 4 independent parking locations in the full `1092 s` capture
+    (`t = 5 s, 520 s, 1035 s, 1080 s`), `semantic_l2l` achieves **`1.75 cm`**
+    median spread (`max = 3.96 cm`, per-axis std `1.86 / 1.09 / 0.91 cm`).
+  - Across 4 non-overlapping driving segments (`S1: 0-220s`, `S2: 220-450s`,
+    `S3: 450-680s`, `S4: 785-1005s`), `Joint v2` keeps `v2_yawA + straight_slip_angle`
+    invariant at **`134.42° ± 0.08°`**, proving that `~2° / 40 cm` common-mode
+    drift in `S1` (`28°` left vs `270°` right turns) and `S4` (`400°` left vs
+    `53°` right turns) originates from one-sided/low-acceleration L2I excitation
+    rather than sensor instability.
+  - Three heavier coupled alternatives were falsified by real-data A/B tests and
+    retired from the production path: (a) `Old v3` (`2.6 s` turn BA: `18.6 s`,
+    100% LOTO rollback due to `2.4%` Sagitta CRLB), (b) `Scheme 3` (`L2L` ->
+    `360°` merged cloud into `GRIL`: `478.9 s`, still suffers `GRIL EKF`
+    shrinkage to `1.46–1.86 m`), and (c) `Paradigm 7` (`6.5 s` through-turn
+    vectorized `BALM2` BA without `lid_v`: `8.6 s`, `0.5° * 0.5*g*dt^2 = 1.81 m`
+    gravity coupling swamps cm lever-arm curvature and degrades Holdout
+    `grav_bias` `0.280° -> 0.773°`).
+  - **Deployed algorithmic gate (`evaluate_common_mode_excitation_gate`)**:
+    post-run gate requiring `min(left_deg, right_deg) >= 90°`,
+    `turn_symmetry_ratio >= 0.25`, `p95_planar_acc >= 0.50 m/s²`,
+    `max_abs_wz >= 0.32 rad/s`, and `healthy_l2l_edges >= 1`, plus explicit
+    `z_cm_observable: false` under planar motion. Properly rejects `S1/S2/S4` as
+    `needs_more_excitation` and accepts `S3` and `Full_0_680s` (`Yaw` spread
+    `0.25°`, baseline `7.060 m` vs `7.125 m`).
+  - **Only high-ROI remaining improvements**: stop stacking backend preintegrated
+    BA on `<= 14 km/h` logs; focus exclusively on (1) capture excitation upgrade
+    (`20–25 km/h` braking/accel `>= 1.5 m/s²` + symmetric figure-8s) and/or
+    (2) physical CAD/laser-tape `(t_x, t_y, t_z)` priors.
+
+

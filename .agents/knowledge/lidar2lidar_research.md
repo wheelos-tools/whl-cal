@@ -372,6 +372,27 @@ perimeter edge or plane regresses, the loop remains consistent, and
 per-point-time effects are controlled. Pedestrian alignment is a timing /
 dynamic-scene diagnostic, not an extrinsic accuracy gate.
 
+## Semantic, reflectivity, and 3D-occlusion L2L upgrade (`semantic_registration.py`)
+
+To fix the corridor degeneracy, ground-point imbalance, and naive 1D azimuth
+crop limits identified above, `lidar2lidar/semantic_registration.py` implements:
+- 4-channel geometric decomposition (`ground`, `facade`, vertical `pole/edge`
+  2D point-to-line residuals, and range/incidence-compensated robust-normalized
+  `intensity` landmarks with high-sphericity clutter rejection);
+- ego-vehicle AABB ray occlusion (`ray_intersects_aabb_mask`),
+  uncertainty-buffered 3D azimuth+elevation+range frustum masking, and
+  same-side normal co-visibility gating;
+- `6×6` X-ICP localizability eigen-decomposition (`corridor_degenerate`,
+  `weakest_translation_direction_target`).
+
+On Zhongce `2026-11-17` unseen `[785, 1005 s]` holdout static stops, bare GICP
+slips `35.9 cm` longitudinally due to corridor anisotropy (`cond = 697`),
+whereas `register_semantic_l2l` aligns multi-primitive geometry + intensity to
+`6.15 cm` cycle consistency against the `[0, 680 s]` joint `v2` solution and
+reduces split-half `[0, 340 s]` vs `[340, 680 s]` `T_A_B` spread by `2.2×`
+(`67.6 cm -> 31.1 cm`, `0.131°`). See
+[docs/dual_lidar_imu_joint_calibration_design.md](../../docs/dual_lidar_imu_joint_calibration_design.md).
+
 References:
 
 - [Current scan2scan playbook](../../context/lidar2lidar_scan2scan_playbook.md)
