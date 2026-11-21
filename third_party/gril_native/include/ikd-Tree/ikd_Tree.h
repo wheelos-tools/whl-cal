@@ -162,8 +162,11 @@ private:
     static bool point_cmp_y(PointType a, PointType b); 
     static bool point_cmp_z(PointType a, PointType b); 
 
+private:
+    bool async_rebuild_enabled = true;
+
 public:
-    KD_TREE(float delete_param = 0.5, float balance_param = 0.6 , float box_length = 0.2);
+    KD_TREE(float delete_param = 0.5, float balance_param = 0.6 , float box_length = 0.2, bool async_rebuild = true);
     ~KD_TREE();
     void Set_delete_criterion_param(float delete_param);
     void Set_balance_criterion_param(float balance_param);

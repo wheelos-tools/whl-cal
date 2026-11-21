@@ -31,6 +31,15 @@ _NATIVE_DEFAULTS = {
     "ground_factor": 1.0,
 }
 
+_NATIVE_OPTIONAL_KEYS = (
+    "max_xcorr_lag_s",
+    "max_time_lag_2_s",
+    "rot_init_max_iters",
+    "use_imu_angular_in_acc_cost",
+    "skip_secondary_acc_norm",
+    "tail_trim_states",
+)
+
 
 @dataclass(frozen=True)
 class NativeBatchRunConfig:
@@ -54,6 +63,9 @@ def native_config_values(gril_config_path: Path) -> dict[str, Any]:
     calibration = algorithm["calibration"]
     values = dict(_NATIVE_DEFAULTS)
     for key in values:
+        if key in calibration:
+            values[key] = calibration[key]
+    for key in _NATIVE_OPTIONAL_KEYS:
         if key in calibration:
             values[key] = calibration[key]
     if "rotation_LI_xyzw" in calibration:

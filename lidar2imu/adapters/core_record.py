@@ -70,7 +70,8 @@ def _resolve_executable(config: AdapterConfig) -> Path:
 
 def _read_interchange(path: Path, config: AdapterConfig, source_files: tuple[str, ...]):
     with path.open("rb") as stream:
-        if _read_exact(stream, len(_MAGIC)) != _MAGIC:
+        magic = _read_exact(stream, len(_MAGIC))
+        if magic not in (_MAGIC, b"GRIL_CANONICAL_NATIVE 2\n"):
             raise ValueError("Unsupported C++ canonical interchange version")
         lidar_frame = _read_string(stream)
         imu_frame = _read_string(stream)
@@ -107,6 +108,16 @@ def _read_interchange(path: Path, config: AdapterConfig, source_files: tuple[str
         if len(imu_timestamps) != imu_count or len(imu_values) != imu_count:
             raise ValueError("Truncated IMU data in C++ canonical interchange file")
 
+        timing = {}
+        if magic == b"GRIL_CANONICAL_NATIVE 2\n":
+            for name, count in (
+                ("measurement", scan_count),
+                ("lidar_dispatch", scan_count),
+                ("imu_dispatch", imu_count),
+            ):
+                timing[name] = np.frombuffer(
+                    _read_exact(stream, int(count) * 8), dtype="<i8"
+                ).copy()
         transforms = []
         for _ in range(transform_count):
             parent = _read_string(stream)
@@ -134,12 +145,15 @@ def _read_interchange(path: Path, config: AdapterConfig, source_files: tuple[str
         intensity=points["intensity"],
         ring=points["ring"],
         point_time_s=points["point_time_s"],
+        measurement_timestamps_ns=timing.get("measurement"),
+        dispatch_timestamps_ns=timing.get("lidar_dispatch"),
     )
     imu = ImuBatch(
         frame_id=imu_frame,
         timestamps_ns=imu_timestamps,
         angular_velocity=imu_values["angular_velocity"],
         linear_acceleration=imu_values["linear_acceleration"],
+        dispatch_timestamps_ns=timing.get("imu_dispatch"),
     )
     dataset = CanonicalDataset(
         source_type="apollo_record",
@@ -162,6 +176,12 @@ def _read_interchange(path: Path, config: AdapterConfig, source_files: tuple[str
                 "review_required_for_new_sensor": True,
             },
             "record_reader": "wheelos_core::RecordReader",
+            "time_provenance": {
+                "lidar_measurement": "Apollo measurement_time (scan_end); 0 if absent",
+                "dispatch": "Apollo header.timestamp_sec; 0 if unavailable",
+                "imu_dispatch": "only independent when measurement_time is valid",
+                "imu_measurement": "measurement_time, else header, else record time",
+            },
         },
     )
     dataset.validate()

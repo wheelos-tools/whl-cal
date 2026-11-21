@@ -146,6 +146,21 @@ void residual_mean() {
   require(no_match.effective_feature_count == 0 &&
               std::isnan(no_match.residual_mean),
           "no correspondences must report an undefined residual");
+
+  LidarOdometryConfig guarded_cfg;
+  guarded_cfg.async_tree_rebuild = false;
+  guarded_cfg.enable_pseudo_ground_constraint = false;
+  guarded_cfg.min_effective_features = 10;
+  LidarOdometryCore guarded(guarded_cfg);
+  FrontendState guarded_state;
+  guarded.process(plane_cloud(1.0F), LidarGroundEstimate(), guarded_state);
+  const Eigen::Vector3d pos_before = guarded_state.pos_end;
+  const LidarOdometryResult skipped = guarded.process(
+      plane_cloud(100.0F), LidarGroundEstimate(), guarded_state);
+  require(!skipped.update_performed && skipped.degenerate_skipped,
+          "min_effective_features guard must skip degenerate frame");
+  require((guarded_state.pos_end - pos_before).norm() == 0.0,
+          "degenerate-frame skip must preserve prior EKF state");
 }
 
 void determinism() {

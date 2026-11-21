@@ -6,10 +6,12 @@ Author: Yixi Cai
 email: yixicai@connect.hku.hk
 */
 
-KD_TREE::KD_TREE(float delete_param, float balance_param, float box_length) {
+KD_TREE::KD_TREE(float delete_param, float balance_param, float box_length, bool async_rebuild) {
     delete_criterion_param = delete_param;
     balance_criterion_param = balance_param;
     downsample_size = box_length;
+    async_rebuild_enabled = async_rebuild;
+    rebuild_thread = 0;
     Rebuild_Logger.clear();           
     termination_flag = false;
     start_thread();
@@ -160,8 +162,10 @@ void KD_TREE::start_thread(){
     pthread_mutex_init(&points_deleted_rebuild_mutex_lock, NULL); 
     pthread_mutex_init(&working_flag_mutex, NULL);
     pthread_mutex_init(&search_flag_mutex, NULL);
-    pthread_create(&rebuild_thread, NULL, multi_thread_ptr, (void*) this);
-    printf("Multi thread started \n");    
+    if (async_rebuild_enabled) {
+        pthread_create(&rebuild_thread, NULL, multi_thread_ptr, (void*) this);
+        printf("Multi thread started \n");
+    }
 }
 
 void KD_TREE::stop_thread(){
@@ -585,7 +589,7 @@ void KD_TREE::BuildTree(KD_TREE_NODE ** root, int l, int r, PointVector & Storag
 
 void KD_TREE::Rebuild(KD_TREE_NODE ** root){    
     KD_TREE_NODE * father_ptr;
-    if ((*root)->TreeSize >= Multi_Thread_Rebuild_Point_Num) { 
+    if (async_rebuild_enabled && (*root)->TreeSize >= Multi_Thread_Rebuild_Point_Num) { 
         if (!pthread_mutex_trylock(&rebuild_ptr_mutex_lock)){     
             if (Rebuild_Ptr == nullptr || ((*root)->TreeSize > (*Rebuild_Ptr)->TreeSize)) {
                 Rebuild_Ptr = root;          
@@ -595,10 +599,15 @@ void KD_TREE::Rebuild(KD_TREE_NODE ** root){
     } else {
         father_ptr = (*root)->father_ptr;
         int size_rec = (*root)->TreeSize;
+        (void)size_rec;
         PCL_Storage.clear();
         flatten(*root, PCL_Storage, DELETE_POINTS_REC);
         delete_tree_nodes(root);
-        BuildTree(root, 0, PCL_Storage.size()-1, PCL_Storage);
+        if (!PCL_Storage.empty()) {
+            BuildTree(root, 0, static_cast<int>(PCL_Storage.size()) - 1, PCL_Storage);
+        } else {
+            *root = nullptr;
+        }
         if (*root != nullptr) (*root)->father_ptr = father_ptr;
         if (*root == Root_Node) STATIC_ROOT_NODE->left_son_ptr = *root;
     } 

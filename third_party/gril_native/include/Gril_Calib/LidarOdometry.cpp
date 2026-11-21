@@ -242,7 +242,10 @@ Eigen::Matrix3d skew(const Eigen::Vector3d &value) {
 } // namespace
 
 struct LidarOdometryCore::Impl {
-  explicit Impl(const LidarOdometryConfig &value) : config(value) {
+  explicit Impl(const LidarOdometryConfig &value)
+      : config(value), tree(0.5F, 0.6F, 0.2F, value.async_tree_rebuild) {
+    if (!value.async_tree_rebuild)
+      Eigen::setNbThreads(1);
     gain_product.setZero();
     hessian.setZero();
     identity.setIdentity();
@@ -521,7 +524,30 @@ LidarOdometryCore::process(const PointCloudXYZI &undistorted,
                              ? total_residual / effective_feature_count
                              : std::numeric_limits<double>::quiet_NaN();
 
-    const int residual_dimension = effective_feature_count + 3;
+    const bool below_min_features =
+        (core.config.min_effective_features > 0 &&
+         effective_feature_count < core.config.min_effective_features) ||
+        (!core.config.enable_pseudo_ground_constraint &&
+         effective_feature_count < kMatchPointCount);
+    if (below_min_features) {
+      state = propagated_state;
+      state.bias_g *= 0.5;
+      result.degenerate_skipped = true;
+      result.update_performed = false;
+      result.effective_feature_count = effective_feature_count;
+      result.residual_mean = core.residual_mean;
+      result.downsampled_world = world;
+      result.map_size = core.tree.size();
+      result.map_valid_points = core.tree.validnum();
+      result.total_distance = core.total_distance;
+      result.updated_state = state;
+      return result;
+    }
+
+    const int residual_dimension =
+        core.config.enable_pseudo_ground_constraint
+            ? (effective_feature_count + 3)
+            : effective_feature_count;
     Eigen::MatrixXd measurement_jacobian(residual_dimension, 12);
     Eigen::MatrixXd weighted_jacobian_transpose(12, residual_dimension);
     Eigen::VectorXd inverse_covariance(residual_dimension);
@@ -555,54 +581,57 @@ LidarOdometryCore::process(const PointCloudXYZI &undistorted,
       measurements(index) = -normal.intensity;
     }
 
-    const Eigen::Matrix3d lidar_ground =
-        ground.lidar_ground_rotation.toRotationMatrix();
-    const Eigen::Matrix3d ground_lidar = lidar_ground.transpose();
-    const Eigen::Vector3d axis_x(1.0, 0.0, 0.0);
-    const Eigen::Vector3d axis_y(0.0, 1.0, 0.0);
-    const Eigen::Vector3d axis_z(0.0, 0.0, 1.0);
-    const Eigen::Matrix3d ground_normal_cross = skew(ground.normal_lidar);
-    const Eigen::Vector3d ground_jacobian_x =
-        ground_normal_cross * ground_lidar * state.rot_end * axis_x;
-    const Eigen::Vector3d ground_jacobian_y =
-        ground_normal_cross * ground_lidar * state.rot_end * axis_y;
-    const Eigen::Vector3d ground_jacobian_z = ground_lidar * axis_z;
+    if (core.config.enable_pseudo_ground_constraint) {
+      const Eigen::Matrix3d lidar_ground =
+          ground.lidar_ground_rotation.toRotationMatrix();
+      const Eigen::Matrix3d ground_lidar = lidar_ground.transpose();
+      const Eigen::Vector3d axis_x(1.0, 0.0, 0.0);
+      const Eigen::Vector3d axis_y(0.0, 1.0, 0.0);
+      const Eigen::Vector3d axis_z(0.0, 0.0, 1.0);
+      const Eigen::Matrix3d ground_normal_cross = skew(ground.normal_lidar);
+      const Eigen::Vector3d ground_jacobian_x =
+          ground_normal_cross * ground_lidar * state.rot_end * axis_x;
+      const Eigen::Vector3d ground_jacobian_y =
+          ground_normal_cross * ground_lidar * state.rot_end * axis_y;
+      const Eigen::Vector3d ground_jacobian_z = ground_lidar * axis_z;
 
-    measurement_jacobian.row(effective_feature_count) << ground_jacobian_x(0),
-        ground_jacobian_x(1), ground_jacobian_x(2), 0, 0, 0, 0, 0, 0, 0, 0, 0;
-    weighted_jacobian_transpose.col(effective_feature_count) =
-        measurement_jacobian.row(effective_feature_count).transpose() *
-        core.config.ground_covariance;
-    inverse_covariance(effective_feature_count) = core.config.ground_covariance;
+      measurement_jacobian.row(effective_feature_count) << ground_jacobian_x(0),
+          ground_jacobian_x(1), ground_jacobian_x(2), 0, 0, 0, 0, 0, 0, 0, 0, 0;
+      weighted_jacobian_transpose.col(effective_feature_count) =
+          measurement_jacobian.row(effective_feature_count).transpose() *
+          core.config.ground_covariance;
+      inverse_covariance(effective_feature_count) =
+          core.config.ground_covariance;
 
-    measurement_jacobian.row(effective_feature_count + 1)
-        << ground_jacobian_y(0),
-        ground_jacobian_y(1), ground_jacobian_y(2), 0, 0, 0, 0, 0, 0, 0, 0, 0;
-    weighted_jacobian_transpose.col(effective_feature_count + 1) =
-        measurement_jacobian.row(effective_feature_count + 1).transpose() *
-        core.config.ground_covariance;
-    inverse_covariance(effective_feature_count + 1) =
-        core.config.ground_covariance;
+      measurement_jacobian.row(effective_feature_count + 1)
+          << ground_jacobian_y(0),
+          ground_jacobian_y(1), ground_jacobian_y(2), 0, 0, 0, 0, 0, 0, 0, 0, 0;
+      weighted_jacobian_transpose.col(effective_feature_count + 1) =
+          measurement_jacobian.row(effective_feature_count + 1).transpose() *
+          core.config.ground_covariance;
+      inverse_covariance(effective_feature_count + 1) =
+          core.config.ground_covariance;
 
-    measurement_jacobian.row(effective_feature_count + 2) << 0, 0, 0,
-        ground_jacobian_z(0), ground_jacobian_z(1), ground_jacobian_z(2), 0, 0,
-        0, 0, 0, 0;
-    weighted_jacobian_transpose.col(effective_feature_count + 2) =
-        measurement_jacobian.row(effective_feature_count + 2).transpose() *
-        core.config.ground_covariance;
-    inverse_covariance(effective_feature_count + 2) =
-        core.config.ground_covariance;
+      measurement_jacobian.row(effective_feature_count + 2) << 0, 0, 0,
+          ground_jacobian_z(0), ground_jacobian_z(1), ground_jacobian_z(2), 0,
+          0, 0, 0, 0, 0;
+      weighted_jacobian_transpose.col(effective_feature_count + 2) =
+          measurement_jacobian.row(effective_feature_count + 2).transpose() *
+          core.config.ground_covariance;
+      inverse_covariance(effective_feature_count + 2) =
+          core.config.ground_covariance;
 
-    const Eigen::Vector3d ground_rotation_measurement =
-        ground_lidar * state.rot_end * ground.normal_lidar;
-    const Eigen::Vector3d ground_position_measurement =
-        ground_lidar * state.pos_end;
-    measurements(effective_feature_count) =
-        axis_x.transpose() * ground_rotation_measurement;
-    measurements(effective_feature_count + 1) =
-        axis_y.transpose() * ground_rotation_measurement;
-    measurements(effective_feature_count + 2) =
-        axis_z.transpose() * ground_position_measurement - 1.0;
+      const Eigen::Vector3d ground_rotation_measurement =
+          ground_lidar * state.rot_end * ground.normal_lidar;
+      const Eigen::Vector3d ground_position_measurement =
+          ground_lidar * state.pos_end;
+      measurements(effective_feature_count) =
+          axis_x.transpose() * ground_rotation_measurement;
+      measurements(effective_feature_count + 1) =
+          axis_y.transpose() * ground_rotation_measurement;
+      measurements(effective_feature_count + 2) =
+          axis_z.transpose() * ground_position_measurement - 1.0;
+    }
 
     Eigen::MatrixXd kalman_gain(kStateDimension, residual_dimension);
     bool stop = false;

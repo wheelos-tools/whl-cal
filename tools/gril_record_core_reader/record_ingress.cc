@@ -28,7 +28,7 @@ using apollo::cyber::record::RecordReader;
 using google::protobuf::FieldDescriptor;
 using google::protobuf::Message;
 
-constexpr char kMagic[] = "GRIL_CANONICAL_NATIVE 1\n";
+constexpr char kMagic[] = "GRIL_CANONICAL_NATIVE 2\n";
 constexpr char kLidarTopicDefault[] =
     "/apollo/sensor/vanjeelidar/up/PointCloud2";
 constexpr char kImuTopicDefault[] = "/apollo/sensor/gnss/imu";
@@ -44,11 +44,14 @@ struct Point {
 
 struct Scan {
   int64_t timestamp_ns;
+  int64_t measurement_ns;
+  int64_t dispatch_ns;
   std::vector<Point> points;
 };
 
 struct ImuSample {
   int64_t timestamp_ns;
+  int64_t dispatch_ns;
   double angular_velocity[3];
   double linear_acceleration[3];
 };
@@ -165,6 +168,13 @@ int64_t MessageTimestamp(const Message &message, uint64_t fallback) {
   return static_cast<int64_t>(fallback);
 }
 
+int64_t DispatchTimestamp(const Message &message) {
+  const Message *header = Nested(message, "header");
+  return header == nullptr
+             ? 0
+             : SecondsToNanoseconds(Number(*header, "timestamp_sec"));
+}
+
 bool Includes(int64_t timestamp_ns, int64_t start_ns, int64_t end_ns) {
   return (start_ns == std::numeric_limits<int64_t>::min() ||
           timestamp_ns >= start_ns) &&
@@ -231,6 +241,8 @@ void ReadPointCloud(const Message &cloud, int64_t start_ns, int64_t end_ns,
     *frame_id = FrameId(cloud, "lidar");
   Scan scan;
   scan.timestamp_ns = scan_timestamp;
+  scan.measurement_ns = SecondsToNanoseconds(Number(cloud, "measurement_time"));
+  scan.dispatch_ns = DispatchTimestamp(cloud);
   scan.points.reserve(point_count);
   for (size_t i = 0; i < source_points.size(); ++i) {
     const Message &source = *source_points[i];
@@ -276,6 +288,12 @@ void ReadImu(const Message &source, const std::string &topic,
   }
   ImuSample sample{};
   sample.timestamp_ns = timestamp_ns;
+  // A fallback header is measurement time, not independent publication
+  // evidence.
+  sample.dispatch_ns =
+      SecondsToNanoseconds(Number(source, "measurement_time")) != 0
+          ? DispatchTimestamp(source)
+          : 0;
   for (int axis = 0; axis < 3; ++axis) {
     const char *names[] = {"x", "y", "z"};
     sample.angular_velocity[axis] = Number(*angular, names[axis]);
@@ -435,6 +453,12 @@ void WriteCanonical(const std::string &output_path,
       WriteLittleEndian(output, value);
     }
   }
+  for (const auto &scan : scans)
+    WriteLittleEndian(output, scan.measurement_ns);
+  for (const auto &scan : scans)
+    WriteLittleEndian(output, scan.dispatch_ns);
+  for (const auto &sample : imu_samples)
+    WriteLittleEndian(output, sample.dispatch_ns);
   for (const auto &item : transforms) {
     const auto &edge = item.second;
     WriteString(output, edge.parent);

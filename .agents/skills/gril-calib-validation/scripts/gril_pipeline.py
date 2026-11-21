@@ -455,6 +455,8 @@ def prepare(arguments) -> None:
             arguments.tf_parent,
             "--tf-child",
             arguments.tf_child,
+            "--scan-lines",
+            str(arguments.scan_lines),
         ]
     )
     contract = yaml.safe_load((output / "input_contract.yaml").read_text())

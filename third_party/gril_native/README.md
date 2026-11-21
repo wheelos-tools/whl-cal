@@ -68,8 +68,8 @@ front-of-deque synchronization fixes from
 | Velodyne boundary | Empty scans, invalid configuration, rings outside the upstream 128-entry timing arrays, and non-finite timestamps are rejected before the algorithm. Non-finite XYZ values are filtered at their original indices; this extends upstream's NaN check to infinities without changing finite-input behavior. |
 | Validated fix | Every audited front-trimming site pops all paired ground-constraint deques exactly with each LiDAR state. |
 | LiDAR odometry | The pinned ikd-tree, PCL 1.10 voxel order, local-map movement, five-neighbor plane fit, LiDAR-only Jacobian, ground rows, iterated EKF, convergence/rematch schedule, covariance update, and map insertion order are retained. |
-| Full input | `GRIL_NATIVE_DATASET 1` is a streamed, versioned binary event boundary generated from the canonical dataset without ROS. |
-| Hard timing | The one-shot hard offset, compensated IMU enqueue timestamp, rollback queue clearing, exact FIFO end comparisons, and full-scan ground state paired to each cut retain the audited callback semantics. |
+| Full input | `GRIL_NATIVE_DATASET 2` adds one fixed epoch offset before streamed raw measurement events, without ROS; native input v1 remains readable. |
+| Hard timing | Canonical replay locks H before enqueueing either stream, then subtracts H and configured C once from each IMU time. Legacy native-v1 callback initialization remains available. FIFO comparisons, rollback clearing and source-scan ground pairing are unchanged. |
 | Forward gaps | Golden mode adds no reset. The separate reset mode requires an explicit threshold and recreates all frontend/calibration state before derivatives resume. |
 | Ground plane fit | Patchwork++ and the integrated plane fit retain PCL 1.10's original float accumulation order instead of inheriting the shifted PCL 1.15 covariance accumulator. |
 
@@ -124,16 +124,25 @@ The full executable hands its live queues to the clean batch executable as soon
 as `data_sufficiency_assess` passes. This preserves the exact versioned batch
 input while isolating Ceres from the active ikd-tree rebuild worker.
 
-`GRIL_NATIVE_DATASET 1` begins with its ASCII magic line and a little-endian
-`uint64` event count. Events are sorted by `(timestamp_ns, type, index)`, with
-IMU before LiDAR at an equal timestamp. An IMU event is a `uint8` tag (`0`),
+`GRIL_NATIVE_DATASET 2` begins with its ASCII magic line, a little-endian
+`int64` fixed H in nanoseconds, then a `uint64` event count. Version 1 omits H
+and retains its legacy callback clock initialization. The canonical writer uses
+v2, including H=0 for same-clock inputs, and sorts by
+`(aligned_measurement_timestamp_ns, type, index)`, subtracting H only in the
+IMU sort key. IMU precedes LiDAR on ties. Payload timestamps remain raw.
+An IMU event is a `uint8` tag (`0`),
 an `int64` timestamp, and six little-endian `float64` values (angular velocity,
 then linear acceleration). A LiDAR event is a `uint8` tag (`1`), a `uint32`
 one-based scan number, an `int64` timestamp, a `uint64` point count, then
 per-point little-endian `{float32 x, y, z, intensity, time_s; uint16 ring}`.
 All canonical IMU samples are retained even when `--scan-count` limits LiDAR
-scans: fallback point timing and a one-shot hard clock offset can require IMU
-records after the final selected raw LiDAR timestamp.
+scans: fallback point timing can require IMU records after the last scan.
+See the [clock contract](../../docs/lidar2imu_quickstart.md#measurement-clocks-and-publication-time)
+for the scan-end-based H initializer and legacy/absent-publication policy.
+The `time_axis` frontend trace record stores mode, H seconds, and configured
+C seconds. The batch trace's existing `timediff_imu_wrt_lidar` stores all
+precompensation H+C; the batch solver adds tau1+tau2 to report total raw-clock
+lag without applying C to its already compensated state samples again.
 
 ## Native VELO/Velodyne preprocessing
 

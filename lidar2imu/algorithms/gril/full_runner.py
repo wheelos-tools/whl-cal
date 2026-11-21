@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import struct
 import subprocess
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from lidar2imu.algorithms.gril.native_runner import write_native_config
 from lidar2imu.dataset_io import file_sha256, load_dataset
 from lidar2imu.evaluation.customer_summary import write_customer_summary
 from lidar2imu.models import CanonicalDataset
+from lidar2imu.time_axis import replay_hard_offset_ns
 
 _EVENT_COUNT = struct.Struct("<Q")
 _IMU_EVENT = struct.Struct("<Bq6d")
@@ -41,10 +43,25 @@ class NativeFullRunConfig:
     executable: Path
     output_dir: Path
     batch_executable: Path | None = None
+    start_scan: int = 0
     scan_count: int | None = None
     gap_policy: str = "golden"
     forward_gap_s: float | None = None
     configured_time_lag_s: float = 0.0
+    ikd_rebuild: str = "async"
+    cut_mode: str = "equal_count"
+    min_cut_points: int = 0
+    cut_frame_num: int | None = None
+    odom_ground_mode: str = "golden"
+    min_effective_features: int = 0
+    ahrs_imu_hz: int = 200
+    ahrs_dt_mode: str = "package_reset"
+    motion_start_min_speed_mps: float = 0.0
+    motion_start_min_omega_rad_s: float = 0.0
+    min_accum_duration_s: float = 0.0
+    max_accum_duration_s: float = 0.0
+    eof_policy: str = "fail"
+    loaded_dataset: CanonicalDataset | None = None
 
     def resolved_batch_executable(self) -> Path:
         return (
@@ -62,6 +79,8 @@ class NativeFullRunConfig:
         ):
             if not path.exists():
                 raise FileNotFoundError(f"{name} not found: {path}")
+        if self.start_scan < 0:
+            raise ValueError("start_scan must be non-negative")
         if self.scan_count is not None and self.scan_count <= 0:
             raise ValueError("scan_count must be positive when specified")
         if self.gap_policy not in {"golden", "reset"}:
@@ -74,6 +93,24 @@ class NativeFullRunConfig:
             raise ValueError("forward_gap_s is only valid with reset gap policy")
         if not math.isfinite(self.configured_time_lag_s):
             raise ValueError("configured_time_lag_s must be finite")
+        if self.ikd_rebuild not in {"async", "sync"}:
+            raise ValueError("ikd_rebuild must be async or sync")
+        if self.cut_mode not in {"equal_count", "equal_time"}:
+            raise ValueError("cut_mode must be equal_count or equal_time")
+        if self.min_cut_points < 0:
+            raise ValueError("min_cut_points must be non-negative")
+        if self.cut_frame_num is not None and self.cut_frame_num <= 0:
+            raise ValueError("cut_frame_num must be positive when specified")
+        if self.odom_ground_mode not in {"golden", "disabled"}:
+            raise ValueError("odom_ground_mode must be golden or disabled")
+        if self.min_effective_features < 0:
+            raise ValueError("min_effective_features must be non-negative")
+        if self.ahrs_imu_hz <= 0:
+            raise ValueError("ahrs_imu_hz must be positive")
+        if self.ahrs_dt_mode not in {"package_reset", "continuous"}:
+            raise ValueError("ahrs_dt_mode must be package_reset or continuous")
+        if self.eof_policy not in {"fail", "calibrate"}:
+            raise ValueError("eof_policy must be fail or calibrate")
 
 
 def _required(section: dict[str, Any], names: tuple[str, ...], label: str) -> None:
@@ -308,6 +345,7 @@ def write_full_native_input(
     dataset_path: Union[Path, CanonicalDataset],
     output_path: Path,
     *,
+    start_scan: int = 0,
     scan_count: int | None = None,
 ) -> Path:
     dataset = (
@@ -315,47 +353,63 @@ def write_full_native_input(
         if isinstance(dataset_path, CanonicalDataset)
         else load_dataset(dataset_path)
     )
+    dataset.validate()
+    hard_offset_ns = replay_hard_offset_ns(dataset)
     lidar = dataset.lidar.normalized()
     imu = dataset.imu.normalized()
-    selected_scans = len(lidar.scan_timestamps_ns) if scan_count is None else scan_count
-    if selected_scans <= 0 or selected_scans > len(lidar.scan_timestamps_ns):
+    total_scans = len(lidar.scan_timestamps_ns)
+    if start_scan < 0 or start_scan >= total_scans:
         raise ValueError(
-            f"scan_count {selected_scans} exceeds "
-            f"{len(lidar.scan_timestamps_ns)} available scans"
+            f"start_scan {start_scan} out of range for {total_scans} available scans"
+        )
+    end_scan = total_scans if scan_count is None else start_scan + scan_count
+    if end_scan <= start_scan or end_scan > total_scans:
+        raise ValueError(
+            f"scan window [{start_scan}, {end_scan}) exceeds "
+            f"{total_scans} available scans"
         )
 
     events: list[tuple[int, int, int]] = [
-        (int(lidar.scan_timestamps_ns[index]), 1, index)
-        for index in range(selected_scans)
+        (int(lidar.scan_timestamps_ns[index]), 1, index - start_scan)
+        for index in range(start_scan, end_scan)
     ]
-    # Preserve the complete IMU stream.  A source may require fallback
-    # azimuth timing or discover a hard sensor-clock offset only after the
-    # first LiDAR event, so a raw point-time-derived cutoff can omit samples
-    # needed to synchronize the final selected scan.
+    if start_scan == 0:
+        # Keep all IMU samples for golden equivalence, including the tail needed
+        # to finish the last scan when preprocessing uses azimuth-derived timing.
+        imu_indices = range(len(imu.timestamps_ns))
+    else:
+        imu_aligned_ns = imu.timestamps_ns.astype(np.int64) - int(hard_offset_ns)
+        imu_min_ns = int(lidar.scan_timestamps_ns[start_scan]) - 500_000_000
+        imu_max_ns = int(lidar.scan_timestamps_ns[end_scan - 1]) + 1_000_000_000
+        start_imu = int(np.searchsorted(imu_aligned_ns, imu_min_ns, side="left"))
+        end_imu = int(np.searchsorted(imu_aligned_ns, imu_max_ns, side="right"))
+        imu_indices = range(start_imu, end_imu)
     events.extend(
-        (int(imu.timestamps_ns[index]), 0, index)
-        for index in range(len(imu.timestamps_ns))
+        (int(imu.timestamps_ns[index]) - hard_offset_ns, 0, index)
+        for index in imu_indices
     )
     events.sort()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as output:
-        output.write(b"GRIL_NATIVE_DATASET 1\n")
+        output.write(b"GRIL_NATIVE_DATASET 2\n")
+        output.write(struct.pack("<q", hard_offset_ns))
         output.write(_EVENT_COUNT.pack(len(events)))
         for timestamp_ns, event_type, index in events:
             if event_type == 0:
                 output.write(
                     _IMU_EVENT.pack(
                         0,
-                        timestamp_ns,
+                        int(imu.timestamps_ns[index]),
                         *imu.angular_velocity[index],
                         *imu.linear_acceleration[index],
                     )
                 )
                 continue
 
-            start = int(lidar.scan_offsets[index])
-            end = int(lidar.scan_offsets[index + 1])
+            raw_index = start_scan + index
+            start = int(lidar.scan_offsets[raw_index])
+            end = int(lidar.scan_offsets[raw_index + 1])
             output.write(_LIDAR_EVENT.pack(1, index + 1, timestamp_ns, end - start))
             points = np.empty(end - start, dtype=_POINT_DTYPE)
             points["x"] = lidar.xyz[start:end, 0]
@@ -395,16 +449,56 @@ def build_full_native_command(
     ]
     if config.gap_policy == "reset":
         command.extend(["--forward-gap-s", str(config.forward_gap_s)])
+    if config.ikd_rebuild != "async":
+        command.extend(["--ikd-rebuild", config.ikd_rebuild])
+    if config.cut_mode != "equal_count":
+        command.extend(["--cut-mode", config.cut_mode])
+    if config.min_cut_points > 0:
+        command.extend(["--min-cut-points", str(int(config.min_cut_points))])
+    if config.cut_frame_num is not None:
+        command.extend(["--cut-frame-num", str(int(config.cut_frame_num))])
+    if config.odom_ground_mode != "golden":
+        command.extend(["--odom-ground-mode", config.odom_ground_mode])
+    if config.min_effective_features > 0:
+        command.extend(
+            ["--min-effective-features", str(int(config.min_effective_features))]
+        )
+    if int(round(config.ahrs_imu_hz)) != 200:
+        command.extend(["--ahrs-imu-hz", str(int(round(config.ahrs_imu_hz)))])
+    if config.ahrs_dt_mode != "package_reset":
+        command.extend(["--ahrs-dt-mode", config.ahrs_dt_mode])
+    if config.motion_start_min_speed_mps > 0.0:
+        command.extend(
+            ["--motion-start-min-speed-mps", str(config.motion_start_min_speed_mps)]
+        )
+    if config.motion_start_min_omega_rad_s > 0.0:
+        command.extend(
+            [
+                "--motion-start-min-omega-rad-s",
+                str(config.motion_start_min_omega_rad_s),
+            ]
+        )
+    if config.min_accum_duration_s > 0.0:
+        command.extend(["--min-accum-duration-s", str(config.min_accum_duration_s)])
+    if config.max_accum_duration_s > 0.0:
+        command.extend(["--max-accum-duration-s", str(config.max_accum_duration_s)])
+    if config.eof_policy != "fail":
+        command.extend(["--eof-policy", config.eof_policy])
     return command
 
 
 def run_full_native(config: NativeFullRunConfig) -> Path:
     config.validate()
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    dataset = load_dataset(config.dataset)
+    dataset = (
+        config.loaded_dataset
+        if config.loaded_dataset is not None
+        else load_dataset(config.dataset)
+    )
     input_path = write_full_native_input(
         dataset,
         config.output_dir / "native_dataset_v1.bin",
+        start_scan=config.start_scan,
         scan_count=config.scan_count,
     )
     native_config_path = write_full_native_config(
@@ -423,10 +517,18 @@ def run_full_native(config: NativeFullRunConfig) -> Path:
     for stale in (result_path, trace_path, batch_trace_path, manifest_path):
         stale.unlink(missing_ok=True)
 
+    run_env = None
+    if config.ikd_rebuild == "sync":
+        run_env = {
+            **os.environ,
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+        }
     subprocess.run(
         build_full_native_command(config, input_path, native_config_path),
         check=True,
         cwd=config.output_dir,
+        env=run_env,
     )
     for name, path in (
         ("GRIL result", result_path),
@@ -449,7 +551,8 @@ def run_full_native(config: NativeFullRunConfig) -> Path:
             "dataset_sha256": file_sha256(dataset_manifest),
             "native_boundary": str(input_path.resolve()),
             "native_boundary_sha256": file_sha256(input_path),
-            "native_boundary_schema": "GRIL_NATIVE_DATASET 1",
+            "native_boundary_schema": "GRIL_NATIVE_DATASET 2",
+            "start_scan": config.start_scan,
             "scan_count": config.scan_count,
         },
         "algorithm_config": {
@@ -466,8 +569,26 @@ def run_full_native(config: NativeFullRunConfig) -> Path:
             "gap_policy": config.gap_policy,
             "forward_gap_s": config.forward_gap_s,
             "configured_time_lag_s": config.configured_time_lag_s,
+            "hard_time_offset_s": replay_hard_offset_ns(dataset) / 1e9,
+            "time_convention": "t_imu_aligned = t_imu - H - C; total = H+C+tau1+tau2",
+            "event_order": "fixed-H aligned measurement time; never per-message header",
             "quality_gating_applied": False,
             "batch_handoff": "live_trace_to_clean_native_process",
+            "stabilization": {
+                "ikd_rebuild": config.ikd_rebuild,
+                "cut_mode": config.cut_mode,
+                "min_cut_points": config.min_cut_points,
+                "cut_frame_num": config.cut_frame_num,
+                "odom_ground_mode": config.odom_ground_mode,
+                "min_effective_features": config.min_effective_features,
+                "ahrs_imu_hz": config.ahrs_imu_hz,
+                "ahrs_dt_mode": config.ahrs_dt_mode,
+                "motion_start_min_speed_mps": config.motion_start_min_speed_mps,
+                "motion_start_min_omega_rad_s": config.motion_start_min_omega_rad_s,
+                "min_accum_duration_s": config.min_accum_duration_s,
+                "max_accum_duration_s": config.max_accum_duration_s,
+                "eof_policy": config.eof_policy,
+            },
         },
         "executable": {
             "path": str(config.executable.resolve()),

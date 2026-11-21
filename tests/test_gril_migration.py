@@ -57,6 +57,10 @@ from lidar2imu.evaluation.migration_review import (
     build_full_ab_review,
     write_full_ab_review,
 )
+from lidar2imu.evaluation.quality_gates import (
+    QualityGateThresholds,
+    evaluate_run_quality_gates,
+)
 from lidar2imu.models import CanonicalDataset, ImuBatch, LidarBatch
 from lidar2imu.reference.gril.identity import REFERENCE
 from lidar2imu.reference.gril.runner import ReferenceRunConfig, build_reference_command
@@ -246,12 +250,14 @@ Time Lag IMU to LiDAR = 0.004
             reference_trace.write_text("GRIL_BATCH_TRACE 1\n")
             candidate_trace.write_text("GRIL_BATCH_TRACE 1\n")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {lidar_type: 2}
 calibration: {cut_frame: true}
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.0}
-""")
+"""
+            )
             report = build_abtest_report(
                 reference_dataset,
                 candidate_dataset,
@@ -284,13 +290,15 @@ patchworkpp: {sensor_height: 1.0}
             trace = root / "trace.txt"
             trace.write_text("GRIL_BATCH_TRACE 1\n")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {}
 calibration: {}
 mapping: {}
 patchworkpp: {}
 launch: {}
-""")
+"""
+            )
             with self.assertRaisesRegex(ValueError, "distinct run artifacts"):
                 build_abtest_report(
                     dataset,
@@ -373,7 +381,8 @@ patchworkpp: {sensor_height: 1.0}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "gril.yaml"
-            source.write_text("""
+            source.write_text(
+                """
 preprocess: {lidar_type: 2}
 calibration:
   cut_frame: true
@@ -382,7 +391,8 @@ calibration:
   gyro_factor: 13.0
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.117}
-""")
+"""
+            )
             values = native_config_values(source)
             native = write_native_config(source, root / "native.conf")
             native_content = native.read_text()
@@ -459,7 +469,8 @@ patchworkpp: {sensor_height: 1.117}
             root = Path(directory)
             write_dataset(repeated, root / "dataset")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess:
   blind: 0.5
   point_filter_num: 3
@@ -467,7 +478,8 @@ preprocess:
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-""")
+"""
+            )
             output = write_preprocess_input(
                 root / "dataset",
                 config,
@@ -499,12 +511,14 @@ patchworkpp: {}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {blind: 0.5}
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-""")
+"""
+            )
             with self.assertRaisesRegex(ValueError, "point_filter_num"):
                 write_frontend_event_input(
                     root / "missing-dataset",
@@ -518,12 +532,14 @@ patchworkpp: {}
             dataset = root / "dataset"
             write_dataset(_dataset(), dataset)
             gril_config = root / "gril.yaml"
-            gril_config.write_text("""
+            gril_config.write_text(
+                """
 preprocess: {blind: 0.5, point_filter_num: 3, scan_line: 16}
 calibration: {cut_frame_num: 3}
 mapping: {}
 patchworkpp: {}
-""")
+"""
+            )
             frontend = root / "gril_native_frontend_event_trace"
             ground = root / "gril_native_ground_trace"
             frontend.touch()
@@ -554,8 +570,9 @@ patchworkpp: {}
             with output.open("rb") as stream:
                 self.assertEqual(
                     stream.readline(),
-                    b"GRIL_NATIVE_DATASET 1\n",
+                    b"GRIL_NATIVE_DATASET 2\n",
                 )
+                self.assertEqual(int.from_bytes(stream.read(8), "little"), 0)
                 self.assertEqual(
                     int.from_bytes(stream.read(8), "little"),
                     3,
@@ -590,6 +607,7 @@ patchworkpp: {}
             output = write_full_native_input(manifest, root / "input.bin")
             with output.open("rb") as stream:
                 stream.readline()
+                stream.read(8)  # fixed H
                 event_count = int.from_bytes(stream.read(8), "little")
         self.assertEqual(event_count, 4)
 
@@ -723,12 +741,14 @@ patchworkpp: {}
             root = Path(directory)
             dataset = write_dataset(_dataset(), root / "dataset")
             config = root / "gril.yaml"
-            config.write_text("""
+            config.write_text(
+                """
 preprocess: {lidar_type: 2}
 calibration: {cut_frame: true}
 mapping: {filter_size_surf: 0.5}
 patchworkpp: {sensor_height: 1.0}
-""")
+"""
+            )
             result_template = (
                 "Rotation LiDAR to IMU = {rotation} 0 0\n"
                 "Translation LiDAR to IMU = 0 0 0\n"
@@ -942,6 +962,264 @@ class GrilFlatCloudExportTest(unittest.TestCase):
             np.testing.assert_array_equal(fast_points[field], old_points[field])
         self.assertEqual(int(fast_points["ring"][0]), 1)
         self.assertEqual(int(fast_points["ring"][-1]), 2)
+
+
+def _write_synthetic_gril_run(
+    run_dir: Path,
+    *,
+    time_lag_s: float = -0.02,
+    trans_li: tuple[float, float, float] = (0.0, 2.0, 0.5),
+    set_boundary: bool = False,
+    bound_th: float = 0.5,
+    seed_trans_il: tuple[float, float, float] = (0.0, -2.0, -0.5),
+    max_step_override_m: float | None = None,
+) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tx, ty, tz = trans_li
+    (run_dir / "GRIL_Calib_result.txt").write_text(
+        "LiDAR-IMU calibration result:\n"
+        "Rotation LiDAR to IMU (degree)     = 0.0 0.0 0.0\n"
+        f"Translation LiDAR to IMU (meter)   = {tx:.6f} {ty:.6f} {tz:.6f}\n"
+        f"Time Lag IMU to LiDAR (second)     = {time_lag_s:.6f}\n"
+        "Bias of Gyroscope  (rad/s)         = 0.0 0.0 0.0\n"
+        "Bias of Accelerometer (meters/s^2) = 0.0 0.0 0.0\n\n"
+        "Homogeneous Transformation Matrix from LiDAR frmae L to IMU frame I:\n"
+        f"1.000000 0.000000 0.000000 {tx:.6f}\n"
+        f"0.000000 1.000000 0.000000 {ty:.6f}\n"
+        f"0.000000 0.000000 1.000000 {tz:.6f}\n"
+        "0.000000 0.000000 0.000000 1.000000\n"
+    )
+    (run_dir / "gril_native.conf").write_text(
+        f"set_boundary {'true' if set_boundary else 'false'}\n"
+        f"bound_th {bound_th}\n"
+        f"trans_IL_x {seed_trans_il[0]}\n"
+        f"trans_IL_y {seed_trans_il[1]}\n"
+        f"trans_IL_z {seed_trans_il[2]}\n"
+    )
+
+    # Build 200 states over 66.6s with rich 3D angular + planar translational excitation
+    n_lid = 200
+    dt = 1.0 / 3.0
+    t_lid = 1000.0 + np.arange(n_lid, dtype=np.float64) * dt
+    t_imu = 999.0 + np.arange(0, 700, dtype=np.float64) * 0.1
+    t_il = -np.array(trans_li, dtype=np.float64)
+
+    def omega_fn(t: np.ndarray) -> np.ndarray:
+        return np.column_stack(
+            [
+                0.25 * np.sin(0.7 * (t - 1000.0)),
+                0.25 * np.cos(0.9 * (t - 1000.0)),
+                0.45 * np.sin(0.5 * (t - 1000.0)),
+            ]
+        )
+
+    def alpha_fn(t: np.ndarray) -> np.ndarray:
+        return np.column_stack(
+            [
+                0.25 * 0.7 * np.cos(0.7 * (t - 1000.0)),
+                -0.25 * 0.9 * np.sin(0.9 * (t - 1000.0)),
+                0.45 * 0.5 * np.cos(0.5 * (t - 1000.0)),
+            ]
+        )
+
+    w_imu = omega_fn(t_imu - time_lag_s)
+    al_imu = alpha_fn(t_imu - time_lag_s)
+    v_lid = np.column_stack(
+        [
+            4.0 * np.cos(0.2 * (t_lid - 1000.0)),
+            4.0 * np.sin(0.2 * (t_lid - 1000.0)),
+            np.zeros_like(t_lid),
+        ]
+    )
+    p_lid = np.cumsum(v_lid * dt, axis=0)
+    if max_step_override_m is not None:
+        p_lid[50, 0] += max_step_override_m
+
+    a_lid_at_imu = np.column_stack(
+        [
+            -0.8 * np.sin(0.2 * (t_imu - time_lag_s - 1000.0)),
+            0.8 * np.cos(0.2 * (t_imu - time_lag_s - 1000.0)),
+            np.zeros_like(t_imu),
+        ]
+    )
+    lever_at_imu = np.cross(w_imu, np.cross(w_imu, t_il)) + np.cross(al_imu, t_il)
+    a_imu = a_lid_at_imu + lever_at_imu + np.array([0.0, 0.0, 9.81])
+    w_lid = omega_fn(t_lid)
+
+    lines = [
+        "GRIL_BATCH_TRACE 1",
+        "orig_odom_freq 3",
+        "cut_frame_num 1",
+        "timediff_imu_wrt_lidar 0",
+        "move_start_time 1000.0",
+        f"imu_states {len(t_imu)}",
+    ]
+    for i in range(len(t_imu)):
+        lines.append(
+            f"imu {t_imu[i]:.6f} 1 0 0 0 1 0 0 0 1 0 0 0 "
+            f"{w_imu[i,0]:.8f} {w_imu[i,1]:.8f} {w_imu[i,2]:.8f} "
+            f"0 0 0 0 0 0 "
+            f"{a_imu[i,0]:.8f} {a_imu[i,1]:.8f} {a_imu[i,2]:.8f}"
+        )
+    lines.append(f"lidar_states {n_lid}")
+    for i in range(n_lid):
+        lines.append(
+            f"lidar {t_lid[i]:.6f} 1 0 0 0 1 0 0 0 1 "
+            f"{p_lid[i,0]:.6f} {p_lid[i,1]:.6f} {p_lid[i,2]:.6f} "
+            f"{w_lid[i,0]:.8f} {w_lid[i,1]:.8f} {w_lid[i,2]:.8f} "
+            f"{v_lid[i,0]:.8f} {v_lid[i,1]:.8f} {v_lid[i,2]:.8f} "
+            "0 0 0 0 0 0"
+        )
+    lines.append(f"ground_constraints {n_lid}")
+    for _ in range(n_lid):
+        lines.append("ground 1 0 0 0 1 0 0 0 0 0 1 1.0")
+    (run_dir / "GRIL_batch_trace_v1.txt").write_text("\n".join(lines) + "\n")
+    return run_dir
+
+
+class GrilStabilizationAndQualityGatesTest(unittest.TestCase):
+    def test_stabilization_flags_are_opt_in_and_preserve_golden_defaults(self) -> None:
+        config_path = (
+            Path(__file__).parents[1]
+            / ".agents/skills/gril-calib-validation/resources/vanjeelidar16.yaml"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (
+                "dataset.yaml",
+                "executable",
+                "gril_native_batch",
+                "input.bin",
+            ):
+                (root / name).touch()
+
+            golden = NativeFullRunConfig(
+                dataset=root / "dataset.yaml",
+                gril_config=config_path,
+                executable=root / "executable",
+                output_dir=root / "out_golden",
+            )
+            golden_cmd = build_full_native_command(
+                golden, root / "input.bin", root / "full.conf"
+            )
+            for opt_flag in (
+                "--ikd-rebuild",
+                "--cut-mode",
+                "--odom-ground-mode",
+                "--min-effective-features",
+                "--ahrs-imu-hz",
+                "--ahrs-dt-mode",
+                "--eof-policy",
+            ):
+                self.assertNotIn(opt_flag, golden_cmd)
+
+            golden_batch_conf = write_native_config(
+                config_path, root / "golden_batch.conf"
+            ).read_text()
+            self.assertNotIn("max_xcorr_lag_s", golden_batch_conf)
+            self.assertNotIn("use_imu_angular_in_acc_cost", golden_batch_conf)
+
+            stabilized = NativeFullRunConfig(
+                dataset=root / "dataset.yaml",
+                gril_config=config_path,
+                executable=root / "executable",
+                output_dir=root / "out_stab",
+                start_scan=10,
+                ikd_rebuild="sync",
+                cut_mode="equal_time",
+                min_cut_points=400,
+                odom_ground_mode="disabled",
+                min_effective_features=30,
+                ahrs_imu_hz=100,
+                ahrs_dt_mode="continuous",
+                motion_start_min_speed_mps=0.35,
+                motion_start_min_omega_rad_s=0.05,
+                min_accum_duration_s=120.0,
+                max_accum_duration_s=300.0,
+                eof_policy="calibrate",
+            )
+            stab_cmd = build_full_native_command(
+                stabilized, root / "input.bin", root / "full.conf"
+            )
+            self.assertIn("--ikd-rebuild", stab_cmd)
+            self.assertIn("sync", stab_cmd)
+            self.assertIn("--cut-mode", stab_cmd)
+            self.assertIn("equal_time", stab_cmd)
+            self.assertIn("--odom-ground-mode", stab_cmd)
+            self.assertIn("disabled", stab_cmd)
+            self.assertIn("--eof-policy", stab_cmd)
+            self.assertIn("calibrate", stab_cmd)
+
+            cfg_dict = yaml.safe_load(config_path.read_text())
+            cfg_dict["calibration"]["max_xcorr_lag_s"] = 0.5
+            cfg_dict["calibration"]["use_imu_angular_in_acc_cost"] = True
+            stab_yaml = root / "stab.yaml"
+            stab_yaml.write_text(yaml.safe_dump(cfg_dict))
+            stab_batch_conf = write_native_config(
+                stab_yaml, root / "stab_batch.conf"
+            ).read_text()
+            self.assertIn("max_xcorr_lag_s 0.5", stab_batch_conf)
+            self.assertIn("use_imu_angular_in_acc_cost true", stab_batch_conf)
+
+    def test_quality_gates_distinguish_failed_degraded_and_accepted(self) -> None:
+        thresholds = QualityGateThresholds(
+            min_lidar_states=150, min_accum_duration_s=50.0
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bad_run = _write_synthetic_gril_run(
+                root / "bad_run",
+                time_lag_s=48.3,
+                max_step_override_m=15.0,
+            )
+            bad_report = evaluate_run_quality_gates(bad_run, thresholds=thresholds)
+            self.assertEqual(bad_report["state"], "failed")
+            self.assertEqual(bad_report["verdict"], "rejected")
+            self.assertFalse(bad_report["release_ready"])
+            self.assertIn(
+                "data_sufficiency.trajectory_continuity", bad_report["hard_failures"]
+            )
+            self.assertIn(
+                "parameter_observability.time_offset_out_of_bounds",
+                bad_report["hard_failures"],
+            )
+
+            clamped_run = _write_synthetic_gril_run(
+                root / "clamped_run",
+                set_boundary=True,
+                bound_th=0.5,
+                seed_trans_il=(0.0, -1.5, -0.5),
+            )
+            clamped_report = evaluate_run_quality_gates(
+                clamped_run, thresholds=thresholds
+            )
+            self.assertEqual(clamped_report["state"], "degraded_unobservable")
+            self.assertEqual(clamped_report["verdict"], "review_only")
+            self.assertFalse(clamped_report["release_ready"])
+            self.assertIn(
+                "y",
+                clamped_report["pillars"]["parameter_observability"]["translation"][
+                    "boundary_hit_axes"
+                ],
+            )
+
+            run1 = _write_synthetic_gril_run(root / "run1")
+            run2 = _write_synthetic_gril_run(root / "run2")
+            win2 = _write_synthetic_gril_run(root / "win2", trans_li=(0.01, 1.99, 0.5))
+            holdout = _write_synthetic_gril_run(root / "holdout")
+            accepted_report = evaluate_run_quality_gates(
+                run1,
+                repeat_run_dirs=[run2],
+                window_run_dirs=[win2],
+                holdout_batch_trace=holdout / "GRIL_batch_trace_v1.txt",
+                thresholds=thresholds,
+            )
+            self.assertEqual(accepted_report["state"], "converged_and_verified")
+            self.assertEqual(accepted_report["verdict"], "accepted")
+            self.assertTrue(accepted_report["release_ready"])
+            self.assertTrue(
+                accepted_report["holdout"]["lever_arm_improved_holdout_acc"]
+            )
 
 
 if __name__ == "__main__":

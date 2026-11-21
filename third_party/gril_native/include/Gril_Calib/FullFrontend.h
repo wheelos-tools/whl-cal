@@ -11,6 +11,7 @@
 #define GRIL_NATIVE_FULL_FRONTEND_H
 
 #include "LidarOdometry.h"
+#include "VelodynePreprocess.h"
 
 #include <string>
 #include <vector>
@@ -91,11 +92,25 @@ struct FullFrontendRunConfig {
   std::string batch_config_path;
   ForwardGapPolicy forward_gap_policy = ForwardGapPolicy::GoldenEquivalence;
   double forward_gap_s = 0.0;
+  bool sync_ikd_rebuild = false;
+  VelodyneCutMode cut_mode = VelodyneCutMode::EqualPointCount;
+  int min_cut_points = 0;
+  int cut_frame_num_override = 0;
+  bool disable_odom_ground_constraint = false;
+  int min_effective_features = 0;
+  unsigned int ahrs_imu_hz = 200;
+  bool ahrs_preserve_sample_dt = false;
+  double motion_start_min_speed_mps = 0.0;
+  double motion_start_min_imu_omega_rad_s = 0.0;
+  double min_accum_duration_s = 0.0;
+  double max_accum_duration_s = 0.0;
+  bool calibrate_on_eof = false;
 };
 
 class HardTimeCompensator {
 public:
   explicit HardTimeCompensator(double configured_time_lag_s = 0.0);
+  void initialize_hard_offset(double hard_offset_s);
 
   bool lidar_rolled_back(double raw_timestamp_s) const;
   bool observe_lidar(double raw_timestamp_s, bool imu_queue_nonempty);

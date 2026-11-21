@@ -239,6 +239,10 @@ Verify these before running an optimizer:
 
 For a reported prior of yaw `+90 deg` and translation `[0, 0.34, 0.59] m`,
 the matching GRIL config seed is approximately `[-0.34, 0, -0.59] m`.
+For dual opposite-corner LiDARs mounted outward at 45° on an Apollo RFU `imu`
+frame (+X right, +Y forward, +Z up) with FLU LiDAR axes, `left_front` (`+135°`
+yaw in `imu`) and `right_back` (`-45°` yaw in `imu`) differ by **180°** in yaw
+(not 90°), while sharing a physical common clock to `corrected_imu`.
 
 ## Mandatory input audit
 
@@ -291,6 +295,43 @@ Do not begin calibration until these are verified in the exact GRIL revision:
    alignment, remove the paired ground-plane constraints from the front too.
    Trimming only the state deque silently pairs acceleration with an older
    ground attitude and corrupts gravity compensation.
+7. Asynchronous `ikd-Tree` background rebuilds (`pthread_create`) cause
+   macroscopic non-deterministic sub-scan map swaps across reruns, and
+   `${PCL_DEFINITIONS}` (`-fopenmp`) activates Eigen 3.3.7's multi-threaded GEMM
+   (`Parallelizer.h:kMinTaskSize=50000`) when `effective_feature_count >= 174`,
+   introducing a 1-ULP (`~1e-16`) rounding race over multi-minute runs. Use opt-in
+   `--ikd-rebuild sync` (which disables async `ikd-Tree` threads and locks
+   single-threaded Eigen/OpenMP GEMM) when bitwise frontend repeatability is
+   required, while leaving default `async` untouched for golden reference A/B tests.
+8. Equal-point-count `cut_frame` splitting on corner LiDARs with occluded cab/body
+   sectors creates irregular sub-frame durations and tiny sparse tail cuts; pair
+   with `kImuHz=200` `dt=0` resets, parked vibration can trip `pos_end.norm() > 0.05`
+   prematurely ("起点毛刺"). Use opt-in `--cut-mode equal_time --min-cut-points 400`,
+   `--ahrs-imu-hz 100 --ahrs-dt-mode continuous`, and
+   `--motion-start-min-speed-mps` / `--motion-start-min-omega-rad-s`.
+9. Upstream `LidarOdometry.cpp` pseudo-ground EKF rows mix `ground_lidar` and
+   world `state.rot_end` / `state.pos_end`, inducing mid-window vertical "banana"
+   tilt and catastrophic Z runaway when close walls starve point-to-plane features
+   ("终点毛刺"). Use opt-in `--odom-ground-mode disabled` and
+   `--min-effective-features 30` (skipping degenerate updates while keeping state
+   and ground deques synchronized).
+10. Upstream `data_sufficiency_assess` (`pct_z > 0.99`) measures scaled angular
+    velocity energy only and stops prematurely (~12–13% of long captures) or on
+    corrupted Z spikes; use `--min-accum-duration-s`, `--max-accum-duration-s`,
+    and `--eof-policy calibrate` for controlled window experiments, and separate
+    **Data Sufficiency**, **Motion Excitation**, and **Parameter Observability**
+    post-run via `lidar2imu evaluate-quality-gates`.
+11. Unbounded unnormalized `xcorr_temporal_init` and unbounded `time_lag_2` can
+    jump to multi-second false lags (`+48 s`, `-2.5 s`); opt-in
+    `calibration.max_xcorr_lag_s` (bounded zero-mean Pearson correlation) and
+    `calibration.max_time_lag_2_s` keep coarse and fine lag estimation physical.
+12. Differentiated 30 Hz LiDAR `ang_vel`/`ang_acc` in
+    `Linear_acc_Rot_Cost_without_Gravity` causes severe Errors-in-Variables (EIV)
+    regression dilution (~90% lever-arm shrinkage when unbounded); opt-in
+    `calibration.use_imu_angular_in_acc_cost: true` uses `R_IL * IMU_ang_vel` and
+    `R_IL * IMU_ang_acc` while propagating exact analytical Jacobians wrt `R_IL`,
+    and `calibration.skip_secondary_acc_norm: true` avoids re-scaling dynamic IMU
+    acceleration from moving initial samples.
 
 ## Validation ladder
 
@@ -498,6 +539,10 @@ Write stable review outputs:
 - `diagnostics/staged_ablation.yaml`
 - `diagnostics/repeatability.yaml`
 - `diagnostics/holdout.yaml`
+- `quality_gates.yaml` (via `lidar2imu evaluate-quality-gates`, separating
+  `data_sufficiency`, `motion_excitation`, `parameter_observability`,
+  `repeatability`, `seed_sensitivity`, `multi_window`, and `holdout` into
+  explicit `converged_and_verified` / `degraded_unobservable` / `failed` states)
 - trajectory and derivative plots
 - raw GRIL logs and exact source revision
 

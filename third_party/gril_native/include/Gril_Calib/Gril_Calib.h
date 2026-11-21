@@ -254,9 +254,14 @@ struct Linear_acc_Rot_Cost_without_Gravity {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   Linear_acc_Rot_Cost_without_Gravity(CalibState lidar_state,
-                                      V3D imu_linear_acc, QD lidar_wrt_ground)
+                                      V3D imu_linear_acc, QD lidar_wrt_ground,
+                                      bool use_imu_angular = false,
+                                      V3D imu_ang_vel = V3D::Zero(),
+                                      V3D imu_ang_acc = V3D::Zero())
       : LidarState(lidar_state), IMU_linear_acc(imu_linear_acc),
-        Lidar_wrt_ground(lidar_wrt_ground) {}
+        Lidar_wrt_ground(lidar_wrt_ground),
+        use_imu_angular_kinematics(use_imu_angular), IMU_ang_vel(imu_ang_vel),
+        IMU_ang_acc(imu_ang_acc) {}
 
   template <typename T>
   bool operator()(const T *q, const T *b_a, const T *trans, T *residual) const {
@@ -271,16 +276,24 @@ struct Linear_acc_Rot_Cost_without_Gravity {
     Eigen::Quaternion<T> q_IL{q[0], q[1], q[2], q[3]};
     Eigen::Matrix<T, 3, 3> R_IL = q_IL.toRotationMatrix();
 
-    M3D Lidar_omg_SKEW;
-    M3D Lidar_angacc_SKEW;
-    Lidar_omg_SKEW << SKEW_SYM_MATRX(LidarState.ang_vel);
-    Lidar_angacc_SKEW << SKEW_SYM_MATRX(LidarState.ang_acc);
-    M3D Jacob_trans = Lidar_omg_SKEW * Lidar_omg_SKEW + Lidar_angacc_SKEW;
-    Eigen::Matrix<T, 3, 3> Jacob_trans_T = Jacob_trans.cast<T>();
+    Eigen::Matrix<T, 3, 1> lever_acc_L;
+    if (use_imu_angular_kinematics) {
+      const Eigen::Matrix<T, 3, 1> omega_L = R_IL * IMU_ang_vel.cast<T>();
+      const Eigen::Matrix<T, 3, 1> alpha_L = R_IL * IMU_ang_acc.cast<T>();
+      lever_acc_L = omega_L.cross(omega_L.cross(T_IL)) + alpha_L.cross(T_IL);
+    } else {
+      M3D Lidar_omg_SKEW;
+      M3D Lidar_angacc_SKEW;
+      Lidar_omg_SKEW << SKEW_SYM_MATRX(LidarState.ang_vel);
+      Lidar_angacc_SKEW << SKEW_SYM_MATRX(LidarState.ang_acc);
+      M3D Jacob_trans = Lidar_omg_SKEW * Lidar_omg_SKEW + Lidar_angacc_SKEW;
+      Eigen::Matrix<T, 3, 3> Jacob_trans_T = Jacob_trans.cast<T>();
+      lever_acc_L = Jacob_trans_T * T_IL;
+    }
 
     Eigen::Matrix<T, 3, 1> resi =
         R_LL0_T * R_IL * IMU_linear_acc_T - R_LL0_T * bias_aL +
-        R_GL * STD_GRAV - Lidar_linear_acc_T - R_LL0_T * Jacob_trans_T * T_IL;
+        R_GL * STD_GRAV - Lidar_linear_acc_T - R_LL0_T * lever_acc_L;
     residual[0] = T(ACC_FACTOR_) * resi[0];
     residual[1] = T(ACC_FACTOR_) * resi[1];
     residual[2] = T(ACC_FACTOR_) * resi[2];
@@ -289,16 +302,23 @@ struct Linear_acc_Rot_Cost_without_Gravity {
 
   static ceres::CostFunction *Create(const CalibState lidar_state,
                                      const V3D imu_acc,
-                                     const QD lidar_wrt_ground) {
+                                     const QD lidar_wrt_ground,
+                                     const bool use_imu_angular = false,
+                                     const V3D imu_ang_vel = V3D::Zero(),
+                                     const V3D imu_ang_acc = V3D::Zero()) {
     return new ceres::AutoDiffCostFunction<Linear_acc_Rot_Cost_without_Gravity,
                                            3, 4, 3, 3>(
-        new Linear_acc_Rot_Cost_without_Gravity(lidar_state, imu_acc,
-                                                lidar_wrt_ground));
+        new Linear_acc_Rot_Cost_without_Gravity(
+            lidar_state, imu_acc, lidar_wrt_ground, use_imu_angular,
+            imu_ang_vel, imu_ang_acc));
   }
 
   CalibState LidarState;
   V3D IMU_linear_acc;
   QD Lidar_wrt_ground;
+  bool use_imu_angular_kinematics = false;
+  V3D IMU_ang_vel = V3D::Zero();
+  V3D IMU_ang_acc = V3D::Zero();
 };
 
 class Gril_Calib {
@@ -420,6 +440,12 @@ public:
   double bound_th = 0.1;
   bool set_boundary = false;
   bool verbose = false;
+  double max_xcorr_lag_s = -1.0;
+  double max_time_lag_2_s = -1.0;
+  int rot_init_max_iters = 50;
+  bool use_imu_angular_in_acc_cost = false;
+  bool skip_secondary_acc_norm = false;
+  int tail_trim_states = 20;
 
 private:
   QD rotation_initial_guess_LI = QD::Identity();
