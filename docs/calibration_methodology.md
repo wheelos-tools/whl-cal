@@ -50,13 +50,18 @@ often makes failure analysis harder:
 - observability failures look like solver instability
 - field iteration becomes slow because everything must be rerun together
 
-The repo instead prefers staged pipelines with stable reporting surfaces:
+The repo instead prefers staged pipelines with stable reporting surfaces where
+the module implements them:
 
 - `standardized_data.yaml`
 - `data_quality.yaml`
 - `metrics.yaml`
 - `acceptance_report.yaml`
 - `visualization_index.yaml`
+
+These are not a universal file contract. For example, native GRIL writes its
+own `manifest.yaml`, customer summary, solver result, and traces; use the
+module-specific review guide instead of assuming the shared files exist.
 
 ## 4. Current practical SOTA by calibration type
 

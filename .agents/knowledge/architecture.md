@@ -18,7 +18,7 @@ Read before changing package boundaries, pipeline stages, data extraction, or ou
 ## Sources
 - Package and CLI inventory: `pyproject.toml`
 - Repository overview: `README.md`
-- Shared pipeline model: `context/calibration_paradigm.md`
+- Shared pipeline model: `.agents/knowledge/calibration_paradigm.md`
 - LiDAR-to-LiDAR design: `docs/lidar2lidar_design.md`
 - LiDAR-to-IMU GRIL design: `docs/gril_ros_free_migration.md`
 - LiDAR-to-camera design: `docs/lidar2camera_design.md`

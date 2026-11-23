@@ -378,7 +378,7 @@ cat outputs/lidar2imu/customer_run01/calibration/diagnostics/status_summary.csv
 
 > 这张图来自 production 结果。它说明 yaw 目标函数已经明显尖锐，已经不是“很多 yaw 都一样好”。
 
-![较好的 yaw cost scan](../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/yaw_cost_scan.svg)
+![较好的 yaw cost scan](../../../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/yaw_cost_scan.svg)
 
 这类图通常表示：
 
@@ -389,7 +389,7 @@ cat outputs/lidar2imu/customer_run01/calibration/diagnostics/status_summary.csv
 
 > 这张图来自 baseline 结果。它比较平，说明选中的局部运动片段太重复，yaw 支持不足。
 
-![较差的 yaw cost scan](../outputs/lidar2imu/20260506_left_front_baseline_visualized_plus/diagnostics/yaw_cost_scan.svg)
+![较差的 yaw cost scan](../../../outputs/lidar2imu/20260506_left_front_baseline_visualized_plus/diagnostics/yaw_cost_scan.svg)
 
 这类图通常表示：
 
@@ -401,13 +401,13 @@ cat outputs/lidar2imu/customer_run01/calibration/diagnostics/status_summary.csv
 
 > 这张图来自 production 结果。两条轨迹形状接近，说明 motion factors 已明显改善。
 
-![IMU 与 LiDAR 轨迹对比](../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/trajectory_overlay.svg)
+![IMU 与 LiDAR 轨迹对比](../../../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/trajectory_overlay.svg)
 
 ### 示例 D：累计位置差曲线
 
 > 这张图用来判断 IMU 与 LiDAR 轨迹差是否持续扩大。
 
-![IMU 与 LiDAR 累计位置差](../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/trajectory_position_gap_plot.svg)
+![IMU 与 LiDAR 累计位置差](../../../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/trajectory_position_gap_plot.svg)
 
 ### 示例 E：对比报告
 
@@ -424,9 +424,9 @@ cat outputs/lidar2imu/customer_run01/calibration/diagnostics/status_summary.csv
 
 当前示例点云在这里：
 
-- `../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/imu_trajectory_cloud.ply`
-- `../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/lidar_trajectory_cloud.ply`
-- `../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/trajectory_overlay_cloud.ply`
+- `../../../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/imu_trajectory_cloud.ply`
+- `../../../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/lidar_trajectory_cloud.ply`
+- `../../../outputs/lidar2imu/20260506_left_front_production_visualized_plus/diagnostics/trajectory_overlay_cloud.ply`
 
 建议直接用 CloudCompare 打开 `trajectory_overlay_cloud.ply`。
 
@@ -517,5 +517,5 @@ cat outputs/lidar2imu/customer_run01/calibration/diagnostics/status_summary.csv
 - `docs/lidar2imu_quickstart.md`
 - `docs/lidar2imu_user_guide.md`
 - `docs/calibration_review_guide.md`
-- `context/calibration_dataset_2026_05_06.md`
-- `context/lidar2imu_context.md`
+- `.agents/notes/datasets/calibration_dataset_2026_05_06.md`
+- `.agents/notes/lidar2imu/lidar2imu_history.md`

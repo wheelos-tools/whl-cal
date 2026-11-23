@@ -4,7 +4,7 @@ stability: stable
 last_tested: 2026-05-26
 ---
 
-# lidar2camera current context
+# LiDAR-to-camera historical findings
 
 ## 1. Current production baseline
 
@@ -63,7 +63,7 @@ The persistent intrinsic rule remains:
 
 Detailed intrinsic operation guidance is now consolidated in:
 
-- `context/knowledge_base/camera_intrinsic_experience.md`
+- `docs/camera_quickstart.md`
 - `docs/camera_quickstart.md`
 
 Use those as the single source to avoid duplicated camera-intrinsic notes in module contexts.

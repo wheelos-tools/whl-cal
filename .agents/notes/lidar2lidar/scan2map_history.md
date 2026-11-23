@@ -4,7 +4,7 @@ stability: stable
 last_tested: 2026-04-27
 ---
 
-# scan2map context
+# Scan-to-map historical findings
 
 ## Repository findings
 

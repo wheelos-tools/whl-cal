@@ -4,75 +4,24 @@ stability: stable
 P26-05-25
 ---
 
-# Quickstart index — whl-cal
+# Workflow index
 
-Use this page as the navigation hub for the repo's calibration workflows.
+Use the module guide for commands and configuration, then the
+[review guide](calibration_review_guide.md) for artifacts and acceptance.
+Install options are in the [repository README](../README.md).
 
-## Recommended reading order
+| Workflow | Start here | Related guide |
+| --- | --- | --- |
+| Apollo record collection | [Data collection](apollo_data_collection.md) | — |
+| Camera intrinsic | [Quick start](camera_quickstart.md) | [Container use](../docker/README.md) |
+| Camera-to-camera | [Quick start](camera2camera_quickstart.md) | [Design](camera2camera_design.md) |
+| LiDAR-to-camera | [Quick start](lidar2camera_quickstart.md) | [Customer review](lidar2camera_customer_guide.md) |
+| LiDAR-to-LiDAR | [Quick start](lidar2lidar_quickstart.md) | [Design](lidar2lidar_design.md) |
+| LiDAR-to-IMU / GRIL | [Quick start](lidar2imu_quickstart.md) | [Migration and A/B](gril_ros_free_migration.md) |
 
-1. Apollo preparation and bag recording:
-   [docs/apollo_data_collection.md](apollo_data_collection.md)
-2. Module quickstart from the list below
-3. Metrics / visualization review:
-   [docs/calibration_review_guide.md](calibration_review_guide.md)
-4. Advanced design / method / SOTA context:
-   [docs/calibration_methodology.md](calibration_methodology.md)
+## Specialized workflows
 
-## Quickstarts
-
-- LiDAR-to-LiDAR (scan2scan / scan2map):
-  [docs/lidar2lidar_quickstart.md](lidar2lidar_quickstart.md)
-- LiDAR-to-IMU (ROS-free native GRIL):
-  [docs/lidar2imu_quickstart.md](lidar2imu_quickstart.md)
-- GRIL ROS-free migration and reference A/B:
-  [docs/gril_ros_free_migration.md](gril_ros_free_migration.md)
-- Camera intrinsic:
-  [docs/camera_quickstart.md](camera_quickstart.md)
-- Camera intrinsic and LiDAR-to-IMU containers:
-  [docker/README.md](../docker/README.md)
-- Camera-to-camera:
-  [docs/camera2camera_quickstart.md](camera2camera_quickstart.md)
-- LiDAR↔Camera (target-based baseline):
-  [docs/lidar2camera_quickstart.md](lidar2camera_quickstart.md)
-- LiDAR↔Camera customer/operator guide:
-  [docs/lidar2camera_customer_guide.md](lidar2camera_customer_guide.md)
-- LiDAR↔Camera (nuScenes GT-perturbation benchmark):
-  [docs/lidar2camera_nuscenes_benchmark.md](lidar2camera_nuscenes_benchmark.md)
-
-## Which quickstart should I open?
-
-| Need | Open this doc first |
-| --- | --- |
-| I have an Apollo bag with multiple LiDARs and need inter-LiDAR extrinsics | `docs/lidar2lidar_quickstart.md` |
-| I have an Apollo record/bag and need LiDAR↔IMU extrinsics, including the current GRIL native flow | `docs/lidar2imu_quickstart.md` |
-| I need to reproduce or review the ROS-free GRIL migration (not run a production release) | `docs/gril_ros_free_migration.md` |
-| I need camera intrinsic calibration from live capture or exported images | `docs/camera_quickstart.md` |
-| I need camera↔camera extrinsics from paired image directories | `docs/camera2camera_quickstart.md` |
-| I need LiDAR↔Camera extrinsics from paired image / PCD files | `docs/lidar2camera_quickstart.md` |
-| I need a customer-facing LiDAR↔Camera runbook and result-interpretation guide | `docs/lidar2camera_customer_guide.md` |
-| I need to benchmark experimental targetless lidar↔camera calibration on nuScenes | `docs/lidar2camera_nuscenes_benchmark.md` |
-
-## Common output artifacts
-
-Most calibration runs expose the same top-level review surface:
-
-- `calibrated_tf.yaml` — consolidated extrinsics
-- `metrics.yaml` — main quantitative result
-- `diagnostics/standardized_data.yaml` — normalized input summary
-- `diagnostics/data_quality.yaml` — quality / gating summary
-- `diagnostics/acceptance_report.yaml` — release-review gate results
-- `diagnostics/status_summary.csv` — tabular review summary
-- `diagnostics/visualization_index.yaml` — where to find visual / CSV evidence
-
-For `camera`, the equivalent files live under
-`calibration_YYYYmmdd_HHMMSS_diagnostics/`.
-
-## Fast first-pass review
-
-1. Open the module quickstart and run the shortest meaningful command.
-2. Open `standardized_data.yaml` and `data_quality.yaml`.
-3. Read `metrics.yaml` and `acceptance_report.yaml`.
-4. Open the visualization files listed in `visualization_index.yaml`.
-
-Use [docs/calibration_review_guide.md](calibration_review_guide.md) for the
-module-specific thresholds and visual review checklist.
+- [LiDAR-to-camera smoke test](lidar2camera_test_quickstart.md)
+- [LiDAR-to-camera nuScenes benchmark](lidar2camera_nuscenes_benchmark.md)
+- [LiDAR-to-IMU runtime containers](../docker/README.md)
+- [Calibration methodology](calibration_methodology.md)

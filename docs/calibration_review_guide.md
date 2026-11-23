@@ -12,11 +12,12 @@ each calibration module.
 
 ## 1. Shared review order
 
-Customers should open `customer_summary.yaml` first. It contains only the
-verdict, final result, a small set of decision metrics, visual-review paths, and
-the next action. The detailed order below is the developer/debug layer.
+When a run writes `customer_summary.yaml` (currently camera intrinsic and
+native GRIL), open it first for the concise verdict and next action. Other
+modules may not produce this file; use their module-specific artifacts below.
 
-Across `lidar2lidar`, `lidar2imu`, and `lidar2camera`, use the same review order:
+For modules that emit the shared review artifacts (`camera2camera`,
+`lidar2camera`, and `lidar2lidar`), use this review order:
 
 1. `diagnostics/standardized_data.yaml`
 2. `diagnostics/data_quality.yaml`
@@ -32,7 +33,10 @@ Why this order matters:
 - `acceptance_report.yaml` tells you which gates passed or failed
 - `visualization_index.yaml` tells you which images / CSV / PLY files to open
 
-For `camera`, the same pattern lives under `calibration_*_diagnostics/`.
+Camera intrinsic uses a similar diagnostics layout under
+`calibration_*_diagnostics/`, but does not emit `metrics.yaml`; its review
+order is listed separately below. Native GRIL also uses a separate output
+contract.
 
 ## 2. Minimal validation commands by module
 
@@ -149,23 +153,23 @@ Primary signals:
 
 Read in this order:
 
-1. `standardized_samples.yaml`
-2. `conversion_diagnostics.yaml`
-3. `calibration/diagnostics/data_quality.yaml`
-4. `calibration/metrics.yaml`
-5. `calibration/diagnostics/acceptance_report.yaml`
-6. `calibration/diagnostics/review_report.html`
-7. `calibration/diagnostics/observability.yaml`
-8. residual CSV files and SVG plots
+1. `customer_summary.yaml` for the current verdict and developer-diagnostic paths
+2. `manifest.yaml` for input identity, executable identity, stages, and artifact paths
+3. `GRIL_Calib_result.txt` for the native solver result
+4. `GRIL_full_frontend_trace_v1.txt` and `GRIL_batch_trace_v1.txt` for frontend and batch evidence
+5. Post-run reports explicitly requested from evaluation commands, such as `quality_gates.yaml`
 
 Primary signals:
 
-- ground residual quality
-- motion registration quality
-- turn balance
-- yaw observability
-- holdout generalization
-- whether the solver had to freeze `x/y/yaw`
+- dataset and timing provenance in the canonical input contract / manifest
+- frontend stability and batch-trace integrity
+- excitation and parameter observability in post-run evaluation reports
+- repeatability, seed sensitivity, non-overlapping windows, and independent holdout
+- whether solver behavior and physical evidence support the reported degrees of freedom
+
+`run-native` does not emit the shared `metrics.yaml` or
+`diagnostics/standardized_data.yaml` artifact set. Do not apply that review
+order to GRIL runs.
 
 ## 4. Practical acceptance baselines
 
@@ -175,7 +179,7 @@ Primary signals:
 | `camera2camera` | `final_rms_px <= 1.0`; per-pair p95 <= `1.5 px`; holdout p95 <= `1.5 px`; epipolar p95 <= `1.0 px`; accepted pair ratio healthy; both image coverage and pose diversity pass |
 | `lidar2camera` | `final_rms_px <= 1.0`; per-pose p95 <= `1.5 px`; holdout p95 <= `1.5 px`; accepted pair ratio healthy; image coverage / pose diversity / board geometry pass |
 | `lidar2lidar` | `release_ready: true`; required relations connected; scene sufficiency and repeatability pass; overlays do not show ghosting / double edges |
-| `lidar2imu` | `release_ready: true`; `vehicle_motion_assessment.recommendation: full_6dof_candidate`; motion registration and holdout are healthy; both turn directions are represented |
+| `lidar2imu` | post-run `quality_gates.yaml` reports `verdict: accepted`, `release_ready: true`, no hard failures or unobservable/missing gates; independent physical evidence is still required for accuracy claims |
 
 These are review baselines, not a substitute for project-specific release gates.
 
@@ -216,13 +220,16 @@ PY
 ```bash
 python - <<'PY'
 import yaml
-d = yaml.safe_load(open("outputs/lidar2imu/run01/calibration/metrics.yaml"))
-print(d["summary"]["final_acceptance_status"])
-print(d["summary"]["release_ready"])
-print(d["final_acceptance"]["recommendation"])
-print(d["vehicle_motion_assessment"]["recommendation"])
+d = yaml.safe_load(open("outputs/gril/run01/customer_summary.yaml"))
+print(d["verdict"])
+print(d["release_ready"])
+print(d["next_action"])
 PY
 ```
+
+The native GRIL customer summary is always `review_required` today and is not
+a physical-accuracy acceptance. Use the post-run quality-gate report and
+independent evidence for research/release review.
 
 ### LiDAR↔Camera
 

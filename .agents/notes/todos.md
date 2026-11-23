@@ -4,7 +4,7 @@ stability: stable
 last_tested: 2026-04-27
 ---
 
-# Project todos (context)
+# Project todos
 
 ## improve-right-edge-scan2map (pending)
 
@@ -22,7 +22,7 @@ last_tested: 2026-04-27
 6. 若仍无法形成共识，尝试更方向性子图（窄扇形）或增加子图数量以覆盖更多视角。
 
 预期产出：
-- context/（本文件）里记录每轮参数与结论
+- `.agents/notes/todos.md`（本文件）里记录每轮参数与结论
 - diagnostics/scan2map_optimization_{trial}.yaml
 - metrics.yaml（每轮）
 - 若成功：calibrated_tf_right.yaml 与 diagnostics/evaluation_right.yaml
@@ -32,7 +32,7 @@ last_tested: 2026-04-27
 
 ---
 
-保存位置：`context/todos.md`（此文件）
+保存位置：`.agents/notes/todos.md`（此文件）
 
 时间戳：2026-04-17T14:46:53.555Z
 

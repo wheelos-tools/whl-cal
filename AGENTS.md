@@ -1,5 +1,15 @@
 # Agent Guide
 
+## Repository map
+
+- `docs/`: maintained project documentation, including user guides and design contracts.
+- `.agents/skills/`: repeatable workflows and methods.
+- `.agents/knowledge/`: concise, durable engineering facts and links to their evidence.
+- `.agents/notes/`: dated investigations, experiment records, and temporary follow-ups; verify against current code before relying on them.
+- `.github/`: repository governance and automation.
+
+Start with [the knowledge index](.agents/knowledge/README.md) for engineering context and [the documentation index](docs/quickstart_index.md) for supported workflows. Code is authoritative when documentation and implementation disagree.
+
 ## Commands
 - Install: `python3 -m venv .venv && source .venv/bin/activate && pip install -e .`
 - Lint: `black --check . && isort --check-only . && flake8 .`
@@ -14,13 +24,7 @@
 - **DO NOT**: accept solver convergence, registration fitness, or a bounded trajectory as sufficient evidence.
 
 ## Knowledge
-- [architecture.md](.agents/knowledge/architecture.md) — package boundaries and data flow.
-- [conventions.md](.agents/knowledge/conventions.md) — artifacts, schemas, style, and documentation rules.
-- [troubleshooting.md](.agents/knowledge/troubleshooting.md) — failure triage and authoritative diagnostics.
-- [lidar2imu_research.md](.agents/knowledge/lidar2imu_research.md) — LiDAR-IMU data gates, 0827 comparison, baseline-preserving iteration, and acceptance rules.
-- [camera_intrinsic_research.md](.agents/knowledge/camera_intrinsic_research.md) — intrinsic calibration baseline, validation gaps, and evidence-gated improvement roadmap.
-- [lidar2camera_research.md](.agents/knowledge/lidar2camera_research.md) — reference and targetless LiDAR-camera calibration comparison, current implementation limits, and validation roadmap.
-- [lidar2lidar_research.md](.agents/knowledge/lidar2lidar_research.md) — scan2scan baseline, semantic/overlap-aware candidates, and controlled comparison roadmap.
+See the [knowledge index](.agents/knowledge/README.md) for package boundaries, conventions, troubleshooting, and module-specific research.
 
 ## Skills
 - [algorithm-research](.agents/skills/algorithm-research/SKILL.md)

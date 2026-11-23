@@ -28,9 +28,9 @@ Read when calibration diverges, produces inconsistent transforms, passes fitness
 
 ## Sources
 - General review ladder: `docs/calibration_review_guide.md`
-- Validated repository conclusions: `context/knowledge_base/validated_conclusions.md`
-- Open verification points: `context/knowledge_base/verification_points.md`
-- Timing diagnosis: `context/timing_sync_context.md`
-- LiDAR-to-IMU historical baseline/staged evidence: `context/lidar2imu_context.md`
+- Validated repository conclusions: `.agents/knowledge/validated_conclusions.md`
+- Open verification points: `.agents/notes/verification_points.md`
+- Timing diagnosis: `.agents/knowledge/timing_synchronization.md`
+- LiDAR-to-IMU historical baseline/staged evidence: `.agents/notes/lidar2imu/lidar2imu_history.md`
 - Current LiDAR-to-IMU workflow: `.agents/skills/gril-calib-validation/SKILL.md`
-- Scan-to-map history: `context/scan2map_context.md`
+- Scan-to-map history: `.agents/notes/lidar2lidar/scan2map_history.md`

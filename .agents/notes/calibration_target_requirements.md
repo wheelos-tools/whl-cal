@@ -153,7 +153,7 @@ Relevant repo surfaces:
 - `lidar2camera/reference_pipeline.py`
 - `docs/lidar2camera_quickstart.md`
 - `docs/lidar2camera_design.md`
-- `context/lidar2camera_context.md`
+- `.agents/notes/lidar2camera/lidar2camera_history.md`
 
 ### Hard requirements
 
@@ -241,7 +241,7 @@ Relevant repo surfaces:
 
 - `docs/lidar2lidar.md`
 - `docs/lidar2lidar_design.md`
-- `context/lidar2lidar_advanced_strategy.md`
+- `.agents/notes/lidar2lidar/lidar2lidar_advanced_strategy.md`
 
 ### Practical requirement
 
@@ -297,7 +297,7 @@ Relevant repo surfaces:
 
 - `docs/lidar2imu.md`
 - `docs/lidar2imu_design.md`
-- `context/lidar2imu_context.md`
+- `.agents/notes/lidar2imu/lidar2imu_history.md`
 
 ### Practical requirement
 

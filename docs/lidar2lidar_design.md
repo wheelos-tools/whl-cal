@@ -114,9 +114,9 @@ The current automatic pipeline already includes a raw-data conversion layer.
 4. Probe synchronized pairs at a loose pre-check stage.
 5. Estimate overlap before running expensive registration.
 
-This means `lidar2lidar` already has a built-in equivalent of a conversion
-layer, even though it does not currently serialize a standalone
-`standardized_samples.yaml` like `lidar2imu`.
+This means `lidar2lidar` already has a built-in extraction layer. Its
+production review path serializes normalized input and quality reports under
+`diagnostics/standardized_data.yaml` and `diagnostics/data_quality.yaml`.
 
 For multi-LiDAR vehicle rigs, the extraction layer can now also be frozen into
 `diagnostics/prepared_rig_dataset.yaml` and reused later via

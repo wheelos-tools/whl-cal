@@ -12,8 +12,8 @@ industry-style calibration practice, using:
 - dataset: `/mnt/synology/REDACTED/2026-5-6-标定/`
 - metadata note: `calibration_dataset_2026_05_06.md`
 - timing notes:
-  - `timing_sync_context.md`
-  - `timing_topic_table.md`
+  - `.agents/knowledge/timing_synchronization.md`
+  - `.agents/notes/timing_topic_table.md`
 
 ## Dataset-specific conclusion
 

@@ -13,7 +13,7 @@ repository.
 
 For the current production-minded direct-pair policy, especially for
 high-overlap `scan2scan`, optional loop closure, and no-loop multi-window
-consensus, read `context/lidar2lidar_scan2scan_playbook.md` first.
+consensus, read `.agents/notes/lidar2lidar/lidar2lidar_scan2scan_playbook.md` first.
 
 ## Goal
 

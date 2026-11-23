@@ -4,7 +4,7 @@ stability: stable
 last_tested: 2026-04-27
 ---
 
-# lidar2imu current context
+# LiDAR-to-IMU historical findings
 
 ## 1. Working pattern
 

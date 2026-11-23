@@ -321,7 +321,7 @@ angular-acceleration energy, and Pearson correlation), `repeatability`
 (requiring distinct, non-overlapping time windows), and `holdout` (requiring an
 independent, non-overlapping trace within IMU interpolation support) into
 `converged_and_verified` (`accepted`), `degraded_unobservable` (`review_only`),
-or `failed` (`rejected`). See `context/knowledge_base/validated_conclusions.md`
+or `failed` (`rejected`). See [validated conclusions](../.agents/knowledge/validated_conclusions.md)
 and `.agents/knowledge/lidar2imu_research.md` for rationale and validation
 evidence.
 

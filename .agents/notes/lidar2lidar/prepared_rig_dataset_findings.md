@@ -4,7 +4,7 @@ stability: experimental
 last_tested: 2026-05-11
 ---
 
-# prepared rig dataset context
+# Prepared rig dataset findings
 
 ## Goal
 

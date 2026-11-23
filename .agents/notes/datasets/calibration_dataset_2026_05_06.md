@@ -102,7 +102,7 @@ This dataset is suitable for lidar2imu record conversion review because it has:
 - `/tf_static` plus `/tf`
 
 For timestamp interpretation, keep using the policy from
-`timing_sync_context.md`:
+`.agents/knowledge/timing_synchronization.md`:
 
 - Vanjee LiDAR: use `measurement_time`
 - GNSS odometry / corrected_imu: use `header.timestamp_sec`

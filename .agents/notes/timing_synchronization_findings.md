@@ -4,7 +4,7 @@ stability: experimental
 last_tested: 2026-05-11
 ---
 
-# sensor timing and clock-source context
+# Sensor timing and clock-source analysis
 
 ## Scope
 

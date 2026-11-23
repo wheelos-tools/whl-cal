@@ -181,7 +181,7 @@ struct CalibrationReport {
 | `/mnt/synology/weilan/lidar2imu/0827` | 暂定为 GRIL 工作回归数据集。corrected-IMU frozen-reference 输入转换等价且两次参考结果一致，但独立物理诊断 rejected；raw-IMU 的既有实验仍是独立历史输入身份。二者都不是外参真值。 | 明确使用 `/apollo/sensor/gnss/corrected_imu` 并核对 shard/topic/hash；raw/corrected 数据不得互比或合并。native full-run 仍需三次重复、migration 等价和独立物理 holdout。 |
 | `/mnt/synology/weilan/lidar2imu/bag` | 两个无扩展名分片，当前文档未确认它们对应的采集、格式或时钟。 | 先查 manifest、记录头和 topic，识别采集身份后再纳入；确认前标记 `unclassified`。 |
 
-相关的已存研究记录位于 `.agents/knowledge/lidar2imu_research.md` 和 `context/knowledge_base/validated_conclusions.md`。重跑或比较前仍须核对这次本地文件哈希；目录名或已有结果不能证明输入相同。现有这些数据都没有独立物理外参真值。
+相关的已存研究记录位于 [LiDAR-to-IMU research](../../.agents/knowledge/lidar2imu_research.md) 和 [validated conclusions](../../.agents/knowledge/validated_conclusions.md)。重跑或比较前仍须核对这次本地文件哈希；目录名或已有结果不能证明输入相同。现有这些数据都没有独立物理外参真值。
 
 ### 依赖顺序
 

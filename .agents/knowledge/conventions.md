@@ -19,6 +19,6 @@ Read before adding APIs, artifacts, transforms, metrics, tests, or documentation
 ## Sources
 - Extrinsic schema and helpers: `lidar2lidar/extrinsic_io.py`
 - Output review contract: `docs/calibration_review_guide.md`
-- Documentation responsibilities: `docs/docs_vs_context.md`
+- Documentation responsibilities: `docs/documentation_organization.md`
 - Lint versions and CI entrypoint: `.github/workflows/lint-format.yml`
 - User-facing command inventory: `docs/quickstart_index.md`
