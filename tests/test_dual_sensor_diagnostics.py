@@ -328,6 +328,55 @@ class TestDualSensorDiagnostics(unittest.TestCase):
                 30.0,
             )
 
+    def test_evaluate_trajectories_recovers_ant2outposoffset_lever_arm(self) -> None:
+        import importlib.util
+
+        script_dir = (
+            Path(__file__).resolve().parents[1]
+            / ".agents/skills/gril-calib-validation/scripts"
+        )
+        sys.path.insert(0, str(script_dir))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "evaluate_trajectories", script_dir / "evaluate_trajectories.py"
+            )
+            assert spec is not None and spec.loader is not None
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        finally:
+            sys.path.pop(0)
+
+        # S-turn trajectory: rear-axle outpos [-0.69, +2.81] + t_IL [-0.37, +2.52]
+        t_ol_true = np.array([-1.06, 5.33], dtype=np.float64)
+        theta_true = 0.42
+        R_world = np.array(
+            [
+                [np.cos(theta_true), -np.sin(theta_true)],
+                [np.sin(theta_true), np.cos(theta_true)],
+            ]
+        )
+        t_s = np.linspace(0.0, 20.0, 201)
+        wz = np.where(t_s < 10.0, 0.25, -0.25)
+        yaws = np.cumsum(wz) * float(t_s[1] - t_s[0])
+        R_wo_2d = np.array(
+            [[[np.cos(y), -np.sin(y)], [np.sin(y), np.cos(y)]] for y in yaws]
+        )
+        vel_world = np.column_stack([-3.0 * np.sin(yaws), 3.0 * np.cos(yaws)])
+        p_outpos = np.cumsum(vel_world, axis=0) * float(t_s[1] - t_s[0])
+        p_lidar_world = p_outpos + np.einsum("nij,j->ni", R_wo_2d, t_ol_true)
+        p_lidar_local = (R_world.T @ (p_lidar_world - np.array([3.5, -2.0])).T).T
+
+        R_est, t_est, t_ol_est = mod._solve_se2_with_lever_arm(
+            p_lidar_local, p_outpos, R_wo_2d
+        )
+        aligned = (
+            (R_est @ p_lidar_local.T).T
+            + t_est
+            - np.einsum("nij,j->ni", R_wo_2d, t_ol_est)
+        )
+        np.testing.assert_allclose(t_ol_est, t_ol_true, atol=1e-3)
+        self.assertLess(float(np.max(np.linalg.norm(aligned - p_outpos, axis=1))), 1e-3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -146,6 +146,82 @@ void rotation_seed() {
   }
 }
 
+void butterworth_unity_gain() {
+  std::deque<CalibState> states;
+  for (int i = 0; i < 200; ++i) {
+    CalibState s;
+    s.timeStamp = 100.0 + i * (1.0 / 30.0);
+    s.linear_acc = V3D(0.0, 0.0, 9.81);
+    s.ang_vel = V3D(0.0, 0.0, 0.2);
+    states.push_back(s);
+  }
+
+  Gril_Calib legacy;
+  std::deque<CalibState> out_legacy;
+  legacy.zero_phase_filt(states, out_legacy);
+  const double legacy_mid_z = out_legacy[100].linear_acc.z();
+  require(std::abs(legacy_mid_z - 9.81) > 0.35,
+          "expected unnormalized Butterworth DC gain inflation by default");
+
+  Gril_Calib unity;
+  unity.normalize_butterworth_gain = true;
+  std::deque<CalibState> out_unity;
+  unity.zero_phase_filt(states, out_unity);
+  const double unity_mid_z = out_unity[100].linear_acc.z();
+  require(std::abs(unity_mid_z - 9.81) < 1e-10,
+          "normalized Butterworth DC gain must preserve constant signal");
+}
+
+void gravity_and_ground_frames() {
+  const M3D R_LI =
+      Eigen::AngleAxisd(0.5 * std::acos(-1.0), V3D::UnitZ()).matrix();
+  const M3D R_IL = R_LI.transpose();
+  const QD q_IL(R_IL);
+  const double q_IL_arr[4] = {q_IL.w(), q_IL.x(), q_IL.y(), q_IL.z()};
+  const double b_a[3] = {0.0, 0.0, 0.0};
+  const double trans[3] = {0.0, 0.0, 0.0};
+
+  // Tilted ground normal in current LiDAR frame + 180 deg vehicle yaw in L0.
+  const V3D normal_L = V3D(0.02, -0.01, 1.0).normalized();
+  const QD q_GL = QD::FromTwoVectors(V3D::UnitZ(), normal_L);
+  const M3D R_LL0 =
+      Eigen::AngleAxisd(std::acos(-1.0), V3D::UnitZ()).matrix();
+  CalibState lidar_state;
+  lidar_state.rot_end = R_LL0;
+  lidar_state.linear_acc = V3D::Zero();
+  const V3D imu_acc = R_LI * (q_GL.toRotationMatrix() * V3D(0.0, 0.0, 9.81));
+
+  double res_default[3] = {0.0, 0.0, 0.0};
+  Linear_acc_Rot_Cost_without_Gravity cost_default(
+      lidar_state, imu_acc, q_GL, false, V3D::Zero(), V3D::Zero(), false);
+  cost_default(q_IL_arr, b_a, trans, res_default);
+  require(V3D(res_default[0], res_default[1], res_default[2]).norm() > 0.2,
+          "expected default gravity frame mismatch under rotated R_LL0");
+
+  double res_world[3] = {0.0, 0.0, 0.0};
+  Linear_acc_Rot_Cost_without_Gravity cost_world(
+      lidar_state, imu_acc, q_GL, false, V3D::Zero(), V3D::Zero(), true);
+  cost_world(q_IL_arr, b_a, trans, res_world);
+  require(V3D(res_world[0], res_world[1], res_world[2]).norm() < 1e-10,
+          "world_frame_gravity must vanish under rotated R_LL0");
+
+  // Ground plane: R_GI maps I -> G so R_GI^T * e3 = R_LI * normal_L.
+  const V3D normal_I = R_LI * normal_L;
+  const QD q_IG = QD::FromTwoVectors(V3D::UnitZ(), normal_I);
+  const QD q_GI = q_IG.conjugate();
+  double g_default[3] = {0.0, 0.0, 0.0};
+  Ground_Plane_Cost_IL gp_default(q_GL, q_GI, 1.9, 0.7, false);
+  gp_default(q_IL_arr, trans, g_default);
+  require(std::hypot(g_default[0], g_default[1]) > 0.01,
+          "expected default Ground_Plane_Cost_IL order mismatch");
+
+  double g_fixed[3] = {0.0, 0.0, 0.0};
+  Ground_Plane_Cost_IL gp_fixed(q_GL, q_GI, 1.9, 0.7, true);
+  gp_fixed(q_IL_arr, trans, g_fixed);
+  require(std::hypot(g_fixed[0], g_fixed[1]) < 1e-10,
+          "fixed Ground_Plane_Cost_IL order must vanish");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -158,6 +234,10 @@ int main(int argc, char **argv) {
       rejection();
     else if (mode == "rotation_seed")
       rotation_seed();
+    else if (mode == "butterworth_unity_gain")
+      butterworth_unity_gain();
+    else if (mode == "gravity_and_ground_frames")
+      gravity_and_ground_frames();
     else
       throw std::runtime_error("unknown test mode");
     return 0;

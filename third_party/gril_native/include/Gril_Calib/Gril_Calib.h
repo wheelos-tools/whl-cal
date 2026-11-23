@@ -201,10 +201,11 @@ struct Ground_Plane_Cost_IL {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   Ground_Plane_Cost_IL(QD lidar_wrt_ground, QD imu_wrt_ground,
-                       double lidar_height, double imu_height)
+                       double lidar_height, double imu_height,
+                       bool imu_to_ground_order = false)
       : Lidar_wrt_ground(lidar_wrt_ground), IMU_wrt_ground(imu_wrt_ground),
-        distance_Lidar_wrt_ground(lidar_height), imu_sensor_height(imu_height) {
-  }
+        distance_Lidar_wrt_ground(lidar_height), imu_sensor_height(imu_height),
+        use_imu_to_ground_order(imu_to_ground_order) {}
 
   template <typename T>
   bool operator()(const T *q, const T *trans, T *residual) const {
@@ -219,14 +220,20 @@ struct Ground_Plane_Cost_IL {
     Eigen::Matrix<T, 3, 3> R_IL = q_IL.toRotationMatrix();
     Eigen::Matrix<T, 3, 1> T_IL{trans[0], trans[1], trans[2]};
 
-    Eigen::Matrix<T, 3, 3> R_plane = R_IL.transpose() * R_GI.transpose() * R_GL;
     Eigen::Matrix<T, 3, 1> e3 = Eigen::Matrix<T, 3, 1>::UnitZ();
-    Eigen::Matrix<T, 3, 1> resi_plane = R_plane * e3;
-
     Eigen::Matrix<T, 3, 1> imu_height_vec = imu_sensor_height_T * e3;
     Eigen::Matrix<T, 3, 1> lidar_height_vec = distance_Lidar_wrt_ground_T * e3;
-    Eigen::Matrix<T, 3, 1> tmp_distance =
-        R_IL * R_GI * imu_height_vec - R_GL * lidar_height_vec;
+    Eigen::Matrix<T, 3, 3> R_plane;
+    Eigen::Matrix<T, 3, 1> tmp_distance;
+    if (use_imu_to_ground_order) {
+      R_plane = R_GI * R_IL.transpose() * R_GL;
+      tmp_distance =
+          R_IL * R_GI.transpose() * imu_height_vec - R_GL * lidar_height_vec;
+    } else {
+      R_plane = R_IL.transpose() * R_GI.transpose() * R_GL;
+      tmp_distance = R_IL * R_GI * imu_height_vec - R_GL * lidar_height_vec;
+    }
+    Eigen::Matrix<T, 3, 1> resi_plane = R_plane * e3;
     T resi_distance = T_IL[2] - tmp_distance[2];
 
     residual[0] = T(GROUND_FACTOR_) * resi_plane[0];
@@ -238,16 +245,18 @@ struct Ground_Plane_Cost_IL {
   static ceres::CostFunction *Create(const QD lidar_wrt_ground,
                                      const QD imu_wrt_ground,
                                      const double lidar_height,
-                                     const double imu_height) {
+                                     const double imu_height,
+                                     const bool imu_to_ground_order = false) {
     return new ceres::AutoDiffCostFunction<Ground_Plane_Cost_IL, 3, 4, 3>(
         new Ground_Plane_Cost_IL(lidar_wrt_ground, imu_wrt_ground, lidar_height,
-                                 imu_height));
+                                 imu_height, imu_to_ground_order));
   }
 
   QD Lidar_wrt_ground;
   QD IMU_wrt_ground;
   double distance_Lidar_wrt_ground;
   double imu_sensor_height;
+  bool use_imu_to_ground_order = false;
 };
 
 struct Linear_acc_Rot_Cost_without_Gravity {
@@ -257,11 +266,13 @@ struct Linear_acc_Rot_Cost_without_Gravity {
                                       V3D imu_linear_acc, QD lidar_wrt_ground,
                                       bool use_imu_angular = false,
                                       V3D imu_ang_vel = V3D::Zero(),
-                                      V3D imu_ang_acc = V3D::Zero())
+                                      V3D imu_ang_acc = V3D::Zero(),
+                                      bool world_frame_gravity = false)
       : LidarState(lidar_state), IMU_linear_acc(imu_linear_acc),
         Lidar_wrt_ground(lidar_wrt_ground),
         use_imu_angular_kinematics(use_imu_angular), IMU_ang_vel(imu_ang_vel),
-        IMU_ang_acc(imu_ang_acc) {}
+        IMU_ang_acc(imu_ang_acc),
+        use_world_frame_gravity(world_frame_gravity) {}
 
   template <typename T>
   bool operator()(const T *q, const T *b_a, const T *trans, T *residual) const {
@@ -291,9 +302,12 @@ struct Linear_acc_Rot_Cost_without_Gravity {
       lever_acc_L = Jacob_trans_T * T_IL;
     }
 
+    Eigen::Matrix<T, 3, 1> gravity_world = R_GL * STD_GRAV.cast<T>();
+    if (use_world_frame_gravity)
+      gravity_world = R_LL0_T * gravity_world;
     Eigen::Matrix<T, 3, 1> resi =
         R_LL0_T * R_IL * IMU_linear_acc_T - R_LL0_T * bias_aL +
-        R_GL * STD_GRAV - Lidar_linear_acc_T - R_LL0_T * lever_acc_L;
+        gravity_world - Lidar_linear_acc_T - R_LL0_T * lever_acc_L;
     residual[0] = T(ACC_FACTOR_) * resi[0];
     residual[1] = T(ACC_FACTOR_) * resi[1];
     residual[2] = T(ACC_FACTOR_) * resi[2];
@@ -305,12 +319,13 @@ struct Linear_acc_Rot_Cost_without_Gravity {
                                      const QD lidar_wrt_ground,
                                      const bool use_imu_angular = false,
                                      const V3D imu_ang_vel = V3D::Zero(),
-                                     const V3D imu_ang_acc = V3D::Zero()) {
+                                     const V3D imu_ang_acc = V3D::Zero(),
+                                     const bool world_frame_gravity = false) {
     return new ceres::AutoDiffCostFunction<Linear_acc_Rot_Cost_without_Gravity,
                                            3, 4, 3, 3>(
         new Linear_acc_Rot_Cost_without_Gravity(
             lidar_state, imu_acc, lidar_wrt_ground, use_imu_angular,
-            imu_ang_vel, imu_ang_acc));
+            imu_ang_vel, imu_ang_acc, world_frame_gravity));
   }
 
   CalibState LidarState;
@@ -319,6 +334,7 @@ struct Linear_acc_Rot_Cost_without_Gravity {
   bool use_imu_angular_kinematics = false;
   V3D IMU_ang_vel = V3D::Zero();
   V3D IMU_ang_acc = V3D::Zero();
+  bool use_world_frame_gravity = false;
 };
 
 class Gril_Calib {
@@ -446,6 +462,10 @@ public:
   bool use_imu_angular_in_acc_cost = false;
   bool skip_secondary_acc_norm = false;
   int tail_trim_states = 20;
+  bool normalize_butterworth_gain = false;
+  bool world_frame_gravity_in_acc_cost = false;
+  bool ground_plane_imu_to_ground = false;
+  double acc_bias_bound_m_s2 = 0.01;
 
 private:
   QD rotation_initial_guess_LI = QD::Identity();

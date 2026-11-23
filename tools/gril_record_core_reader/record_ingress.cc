@@ -205,6 +205,166 @@ std::unique_ptr<Message> Decode(RecordReader &reader,
   return message;
 }
 
+bool IsFlatPointCloudType(const std::string &type_name) {
+  return type_name == "::apollo::drivers::flat::PointCloud" ||
+         type_name == "apollo.drivers.flat.PointCloud";
+}
+
+class FlatBufferReader {
+public:
+  explicit FlatBufferReader(const std::string &bytes)
+      : data_(reinterpret_cast<const uint8_t *>(bytes.data())),
+        size_(bytes.size()) {}
+
+  template <typename T> T ReadScalar(size_t offset) const {
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "trivial scalar required");
+    if (offset > size_ || sizeof(T) > size_ - offset) {
+      throw std::runtime_error("Truncated FlatBuffer payload");
+    }
+    T value{};
+    std::memcpy(&value, data_ + offset, sizeof(T));
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    char *raw = reinterpret_cast<char *>(&value);
+    std::reverse(raw, raw + sizeof(T));
+#endif
+    return value;
+  }
+
+  size_t Indirect(size_t offset) const {
+    const uint32_t rel = ReadScalar<uint32_t>(offset);
+    if (rel > size_ - offset) {
+      throw std::runtime_error("Invalid FlatBuffer offset");
+    }
+    return offset + static_cast<size_t>(rel);
+  }
+
+  size_t RootTable() const { return Indirect(0); }
+
+  size_t FieldOffset(size_t table_pos, uint16_t vtable_offset) const {
+    const int32_t vtable_rel = ReadScalar<int32_t>(table_pos);
+    if (vtable_rel <= 0 || static_cast<size_t>(vtable_rel) > table_pos) {
+      throw std::runtime_error("Invalid FlatBuffer vtable offset");
+    }
+    const size_t vtable_pos = table_pos - static_cast<size_t>(vtable_rel);
+    const uint16_t vtable_len = ReadScalar<uint16_t>(vtable_pos);
+    if (vtable_offset >= vtable_len)
+      return 0;
+    const uint16_t field_rel = ReadScalar<uint16_t>(vtable_pos + vtable_offset);
+    if (field_rel == 0)
+      return 0;
+    if (table_pos + field_rel > size_) {
+      throw std::runtime_error("FlatBuffer field exceeds payload bounds");
+    }
+    return table_pos + static_cast<size_t>(field_rel);
+  }
+
+  std::string ReadStringField(size_t table_pos, uint16_t vtable_offset) const {
+    const size_t field_pos = FieldOffset(table_pos, vtable_offset);
+    if (field_pos == 0)
+      return {};
+    const size_t str_pos = Indirect(field_pos);
+    const uint32_t len = ReadScalar<uint32_t>(str_pos);
+    if (str_pos + 4 > size_ || static_cast<size_t>(len) > size_ - str_pos - 4) {
+      throw std::runtime_error("Truncated FlatBuffer string");
+    }
+    return std::string(reinterpret_cast<const char *>(data_ + str_pos + 4),
+                       len);
+  }
+
+  double ReadDoubleField(size_t table_pos, uint16_t vtable_offset,
+                         double fallback = 0.0) const {
+    const size_t field_pos = FieldOffset(table_pos, vtable_offset);
+    return field_pos == 0 ? fallback : ReadScalar<double>(field_pos);
+  }
+
+  size_t Size() const { return size_; }
+
+private:
+  const uint8_t *data_;
+  size_t size_;
+};
+
+void ReadFlatPointCloud(const std::string &payload, int64_t start_ns,
+                        int64_t end_ns, uint32_t scan_lines,
+                        std::string *frame_id, std::vector<Scan> *scans) {
+  // Matches modules/common_msgs/sensor_msgs/pointcloud.fbs wire layout:
+  // PointCloud: 4=header, 6=frame_id, 10=point[PointXYZIT 24B],
+  // 12=measurement_time; Header: 4=timestamp_sec, 20=frame_id.
+  constexpr size_t kPointStride = 24;
+  FlatBufferReader fb(payload);
+  const size_t root = fb.RootTable();
+  const size_t vec_field = fb.FieldOffset(root, 10);
+  if (vec_field == 0)
+    return;
+  const size_t vec_pos = fb.Indirect(vec_field);
+  const uint32_t point_count = fb.ReadScalar<uint32_t>(vec_pos);
+  if (point_count == 0)
+    return;
+  const size_t points_start = vec_pos + 4;
+  if (points_start > fb.Size() ||
+      static_cast<size_t>(point_count) >
+          (fb.Size() - points_start) / kPointStride) {
+    throw std::runtime_error("Truncated FlatBuffer PointXYZIT vector");
+  }
+
+  uint64_t timestamp_ns = std::numeric_limits<uint64_t>::max();
+  for (uint32_t i = 0; i < point_count; ++i) {
+    const uint64_t pt_ts =
+        fb.ReadScalar<uint64_t>(points_start + i * kPointStride + 16);
+    timestamp_ns = std::min(timestamp_ns, pt_ts);
+  }
+  if (timestamp_ns >
+      static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+    throw std::runtime_error("Point timestamp exceeds signed nanosecond range");
+  }
+  const int64_t scan_timestamp = static_cast<int64_t>(timestamp_ns);
+  if (!Includes(scan_timestamp, start_ns, end_ns))
+    return;
+
+  const size_t header_field = fb.FieldOffset(root, 4);
+  const size_t header_pos =
+      header_field == 0 ? 0 : fb.Indirect(header_field);
+  if (frame_id->empty()) {
+    std::string resolved = fb.ReadStringField(root, 6);
+    if (resolved.empty() && header_pos != 0) {
+      resolved = fb.ReadStringField(header_pos, 20);
+    }
+    *frame_id = resolved.empty() ? "lidar" : resolved;
+  }
+
+  Scan scan;
+  scan.timestamp_ns = scan_timestamp;
+  scan.measurement_ns =
+      SecondsToNanoseconds(fb.ReadDoubleField(root, 12, 0.0));
+  scan.dispatch_ns = header_pos == 0
+                         ? 0
+                         : SecondsToNanoseconds(
+                               fb.ReadDoubleField(header_pos, 4, 0.0));
+  scan.points.reserve(point_count);
+  for (uint32_t i = 0; i < point_count; ++i) {
+    const size_t base = points_start + static_cast<size_t>(i) * kPointStride;
+    const float x = fb.ReadScalar<float>(base + 0);
+    const float y = fb.ReadScalar<float>(base + 4);
+    const float z = fb.ReadScalar<float>(base + 8);
+    const float intensity = static_cast<float>(fb.ReadScalar<uint32_t>(base + 12));
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+        !std::isfinite(intensity)) {
+      continue;
+    }
+    const uint64_t pt_ts = fb.ReadScalar<uint64_t>(base + 16);
+    if (pt_ts < timestamp_ns) {
+      throw std::runtime_error("Point timestamp precedes scan timestamp");
+    }
+    const float point_time =
+        static_cast<float>(static_cast<double>(pt_ts - timestamp_ns) * 1.0e-9);
+    scan.points.push_back(Point{
+        x, y, z, intensity, static_cast<uint16_t>(i % scan_lines), point_time});
+  }
+  if (!scan.points.empty())
+    scans->push_back(std::move(scan));
+}
+
 void ReadPointCloud(const Message &cloud, int64_t start_ns, int64_t end_ns,
                     uint32_t scan_lines, std::string *frame_id,
                     std::vector<Scan> *scans) {
@@ -523,6 +683,13 @@ int main(int argc, char **argv) {
         if (record.channel_name != lidar_topic &&
             record.channel_name != imu_topic &&
             record.channel_name != "/tf_static") {
+          continue;
+        }
+        if (record.channel_name == lidar_topic &&
+            IsFlatPointCloudType(reader.GetMessageType(record.channel_name))) {
+          ReadFlatPointCloud(record.content, start_ns, end_ns,
+                             static_cast<uint32_t>(scan_lines), &lidar_frame,
+                             &scans);
           continue;
         }
         auto message = Decode(reader, record, *factory, &registered_types);

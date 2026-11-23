@@ -292,8 +292,10 @@ lidar2imu run-native \
 
 Optional batch solver stabilization keys under `calibration:` in the YAML config
 (`max_xcorr_lag_s`, `max_time_lag_2_s`, `rot_init_max_iters`,
-`use_imu_angular_in_acc_cost`, `skip_secondary_acc_norm`, `tail_trim_states`)
-are omitted when unset.
+`use_imu_angular_in_acc_cost`, `skip_secondary_acc_norm`, `tail_trim_states`,
+`normalize_butterworth_gain`, `world_frame_gravity_in_acc_cost`,
+`ground_plane_imu_to_ground`, `acc_bias_bound_m_s2`) are omitted when unset so
+frozen GRIL defaults remain unchanged.
 
 Evaluate post-run acceptance gates strictly on completed artifacts (never inside
 the solver):
@@ -312,12 +314,16 @@ lidar2imu evaluate-quality-gates \
 
 `evaluate-quality-gates` separates `data_sufficiency`, `motion_excitation`,
 `parameter_observability` (rotation Hessian, 2D/3D translation lever-arm
-singular values and boundary-hit check, time-offset angular-acceleration energy
-and Pearson correlation), `repeatability`, `seed_sensitivity`, `multi_window`,
-and `holdout` into `converged_and_verified` (`accepted`),
-`degraded_unobservable` (`review_only`), or `failed` (`rejected`). See
-`context/knowledge_base/validated_conclusions.md` and
-`.agents/knowledge/lidar2imu_research.md` for rationale and validation evidence.
+singular values and boundary-hit check, `acc_bias`/`gyro_bias` boundary
+saturation check, time-offset `H` vs configured `C` residual check,
+angular-acceleration energy, and Pearson correlation), `repeatability`
+(requiring distinct run directories), `seed_sensitivity`, `multi_window`
+(requiring distinct, non-overlapping time windows), and `holdout` (requiring an
+independent, non-overlapping trace within IMU interpolation support) into
+`converged_and_verified` (`accepted`), `degraded_unobservable` (`review_only`),
+or `failed` (`rejected`). See `context/knowledge_base/validated_conclusions.md`
+and `.agents/knowledge/lidar2imu_research.md` for rationale and validation
+evidence.
 
 ### Dual-sensor cross-validation and colored PCD diagnostics
 

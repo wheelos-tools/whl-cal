@@ -179,17 +179,29 @@ The trajectory diagnostic writes:
 - `diagnostics/frontend_trajectory.png`
 - `diagnostics/frontend_trajectory.yaml`
 
-The submap diagnostic uses independent GNSS/INS poses as the IMU-side odometry,
-interpolates SE(3) at every retained point timestamp, applies the estimated
-LiDAR-to-IMU transform, and writes:
+The submap diagnostic uses independent GNSS/INS poses as the reference
+body-frame odometry, interpolates SE(3) at every retained point timestamp,
+applies the estimated LiDAR-to-IMU transform, and writes:
 
 - `diagnostics/imu_submap/imu_extrinsic_submap.ply`
 - `diagnostics/imu_submap/imu_extrinsic_submap_bev.png`
 - `diagnostics/imu_submap/submap_metrics.yaml`
 
+**`ant2outposoffset` (INS output lever-arm) caution:** if GNSS/INS shifts
+`/apollo/sensor/gnss/odometry` and `/apollo/localization/pose` to the rear axle
+while `corrected_imu` / `raw_imu` `(w, f)` remain at the physical IMU origin,
+`lidar2imu` calibration still yields `T_{IMU<-LiDAR}` at the IMU origin.
+Without lever-arm compensation, naive `SE(2)` trajectory alignment and
+`gnss/odometry` submaps will exhibit meter-scale turn errors (e.g. `2.63 m`
+apparent ATE on Zhongce). Pass `--result` (and optionally `--imu-in-pose-xyz`
+or `--imu-in-pose-yaml`) to `evaluate_trajectories.py` to inspect
+`lever_arm_compensated` metrics and `ant2outposoffset_detected`, and pass
+`--imu-in-pose-xyz` / `--imu-in-pose-yaml` (or `--batch-trace ...
+--auto-compensate-pose-offset`) to `build_imu_submap.py`.
+
 Compare thickness only across candidates built with exactly the same record,
-pose source, time convention, scan/point strides, crop, voxel size, and
-neighborhood settings.
+pose source, `pose-to-imu` offset, time convention, scan/point strides, crop,
+voxel size, and neighborhood settings.
 
 Run it independently for A/B comparison:
 
@@ -197,6 +209,8 @@ Run it independently for A/B comparison:
 python .agents/skills/gril-calib-validation/scripts/build_imu_submap.py \
   --record-file RECORD \
   --result OUTPUT/run_1/GRIL_Calib_result.txt \
+  --batch-trace OUTPUT/run_1/GRIL_batch_trace_v1.txt \
+  --auto-compensate-pose-offset \
   --output-dir OUTPUT/diagnostics/imu_submap
 ```
 
@@ -332,6 +346,25 @@ Do not begin calibration until these are verified in the exact GRIL revision:
     `R_IL * IMU_ang_acc` while propagating exact analytical Jacobians wrt `R_IL`,
     and `calibration.skip_secondary_acc_norm: true` avoids re-scaling dynamic IMU
     acceleration from moving initial samples.
+13. `Gril_Calib.h` hardcoded 4-decimal `Butterworth` coefficients (`sum(b)=0.0049`,
+    `sum(a)=0.0048`) produce a `1.0421` (+4.21%) DC gain per `zero_phase_filt`
+    pass and `1.0860` (+8.60%) after two passes (`Lidar.linear_acc`,
+    `IMU.ang_acc`). Enabling `skip_secondary_acc_norm: true` leaves IMU gravity
+    inflated by `+4.21%` (`~10.22 m/s²`), which couples into `pitch`, `T_LI.y`,
+    and `±0.01 m/s²` `bias_aL` saturation.
+14. `Linear_acc_Rot_Cost_without_Gravity` adds body-frame `R_GL * STD_GRAV`
+    (`FullFrontend.cpp` `FromTwoVectors(e3, normal_lidar)`) without rotating by
+    `R_LL0` into world frame `L_0`, and `Ground_Plane_Cost_IL` uses
+    `R_IL^T * R_GI^T * R_GL * e3` despite `FusionAhrs` `R_GI` mapping `I -> G`
+    (instead of `R_GI * R_IL^T * R_GL * e3`). Combined with `--odom-ground-mode
+    disabled` world-tilt drift and `Gril_Calib.cpp`'s hard `±0.01 m/s²`
+    `bias_aL` clamp, horizontal lever-arm estimates drift across windows even on
+    continuous bidirectional trajectories.
+15. Never split validation windows mid-motion with a cold frontend restart
+    (`ikd-Tree` + `AHRS` from zero at `v >> 0` creates multi-m/s² startup
+    transients), and verify loop-direction balance (front vs rear loops) before
+    using a segment in multi-window consistency gates; do not reuse overlapping
+    windows or training-included traces as independent holdouts.
 
 ## Validation ladder
 

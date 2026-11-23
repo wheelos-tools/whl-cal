@@ -44,6 +44,10 @@ struct NativeConfig {
   bool use_imu_angular_in_acc_cost = false;
   bool skip_secondary_acc_norm = false;
   int tail_trim_states = 20;
+  bool normalize_butterworth_gain = false;
+  bool world_frame_gravity_in_acc_cost = false;
+  bool ground_plane_imu_to_ground = false;
+  double acc_bias_bound_m_s2 = 0.01;
 };
 
 double parse_double(const std::string &text, const std::string &key) {
@@ -153,6 +157,22 @@ NativeConfig read_config(const std::string &path) {
   if (values.count("tail_trim_states"))
     config.tail_trim_states =
         parse_int(take("tail_trim_states"), "tail_trim_states");
+  if (values.count("normalize_butterworth_gain"))
+    config.normalize_butterworth_gain = parse_bool(
+        take("normalize_butterworth_gain"), "normalize_butterworth_gain");
+  if (values.count("world_frame_gravity_in_acc_cost"))
+    config.world_frame_gravity_in_acc_cost =
+        parse_bool(take("world_frame_gravity_in_acc_cost"),
+                   "world_frame_gravity_in_acc_cost");
+  if (values.count("ground_plane_imu_to_ground"))
+    config.ground_plane_imu_to_ground = parse_bool(
+        take("ground_plane_imu_to_ground"), "ground_plane_imu_to_ground");
+  if (values.count("acc_bias_bound_m_s2")) {
+    config.acc_bias_bound_m_s2 =
+        parse_double(take("acc_bias_bound_m_s2"), "acc_bias_bound_m_s2");
+    if (!(config.acc_bias_bound_m_s2 > 0.0))
+      throw std::runtime_error("acc_bias_bound_m_s2 must be positive");
+  }
   if (!values.empty())
     throw std::runtime_error("unknown config key: " + values.begin()->first);
   return config;
@@ -250,6 +270,11 @@ int main(int argc, char **argv) {
         config.use_imu_angular_in_acc_cost;
     calibration.skip_secondary_acc_norm = config.skip_secondary_acc_norm;
     calibration.tail_trim_states = config.tail_trim_states;
+    calibration.normalize_butterworth_gain = config.normalize_butterworth_gain;
+    calibration.world_frame_gravity_in_acc_cost =
+        config.world_frame_gravity_in_acc_cost;
+    calibration.ground_plane_imu_to_ground = config.ground_plane_imu_to_ground;
+    calibration.acc_bias_bound_m_s2 = config.acc_bias_bound_m_s2;
     if (config.rotation_LI_seed_provided) {
       calibration.set_rotation_initial_guess(config.rotation_LI_seed);
       std::cout << "[Rotation initialization] LiDAR to IMU quaternion xyzw = "

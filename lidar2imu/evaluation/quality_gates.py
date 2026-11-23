@@ -250,11 +250,43 @@ def _quat_wxyz_to_rot(q_wxyz: np.ndarray) -> np.ndarray:
     )
 
 
-def _interp_vec3(t_src: np.ndarray, v_src: np.ndarray, t_dst: np.ndarray) -> np.ndarray:
+def _interp_vec3(
+    t_src: np.ndarray,
+    v_src: np.ndarray,
+    t_dst: np.ndarray,
+    *,
+    require_within_bounds: bool = True,
+) -> np.ndarray:
+    if len(t_src) == 0 or len(t_dst) == 0:
+        raise ValueError("Cannot interpolate empty timestamp array")
+    if require_within_bounds and (
+        float(t_dst.min()) < float(t_src[0]) or float(t_dst.max()) > float(t_src[-1])
+    ):
+        raise ValueError(
+            "Query timestamps fall outside source IMU support "
+            f"[{float(t_src[0]):.6f}, {float(t_src[-1]):.6f}]: "
+            f"requested [{float(t_dst.min()):.6f}, {float(t_dst.max()):.6f}]"
+        )
     out = np.empty((len(t_dst), 3), dtype=np.float64)
     for axis in range(3):
         out[:, axis] = np.interp(t_dst, t_src, v_src[:, axis])
     return out
+
+
+def _read_manifest_clock(run_dir: Path | None) -> tuple[float | None, float]:
+    if run_dir is None:
+        return None, 0.0
+    manifest_path = Path(run_dir) / "manifest.yaml"
+    if not manifest_path.is_file():
+        return None, 0.0
+    data = yaml.safe_load(manifest_path.read_text()) or {}
+    runtime = data.get("runtime_semantics") or {}
+    hard_h = runtime.get("hard_time_offset_s")
+    conf_c = runtime.get("configured_time_lag_s", 0.0)
+    return (
+        float(hard_h) if hard_h is not None else None,
+        float(conf_c) if conf_c is not None else 0.0,
+    )
 
 
 def _zero_phase_smooth(signal: np.ndarray, window: int = 7) -> np.ndarray:
@@ -292,15 +324,34 @@ def _rotation_error_deg(R_a: np.ndarray, R_b: np.ndarray) -> float:
 def evaluate_holdout_trace(
     candidate_result: dict[str, Any],
     holdout_batch_trace_path: Path,
+    *,
+    primary_hard_clock_offset_s: float | None = None,
+    holdout_configured_lag_s: float = 0.0,
 ) -> dict[str, Any]:
-    arrays = parse_batch_trace_arrays(holdout_batch_trace_path)
+    holdout_path = Path(holdout_batch_trace_path)
+    arrays = parse_batch_trace_arrays(holdout_path)
     lid_t = arrays["lid_t"]
     if len(lid_t) < 60:
         raise ValueError(f"Holdout trace has too few LiDAR states: {len(lid_t)}")
     R_LI = np.asarray(candidate_result["rotation_LI_matrix"], dtype=np.float64)
     R_IL = R_LI.T
     T_IL = np.asarray(candidate_result["translation_IL_m"], dtype=np.float64)
-    tau = float(candidate_result["time_offset_s"])
+    est_time_offset_s = float(candidate_result["time_offset_s"])
+    if primary_hard_clock_offset_s is not None:
+        tau_phys = est_time_offset_s - float(primary_hard_clock_offset_s)
+        tau = tau_phys - float(holdout_configured_lag_s)
+    else:
+        if (
+            "timediff_imu_wrt_lidar" not in arrays["meta"]
+            and abs(est_time_offset_s) > 1.0
+        ):
+            raise ValueError(
+                "Holdout batch trace is missing timediff_imu_wrt_lidar for "
+                "large cross-epoch time_offset_s"
+            )
+        tau = est_time_offset_s - float(
+            arrays["meta"].get("timediff_imu_wrt_lidar", 0.0)
+        )
     ba_L = R_IL @ np.asarray(candidate_result["acc_bias_m_s2"], dtype=np.float64)
     bg_I = np.asarray(candidate_result["gyro_bias_rad_s"], dtype=np.float64)
 
@@ -308,11 +359,25 @@ def evaluate_holdout_trace(
     valid = slice(20, len(lid_t) - 20)
     t_eval = lid_t[valid]
     dt_med = float(np.median(np.diff(lid_t)))
+    # Check interior shifted timestamps against IMU support to prevent clamping
+    _interp_vec3(
+        arrays["imu_t"], arrays["imu_w"], t_eval + tau, require_within_bounds=True
+    )
     imu_w_sync = _zero_phase_smooth(
-        _interp_vec3(arrays["imu_t"], arrays["imu_w"] - bg_I, lid_t + tau)
+        _interp_vec3(
+            arrays["imu_t"],
+            arrays["imu_w"] - bg_I,
+            lid_t + tau,
+            require_within_bounds=False,
+        )
     )
     imu_a_sync = _zero_phase_smooth(
-        _interp_vec3(arrays["imu_t"], arrays["imu_a"], lid_t + tau)
+        _interp_vec3(
+            arrays["imu_t"],
+            arrays["imu_a"],
+            lid_t + tau,
+            require_within_bounds=False,
+        )
     )
     imu_alpha = np.gradient(imu_w_sync, dt_med, axis=0)
     lid_v_smooth = _zero_phase_smooth(arrays["lid_v"])
@@ -335,7 +400,7 @@ def evaluate_holdout_trace(
         base_term = (
             R_ll0 @ (R_IL @ imu_a_sync[idx])
             - R_ll0 @ ba_L
-            + R_gl @ std_grav
+            + R_ll0 @ (R_gl @ std_grav)
             - lid_a[idx]
         )
         acc_res_zero_trans_list.append(base_term)
@@ -350,7 +415,7 @@ def evaluate_holdout_trace(
     acc_rmse_zero_trans = float(np.sqrt(np.mean(np.sum(acc_res_zero_t**2, axis=1))))
 
     return {
-        "holdout_trace": str(Path(holdout_batch_trace_path).resolve()),
+        "holdout_trace": str(holdout_path.resolve()),
         "evaluated_states": int(len(t_eval)),
         "duration_s": float(t_eval[-1] - t_eval[0]),
         "gyro_rmse_rad_s": gyro_rmse,
@@ -427,8 +492,12 @@ def evaluate_run_quality_gates(
     }
 
     # 2. Motion Excitation Pillar
-    imu_w_sync = _zero_phase_smooth(_interp_vec3(imu_t, imu_w, lid_t))
-    imu_a_sync = _zero_phase_smooth(_interp_vec3(imu_t, imu_a, lid_t))
+    imu_w_sync = _zero_phase_smooth(
+        _interp_vec3(imu_t, imu_w, lid_t, require_within_bounds=False)
+    )
+    imu_a_sync = _zero_phase_smooth(
+        _interp_vec3(imu_t, imu_a, lid_t, require_within_bounds=False)
+    )
     imu_alpha = np.gradient(imu_w_sync, dt_med, axis=0)
     omega_norm = np.linalg.norm(imu_w_sync, axis=1)
     total_abs_yaw_deg = float(math.degrees(np.sum(np.abs(imu_w_sync[:, 2])) * dt_med))
@@ -541,11 +610,53 @@ def evaluate_run_quality_gates(
                 best_pearson = p_val
                 best_lag_s = -lag * dt_med
 
-    time_observable = (
-        alpha_energy >= thresholds.min_time_alpha_energy
-        and best_pearson >= thresholds.min_xcorr_peak_pearson
-        and abs(primary["time_offset_s"]) <= thresholds.max_abs_time_offset_s
+    manifest_hard_h, configured_time_lag_s = _read_manifest_clock(run_dir)
+    has_trace_timediff = "timediff_imu_wrt_lidar" in arrays["meta"]
+    missing_clock_metadata = (
+        not has_trace_timediff
+        and manifest_hard_h is None
+        and abs(float(primary["time_offset_s"])) > 1.0
     )
+    trace_timediff_s = (
+        float(arrays["meta"]["timediff_imu_wrt_lidar"])
+        if has_trace_timediff
+        else (
+            float(manifest_hard_h) + configured_time_lag_s
+            if manifest_hard_h is not None
+            else 0.0
+        )
+    )
+    hard_clock_offset_s = (
+        float(manifest_hard_h)
+        if manifest_hard_h is not None
+        else trace_timediff_s - configured_time_lag_s
+    )
+    residual_time_offset_s = float(primary["time_offset_s"]) - hard_clock_offset_s
+    time_observable = (
+        not missing_clock_metadata
+        and alpha_energy >= thresholds.min_time_alpha_energy
+        and best_pearson >= thresholds.min_xcorr_peak_pearson
+        and abs(residual_time_offset_s) <= thresholds.max_abs_time_offset_s
+    )
+
+    acc_bias_bound_m_s2 = float(native_conf.get("acc_bias_bound_m_s2", 0.01))
+    gyro_bias_bound_rad_s = 0.01
+    ba_L = R_IL @ np.asarray(primary["acc_bias_m_s2"], dtype=np.float64)
+    bg_I = np.asarray(primary["gyro_bias_rad_s"], dtype=np.float64)
+    acc_bias_boundary_hit_axes = (
+        [
+            axis
+            for axis, val in zip(("x", "y", "z"), np.abs(ba_L))
+            if float(val) >= 0.97 * acc_bias_bound_m_s2
+        ]
+        if acc_bias_bound_m_s2 > 0.0
+        else []
+    )
+    gyro_bias_boundary_hit_axes = [
+        axis
+        for axis, val in zip(("x", "y", "z"), np.abs(bg_I))
+        if float(val) >= 0.97 * gyro_bias_bound_rad_s
+    ]
 
     observability = {
         "rotation": {
@@ -580,12 +691,30 @@ def evaluate_run_quality_gates(
             "bounded_xcorr_peak_pearson": best_pearson,
             "bounded_xcorr_lag_s": best_lag_s,
             "estimated_time_offset_s": primary["time_offset_s"],
+            "hard_clock_offset_s": hard_clock_offset_s,
+            "configured_time_lag_s": configured_time_lag_s,
+            "trace_timediff_imu_wrt_lidar_s": trace_timediff_s,
+            "residual_time_offset_s": residual_time_offset_s,
+            "missing_clock_offset_metadata": missing_clock_metadata,
+        },
+        "bias": {
+            "acc_bias_lidar_m_s2": [float(x) for x in ba_L],
+            "acc_bias_bound_m_s2": acc_bias_bound_m_s2,
+            "acc_bias_boundary_hit_axes": acc_bias_boundary_hit_axes,
+            "gyro_bias_imu_rad_s": [float(x) for x in bg_I],
+            "gyro_bias_bound_rad_s": gyro_bias_bound_rad_s,
+            "gyro_bias_boundary_hit_axes": gyro_bias_boundary_hit_axes,
         },
     }
 
     # 4. Repeatability Gate
     repeatability: dict[str, Any] = {"provided": False, "passed": False}
+    repeat_independence_ok = True
     if repeat_run_dirs:
+        rep_resolved = [run_dir.resolve()] + [
+            Path(d).resolve() for d in repeat_run_dirs
+        ]
+        repeat_independence_ok = len(set(rep_resolved)) == len(rep_resolved)
         all_runs = [primary] + [
             parse_detailed_gril_result(Path(d) / "GRIL_Calib_result.txt")
             for d in repeat_run_dirs
@@ -608,13 +737,15 @@ def evaluate_run_quality_gates(
                     abs(all_runs[i]["time_offset_s"] - all_runs[j]["time_offset_s"]),
                 )
         rep_passed = (
-            max_rot_spread <= thresholds.max_repeat_rot_deg
+            repeat_independence_ok
+            and max_rot_spread <= thresholds.max_repeat_rot_deg
             and max_trans_spread <= thresholds.max_repeat_trans_m
             and max_time_spread <= thresholds.max_repeat_time_s
         )
         repeatability = {
             "provided": True,
             "run_count": len(all_runs),
+            "distinct_run_dirs": repeat_independence_ok,
             "max_rotation_spread_deg": max_rot_spread,
             "max_translation_spread_m": max_trans_spread,
             "max_time_offset_spread_s": max_time_spread,
@@ -662,11 +793,37 @@ def evaluate_run_quality_gates(
 
     # 5. Multi-Window Consistency Gate
     multi_window: dict[str, Any] = {"provided": False, "passed": False}
+    window_distinct_ok = True
+    window_overlap_s = 0.0
     if window_run_dirs:
+        win_dirs = [run_dir] + [Path(d) for d in window_run_dirs]
+        win_resolved = [p.resolve() for p in win_dirs]
+        window_distinct_ok = len(set(win_resolved)) == len(win_resolved)
         win_runs = [primary] + [
             parse_detailed_gril_result(Path(d) / "GRIL_Calib_result.txt")
             for d in window_run_dirs
         ]
+        win_spans: list[tuple[float, float, float]] = [
+            (float(lid_t[0]), float(lid_t[-1]), hard_clock_offset_s)
+        ]
+        for wdir in window_run_dirs:
+            w_arrays = parse_batch_trace_arrays(Path(wdir) / "GRIL_batch_trace_v1.txt")
+            w_h, w_c = _read_manifest_clock(Path(wdir))
+            w_clock = (
+                float(w_h)
+                if w_h is not None
+                else float(w_arrays["meta"].get("timediff_imu_wrt_lidar", 0.0)) - w_c
+            )
+            w_t = w_arrays["lid_t"]
+            if len(w_t) > 0:
+                win_spans.append((float(w_t[0]), float(w_t[-1]), w_clock))
+        for i in range(len(win_spans)):
+            for j in range(i + 1, len(win_spans)):
+                if abs(win_spans[i][2] - win_spans[j][2]) < 1.0:
+                    ov = min(win_spans[i][1], win_spans[j][1]) - max(
+                        win_spans[i][0], win_spans[j][0]
+                    )
+                    window_overlap_s = max(window_overlap_s, float(ov))
         max_w_rot = 0.0
         max_w_txy = 0.0
         max_w_t3d = 0.0
@@ -685,13 +842,17 @@ def evaluate_run_quality_gates(
                     abs(win_runs[i]["time_offset_s"] - win_runs[j]["time_offset_s"]),
                 )
         win_passed = (
-            max_w_rot <= thresholds.max_window_rot_deg
+            window_distinct_ok
+            and window_overlap_s <= 1.0
+            and max_w_rot <= thresholds.max_window_rot_deg
             and max_w_txy <= thresholds.max_window_trans_xy_m
             and max_w_time <= thresholds.max_window_time_s
         )
         multi_window = {
             "provided": True,
             "window_count": len(win_runs),
+            "distinct_window_dirs": window_distinct_ok,
+            "max_window_overlap_s": window_overlap_s,
             "max_rotation_spread_deg": max_w_rot,
             "max_translation_xy_spread_m": max_w_txy,
             "max_translation_3d_spread_m": max_w_t3d,
@@ -701,16 +862,62 @@ def evaluate_run_quality_gates(
 
     # 6. Independent Holdout Gate
     holdout: dict[str, Any] = {"provided": False, "passed": False}
+    holdout_self_leak = False
+    holdout_overlap_s = 0.0
+    holdout_time_support_error: str | None = None
     if holdout_batch_trace is not None:
-        h_metrics = evaluate_holdout_trace(primary, Path(holdout_batch_trace))
-        h_passed = (
-            h_metrics["gyro_rmse_rad_s"] <= thresholds.max_holdout_gyro_rmse_rad_s
-            and h_metrics["acc_rmse_m_s2"] <= thresholds.max_holdout_acc_rmse_m_s2
-            and h_metrics["gyro_rmse_rad_s"]
-            <= h_metrics["gyro_rmse_identity_rad_s"] + 1e-4
-            and h_metrics["lever_arm_improved_holdout_acc"]
+        holdout_path = Path(holdout_batch_trace)
+        holdout_self_leak = holdout_path.resolve() == batch_trace_path.resolve()
+        h_arrays = parse_batch_trace_arrays(holdout_path)
+        h_manifest_h, h_conf_c = _read_manifest_clock(holdout_path.parent)
+        h_clock = (
+            float(h_manifest_h)
+            if h_manifest_h is not None
+            else float(h_arrays["meta"].get("timediff_imu_wrt_lidar", 0.0)) - h_conf_c
         )
-        holdout = {"provided": True, **h_metrics, "passed": h_passed}
+        h_lid_t = h_arrays["lid_t"]
+        if (
+            len(h_lid_t) > 0
+            and len(lid_t) > 0
+            and abs(hard_clock_offset_s - h_clock) < 1.0
+        ):
+            holdout_overlap_s = max(
+                0.0, float(min(lid_t[-1], h_lid_t[-1]) - max(lid_t[0], h_lid_t[0]))
+            )
+        try:
+            h_metrics = evaluate_holdout_trace(
+                primary,
+                holdout_path,
+                primary_hard_clock_offset_s=hard_clock_offset_s,
+                holdout_configured_lag_s=h_conf_c,
+            )
+            h_passed = (
+                not holdout_self_leak
+                and holdout_overlap_s <= 1.0
+                and h_metrics["gyro_rmse_rad_s"]
+                <= thresholds.max_holdout_gyro_rmse_rad_s
+                and h_metrics["acc_rmse_m_s2"] <= thresholds.max_holdout_acc_rmse_m_s2
+                and h_metrics["gyro_rmse_rad_s"]
+                <= h_metrics["gyro_rmse_identity_rad_s"] + 1e-4
+                and h_metrics["lever_arm_improved_holdout_acc"]
+            )
+            holdout = {
+                "provided": True,
+                "self_trace_leakage": holdout_self_leak,
+                "time_overlap_with_primary_s": holdout_overlap_s,
+                **h_metrics,
+                "passed": h_passed,
+            }
+        except ValueError as exc:
+            holdout_time_support_error = str(exc)
+            holdout = {
+                "provided": True,
+                "holdout_trace": str(holdout_path.resolve()),
+                "self_trace_leakage": holdout_self_leak,
+                "time_overlap_with_primary_s": holdout_overlap_s,
+                "error": holdout_time_support_error,
+                "passed": False,
+            }
 
     # Explicit state classification
     hard_failures: list[str] = []
@@ -724,8 +931,10 @@ def evaluate_run_quality_gates(
             unobservable_reasons.append(f"motion_excitation.{name}")
     if observability["rotation"]["status"] != "observable":
         unobservable_reasons.append("parameter_observability.rotation")
-    if observability["time_offset"]["status"] != "observable":
-        if abs(primary["time_offset_s"]) > thresholds.max_abs_time_offset_s:
+    if missing_clock_metadata:
+        hard_failures.append("parameter_observability.missing_clock_offset_metadata")
+    elif observability["time_offset"]["status"] != "observable":
+        if abs(residual_time_offset_s) > thresholds.max_abs_time_offset_s:
             hard_failures.append("parameter_observability.time_offset_out_of_bounds")
         else:
             unobservable_reasons.append("parameter_observability.time_offset")
@@ -736,22 +945,47 @@ def evaluate_run_quality_gates(
         unobservable_reasons.append(
             f"parameter_observability.translation_boundary_hit_{axes_tag}"
         )
+    if acc_bias_boundary_hit_axes:
+        axes_tag = "".join(acc_bias_boundary_hit_axes)
+        unobservable_reasons.append(
+            f"parameter_observability.acc_bias_boundary_hit_{axes_tag}"
+        )
+    if gyro_bias_boundary_hit_axes:
+        axes_tag = "".join(gyro_bias_boundary_hit_axes)
+        unobservable_reasons.append(
+            f"parameter_observability.gyro_bias_boundary_hit_{axes_tag}"
+        )
 
-    if repeatability["provided"] and not repeatability["passed"]:
-        hard_failures.append("repeatability.spread_exceeded")
+    if repeatability["provided"]:
+        if not repeat_independence_ok:
+            hard_failures.append("repeatability.duplicate_or_self_run")
+        elif not repeatability["passed"]:
+            hard_failures.append("repeatability.spread_exceeded")
     if not repeatability["provided"]:
         unobservable_reasons.append("repeatability.not_provided")
 
     if seed_sensitivity["provided"] and not seed_sensitivity["passed"]:
         hard_failures.append("seed_sensitivity.basin_divergence")
 
-    if multi_window["provided"] and not multi_window["passed"]:
-        hard_failures.append("multi_window.inconsistent_extrinsics")
+    if multi_window["provided"]:
+        if not window_distinct_ok:
+            hard_failures.append("multi_window.duplicate_or_self_window")
+        elif window_overlap_s > 1.0:
+            hard_failures.append("multi_window.overlapping_windows")
+        elif not multi_window["passed"]:
+            hard_failures.append("multi_window.inconsistent_extrinsics")
     if not multi_window["provided"]:
         unobservable_reasons.append("multi_window.not_provided")
 
-    if holdout["provided"] and not holdout["passed"]:
-        hard_failures.append("holdout.residual_failed")
+    if holdout["provided"]:
+        if holdout_self_leak:
+            hard_failures.append("holdout.self_trace_leakage")
+        elif holdout_overlap_s > 1.0:
+            hard_failures.append("holdout.overlapping_time_range")
+        elif holdout_time_support_error is not None:
+            hard_failures.append("holdout.invalid_time_support")
+        elif not holdout["passed"]:
+            hard_failures.append("holdout.residual_failed")
     if not holdout["provided"]:
         unobservable_reasons.append("holdout.not_provided")
 
@@ -774,6 +1008,11 @@ def evaluate_run_quality_gates(
             "Flat-road planar vehicle motion leaves lever-arm Z coupled to "
             "Patchwork++ ground height and imu_sensor_height prior; treat T_LI.z "
             "as prior-anchored unless 3D pitch/roll excitation is captured."
+        )
+    if acc_bias_boundary_hit_axes or gyro_bias_boundary_hit_axes:
+        notes.append(
+            "Optimized IMU bias hit parameter bounds; inspect sensor scale, "
+            "filtering DC gain, gravity alignment, and unmodeled tilt drift."
         )
 
     return {

@@ -968,7 +968,14 @@ def _write_synthetic_gril_run(
     run_dir: Path,
     *,
     time_lag_s: float = -0.02,
+    hard_clock_offset_s: float = 0.0,
+    configured_time_lag_s: float | None = None,
+    t_offset_s: float = 0.0,
     trans_li: tuple[float, float, float] = (0.0, 2.0, 0.5),
+    acc_bias_m_s2: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    acc_bias_bound_m_s2: float | None = None,
+    omit_trace_timediff: bool = False,
+    imu_trim_tail_samples: int = 0,
     set_boundary: bool = False,
     bound_th: float = 0.5,
     seed_trans_il: tuple[float, float, float] = (0.0, -2.0, -0.5),
@@ -976,33 +983,55 @@ def _write_synthetic_gril_run(
 ) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     tx, ty, tz = trans_li
+    bax, bay, baz = acc_bias_m_s2
+    total_time_lag_s = hard_clock_offset_s + time_lag_s
     (run_dir / "GRIL_Calib_result.txt").write_text(
         "LiDAR-IMU calibration result:\n"
         "Rotation LiDAR to IMU (degree)     = 0.0 0.0 0.0\n"
         f"Translation LiDAR to IMU (meter)   = {tx:.6f} {ty:.6f} {tz:.6f}\n"
-        f"Time Lag IMU to LiDAR (second)     = {time_lag_s:.6f}\n"
+        f"Time Lag IMU to LiDAR (second)     = {total_time_lag_s:.6f}\n"
         "Bias of Gyroscope  (rad/s)         = 0.0 0.0 0.0\n"
-        "Bias of Accelerometer (meters/s^2) = 0.0 0.0 0.0\n\n"
+        f"Bias of Accelerometer (meters/s^2) = {bax:.6f} {bay:.6f} {baz:.6f}\n\n"
         "Homogeneous Transformation Matrix from LiDAR frmae L to IMU frame I:\n"
         f"1.000000 0.000000 0.000000 {tx:.6f}\n"
         f"0.000000 1.000000 0.000000 {ty:.6f}\n"
         f"0.000000 0.000000 1.000000 {tz:.6f}\n"
         "0.000000 0.000000 0.000000 1.000000\n"
     )
-    (run_dir / "gril_native.conf").write_text(
-        f"set_boundary {'true' if set_boundary else 'false'}\n"
-        f"bound_th {bound_th}\n"
-        f"trans_IL_x {seed_trans_il[0]}\n"
-        f"trans_IL_y {seed_trans_il[1]}\n"
-        f"trans_IL_z {seed_trans_il[2]}\n"
-    )
+    conf_lines = [
+        f"set_boundary {'true' if set_boundary else 'false'}",
+        f"bound_th {bound_th}",
+        f"trans_IL_x {seed_trans_il[0]}",
+        f"trans_IL_y {seed_trans_il[1]}",
+        f"trans_IL_z {seed_trans_il[2]}",
+    ]
+    if acc_bias_bound_m_s2 is not None:
+        conf_lines.append(f"acc_bias_bound_m_s2 {acc_bias_bound_m_s2}")
+    (run_dir / "gril_native.conf").write_text("\n".join(conf_lines) + "\n")
+
+    if configured_time_lag_s is not None:
+        (run_dir / "manifest.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "runtime_semantics": {
+                        "hard_time_offset_s": hard_clock_offset_s,
+                        "configured_time_lag_s": configured_time_lag_s,
+                    }
+                },
+                sort_keys=False,
+            )
+        )
 
     # Build 200 states over 66.6s with rich 3D angular + planar translational excitation
     n_lid = 200
     dt = 1.0 / 3.0
-    t_lid = 1000.0 + np.arange(n_lid, dtype=np.float64) * dt
-    t_imu = 999.0 + np.arange(0, 700, dtype=np.float64) * 0.1
+    t_lid = 1000.0 + t_offset_s + np.arange(n_lid, dtype=np.float64) * dt
+    t_imu = 999.0 + t_offset_s + np.arange(0, 700, dtype=np.float64) * 0.1
+    if imu_trim_tail_samples > 0:
+        t_imu = t_imu[:-imu_trim_tail_samples]
     t_il = -np.array(trans_li, dtype=np.float64)
+    conf_lag = configured_time_lag_s or 0.0
+    rel_lag = time_lag_s - conf_lag
 
     def omega_fn(t: np.ndarray) -> np.ndarray:
         return np.column_stack(
@@ -1022,8 +1051,8 @@ def _write_synthetic_gril_run(
             ]
         )
 
-    w_imu = omega_fn(t_imu - time_lag_s)
-    al_imu = alpha_fn(t_imu - time_lag_s)
+    w_imu = omega_fn(t_imu - rel_lag)
+    al_imu = alpha_fn(t_imu - rel_lag)
     v_lid = np.column_stack(
         [
             4.0 * np.cos(0.2 * (t_lid - 1000.0)),
@@ -1037,23 +1066,33 @@ def _write_synthetic_gril_run(
 
     a_lid_at_imu = np.column_stack(
         [
-            -0.8 * np.sin(0.2 * (t_imu - time_lag_s - 1000.0)),
-            0.8 * np.cos(0.2 * (t_imu - time_lag_s - 1000.0)),
+            -0.8 * np.sin(0.2 * (t_imu - rel_lag - 1000.0)),
+            0.8 * np.cos(0.2 * (t_imu - rel_lag - 1000.0)),
             np.zeros_like(t_imu),
         ]
     )
     lever_at_imu = np.cross(w_imu, np.cross(w_imu, t_il)) + np.cross(al_imu, t_il)
-    a_imu = a_lid_at_imu + lever_at_imu + np.array([0.0, 0.0, 9.81])
+    a_imu = (
+        a_lid_at_imu
+        + lever_at_imu
+        + np.array([bax, bay, baz])
+        + np.array([0.0, 0.0, 9.81])
+    )
     w_lid = omega_fn(t_lid)
 
     lines = [
         "GRIL_BATCH_TRACE 1",
         "orig_odom_freq 3",
         "cut_frame_num 1",
-        "timediff_imu_wrt_lidar 0",
-        "move_start_time 1000.0",
-        f"imu_states {len(t_imu)}",
     ]
+    if not omit_trace_timediff:
+        lines.append(f"timediff_imu_wrt_lidar {hard_clock_offset_s + conf_lag:.6f}")
+    lines.extend(
+        [
+            f"move_start_time {1000.0 + t_offset_s:.6f}",
+            f"imu_states {len(t_imu)}",
+        ]
+    )
     for i in range(len(t_imu)):
         lines.append(
             f"imu {t_imu[i]:.6f} 1 0 0 0 1 0 0 0 1 0 0 0 "
@@ -1153,6 +1192,10 @@ class GrilStabilizationAndQualityGatesTest(unittest.TestCase):
             cfg_dict = yaml.safe_load(config_path.read_text())
             cfg_dict["calibration"]["max_xcorr_lag_s"] = 0.5
             cfg_dict["calibration"]["use_imu_angular_in_acc_cost"] = True
+            cfg_dict["calibration"]["normalize_butterworth_gain"] = True
+            cfg_dict["calibration"]["world_frame_gravity_in_acc_cost"] = True
+            cfg_dict["calibration"]["ground_plane_imu_to_ground"] = True
+            cfg_dict["calibration"]["acc_bias_bound_m_s2"] = 0.15
             stab_yaml = root / "stab.yaml"
             stab_yaml.write_text(yaml.safe_dump(cfg_dict))
             stab_batch_conf = write_native_config(
@@ -1160,6 +1203,18 @@ class GrilStabilizationAndQualityGatesTest(unittest.TestCase):
             ).read_text()
             self.assertIn("max_xcorr_lag_s 0.5", stab_batch_conf)
             self.assertIn("use_imu_angular_in_acc_cost true", stab_batch_conf)
+            self.assertIn("normalize_butterworth_gain true", stab_batch_conf)
+            self.assertIn("world_frame_gravity_in_acc_cost true", stab_batch_conf)
+            self.assertIn("ground_plane_imu_to_ground true", stab_batch_conf)
+            self.assertIn("acc_bias_bound_m_s2 0.15", stab_batch_conf)
+
+            golden_batch_conf = write_native_config(
+                config_path, root / "golden_batch_check.conf"
+            ).read_text()
+            self.assertNotIn("normalize_butterworth_gain", golden_batch_conf)
+            self.assertNotIn("world_frame_gravity_in_acc_cost", golden_batch_conf)
+            self.assertNotIn("ground_plane_imu_to_ground", golden_batch_conf)
+            self.assertNotIn("acc_bias_bound_m_s2", golden_batch_conf)
 
     def test_quality_gates_distinguish_failed_degraded_and_accepted(self) -> None:
         thresholds = QualityGateThresholds(
@@ -1205,8 +1260,10 @@ class GrilStabilizationAndQualityGatesTest(unittest.TestCase):
 
             run1 = _write_synthetic_gril_run(root / "run1")
             run2 = _write_synthetic_gril_run(root / "run2")
-            win2 = _write_synthetic_gril_run(root / "win2", trans_li=(0.01, 1.99, 0.5))
-            holdout = _write_synthetic_gril_run(root / "holdout")
+            win2 = _write_synthetic_gril_run(
+                root / "win2", trans_li=(0.01, 1.99, 0.5), t_offset_s=100.0
+            )
+            holdout = _write_synthetic_gril_run(root / "holdout", t_offset_s=200.0)
             accepted_report = evaluate_run_quality_gates(
                 run1,
                 repeat_run_dirs=[run2],
@@ -1219,6 +1276,155 @@ class GrilStabilizationAndQualityGatesTest(unittest.TestCase):
             self.assertTrue(accepted_report["release_ready"])
             self.assertTrue(
                 accepted_report["holdout"]["lever_arm_improved_holdout_acc"]
+            )
+
+    def test_quality_gates_subtract_hard_clock_offset_for_time_and_holdout(
+        self,
+    ) -> None:
+        thresholds = QualityGateThresholds(
+            min_lidar_states=150, min_accum_duration_s=50.0
+        )
+        hard_offset_s = 725846417.268
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run1 = _write_synthetic_gril_run(
+                root / "run1",
+                hard_clock_offset_s=hard_offset_s,
+                configured_time_lag_s=0.03,
+            )
+            run2 = _write_synthetic_gril_run(
+                root / "run2",
+                hard_clock_offset_s=hard_offset_s,
+                configured_time_lag_s=0.03,
+            )
+            win2 = _write_synthetic_gril_run(
+                root / "win2",
+                hard_clock_offset_s=hard_offset_s,
+                configured_time_lag_s=0.03,
+                t_offset_s=100.0,
+                trans_li=(0.01, 1.99, 0.5),
+            )
+            holdout = _write_synthetic_gril_run(
+                root / "holdout",
+                hard_clock_offset_s=hard_offset_s,
+                configured_time_lag_s=0.01,
+                t_offset_s=200.0,
+            )
+            report = evaluate_run_quality_gates(
+                run1,
+                repeat_run_dirs=[run2],
+                window_run_dirs=[win2],
+                holdout_batch_trace=holdout / "GRIL_batch_trace_v1.txt",
+                thresholds=thresholds,
+            )
+            self.assertEqual(report["state"], "converged_and_verified")
+            self.assertEqual(report["verdict"], "accepted")
+            time_obs = report["pillars"]["parameter_observability"]["time_offset"]
+            self.assertEqual(time_obs["status"], "observable")
+            self.assertAlmostEqual(time_obs["hard_clock_offset_s"], hard_offset_s)
+            self.assertAlmostEqual(time_obs["configured_time_lag_s"], 0.03)
+            self.assertAlmostEqual(time_obs["residual_time_offset_s"], -0.02, places=5)
+            self.assertTrue(report["holdout"]["passed"])
+            self.assertTrue(report["holdout"]["lever_arm_improved_holdout_acc"])
+
+    def test_quality_gates_reject_leakage_bias_saturation_and_missing_clock(
+        self,
+    ) -> None:
+        thresholds = QualityGateThresholds(
+            min_lidar_states=150, min_accum_duration_s=50.0
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run1 = _write_synthetic_gril_run(root / "run1")
+            leaked = evaluate_run_quality_gates(
+                run1,
+                repeat_run_dirs=[run1],
+                window_run_dirs=[run1],
+                holdout_batch_trace=run1 / "GRIL_batch_trace_v1.txt",
+                thresholds=thresholds,
+            )
+            self.assertEqual(leaked["verdict"], "rejected")
+            self.assertFalse(leaked["release_ready"])
+            self.assertIn(
+                "repeatability.duplicate_or_self_run", leaked["hard_failures"]
+            )
+            self.assertIn(
+                "multi_window.duplicate_or_self_window", leaked["hard_failures"]
+            )
+            self.assertIn("holdout.self_trace_leakage", leaked["hard_failures"])
+
+            overlap_win = _write_synthetic_gril_run(
+                root / "overlap_win", t_offset_s=10.0, trans_li=(0.01, 1.99, 0.5)
+            )
+            overlap_holdout = _write_synthetic_gril_run(
+                root / "overlap_holdout", t_offset_s=20.0
+            )
+            overlapped = evaluate_run_quality_gates(
+                run1,
+                repeat_run_dirs=[_write_synthetic_gril_run(root / "rep2")],
+                window_run_dirs=[overlap_win],
+                holdout_batch_trace=overlap_holdout / "GRIL_batch_trace_v1.txt",
+                thresholds=thresholds,
+            )
+            self.assertEqual(overlapped["verdict"], "rejected")
+            self.assertIn(
+                "multi_window.overlapping_windows", overlapped["hard_failures"]
+            )
+            self.assertIn("holdout.overlapping_time_range", overlapped["hard_failures"])
+
+            saturated = _write_synthetic_gril_run(
+                root / "saturated",
+                acc_bias_m_s2=(0.0099, 0.0, -0.0098),
+                acc_bias_bound_m_s2=0.01,
+            )
+            sat_report = evaluate_run_quality_gates(
+                saturated,
+                repeat_run_dirs=[_write_synthetic_gril_run(root / "sat_rep")],
+                window_run_dirs=[
+                    _write_synthetic_gril_run(root / "sat_win", t_offset_s=100.0)
+                ],
+                holdout_batch_trace=_write_synthetic_gril_run(
+                    root / "sat_ho", t_offset_s=200.0
+                )
+                / "GRIL_batch_trace_v1.txt",
+                thresholds=thresholds,
+            )
+            self.assertEqual(sat_report["state"], "degraded_unobservable")
+            self.assertEqual(sat_report["verdict"], "review_only")
+            self.assertIn(
+                "parameter_observability.acc_bias_boundary_hit_xz",
+                sat_report["unobservable_or_missing_gates"],
+            )
+
+            missing_clock = _write_synthetic_gril_run(
+                root / "missing_clock",
+                hard_clock_offset_s=725846417.268,
+                omit_trace_timediff=True,
+            )
+            missing_report = evaluate_run_quality_gates(
+                missing_clock, thresholds=thresholds
+            )
+            self.assertEqual(missing_report["verdict"], "rejected")
+            self.assertIn(
+                "parameter_observability.missing_clock_offset_metadata",
+                missing_report["hard_failures"],
+            )
+
+            short_ho = _write_synthetic_gril_run(
+                root / "short_ho", t_offset_s=200.0, imu_trim_tail_samples=120
+            )
+            short_ho_report = evaluate_run_quality_gates(
+                run1,
+                repeat_run_dirs=[_write_synthetic_gril_run(root / "rep3")],
+                window_run_dirs=[
+                    _write_synthetic_gril_run(root / "win3", t_offset_s=100.0)
+                ],
+                holdout_batch_trace=short_ho / "GRIL_batch_trace_v1.txt",
+                thresholds=thresholds,
+            )
+            self.assertEqual(short_ho_report["verdict"], "rejected")
+            self.assertIn(
+                "holdout.invalid_time_support", short_ho_report["hard_failures"]
             )
 
 

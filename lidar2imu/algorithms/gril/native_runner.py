@@ -38,6 +38,10 @@ _NATIVE_OPTIONAL_KEYS = (
     "use_imu_angular_in_acc_cost",
     "skip_secondary_acc_norm",
     "tail_trim_states",
+    "normalize_butterworth_gain",
+    "world_frame_gravity_in_acc_cost",
+    "ground_plane_imu_to_ground",
+    "acc_bias_bound_m_s2",
 )
 
 

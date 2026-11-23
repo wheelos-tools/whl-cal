@@ -384,5 +384,147 @@ see [design doc](../../docs/dual_lidar_imu_joint_calibration_design.md)):
     BA on `<= 14 km/h` logs; focus exclusively on (1) capture excitation upgrade
     (`20–25 km/h` braking/accel `>= 1.5 m/s²` + symmetric figure-8s) and/or
     (2) physical CAD/laser-tape `(t_x, t_y, t_z)` priors.
+- **Forward-left IMU mounting & GNSS `ant2outposoffset` (rear-axle pose output) audit (2026-11-23):**
+  - Source audit on Zhongce shards `4–10` proved two critical provenance facts:
+    1. `/apollo/sensor/gnss/corrected_imu` angular velocity and specific force
+       remain strictly at the **physical IMU origin** (high-turn `|wz| > 0.15 rad/s`
+       difference vs `/apollo/sensor/gnss/imu` has std `0.055–0.076 m/s²`,
+       containing no lever-arm centrifugal term).
+    2. `/apollo/sensor/gnss/odometry` and `/apollo/localization/pose` have
+       position and velocity shifted to the rear-axle target via GNSS
+       `ant2outposoffset`: direct velocity & trajectory regression against
+       `Joint v2` yields **`p_IMU - p_outpos = (-0.689, +2.809) m`** (`2.89 m`,
+       i.e. IMU mounted `0.69 m` left and `2.81 m` ahead of the INS output point).
+  - **Impact on calibration vs downstream & validation:**
+    - `GRIL`, `Joint v2`, and `evaluate-dual-diagnostics` are **completely
+      immune** to `ant2outposoffset` because they consume only `corrected_imu`
+      `(w, f)` and LiDAR scans; calibrated `T_I_A / T_I_B` are strictly relative
+      to the **physical IMU origin**, not the rear axle.
+    - **Downstream `/tf_static` hazard (`~2.9 m` offset):** the raw Zhongce
+      `/tf_static` sets `localization -> imu = (0, 0, 0)`, which erroneously
+      equates rear-axle `localization` with the forward-left IMU origin. Always
+      populate `localization(outpos) -> imu` with `p_IMU_in_outpos` (or compose
+      `T_outpos_L = T_outpos_I @ T_I_L`) before projecting clouds into world.
+    - **Submap/trajectory validation fix:** `evaluate_trajectories.py` now
+      computes joint `SE(2) + rigid-body lever-arm` alignment (fixing Zhongce
+      shards `9–10` apparent `2.63 m` ATE down to `0.107 m` and flagging
+      `ant2outposoffset_detected: true`), and `build_imu_submap.py` supports
+      `--imu-in-pose-xyz` / `--imu-in-pose-yaml` / `--auto-compensate-pose-offset`
+      plus `pose_origin_audit`.
+
+  ## Hongqi 2026-11-20 `raw_imu` + Hesai-40 FlatBuffer audit & GRIL batch defects
+
+  **Decision: `rejected` for deployment (`research / diagnostic review` only).**
+  Earlier stabilized runs used `/apollo/sensor/gnss/corrected_imu`; the Hongqi
+  capture (`5,007` scans / `500.7 s`, two front loops + two rear loops) uses
+  `raw_imu` (`/apollo/sensor/gnss/imu`, `50,072` samples at `100 Hz`) and
+  `::apollo::drivers::flat::PointCloud` (`hesai_main_front`, `72,000` pts/scan).
+  Evidence is archived in
+  [diagnosis](../../outputs/gril/hongqi_20261120/review_20261122/diagnosis.md) and
+  [window root-cause conclusion](../../outputs/gril/hongqi_20261120/review_windows_20261122/conclusion.md).
+
+  - **`raw_imu` scaling & clock provenance:** raw `/apollo/sensor/gnss/imu`
+    stored unscaled counts (`|a| ≈ 0.00192`); canonical arrays pre-multiplied by
+    candidate CPT 100 Hz scales (`5092.958179` gyro, `5101.260011` accel, yielding
+    smoothed `wL_z / wI_z ≈ 0.98–1.01`), though exact hardware profile and device
+    scale remain unverified from sensor config. LiDAR uses `measurement_time`
+    (scan end) + per-point `timestamp` (scan start), IMU uses `measurement_time`
+    (sensor time), and `header.timestamp_sec` is host publish time, giving one
+    fixed cross-epoch offset `H = 725846417.2679907 s`.
+  - **Capture & segmentation findings (not a dropped-scan bug):**
+    1. All runs pushed `99.6%–99.9%` of their scans into batch calibration; the
+       original `0–200 / 200–350 / 350–500 s` failure (`2.851° / 0.372 m` spread)
+       was **not** caused by dropping scans.
+    2. **Do not split mid-motion with cold frontend restarts or overlap subsets:**
+       splitting at `t = 350 s` (`v = 5.39 m/s`) restarted `ikd-Tree` + `AHRS`
+       from zero, creating a `352–353 s` startup spike (`|a_L| = 5.12 m/s²` vs
+       `0.46 m/s²` continuous) that drove `31.4%` of holdout squared residual and
+       shifted window `C` yaw by `1.163°` (`0.70°` continuous-vs-restarted shift).
+       Overlapping subsets (`0–200`, `0–350`, `0–500 s`) must not be cited as
+       independent multi-window agreement, nor `350–500 s` as a `full_0_500s`
+       holdout.
+    3. **Front-2-loops vs rear-2-loops excitation & missing static/3D cues:**
+       negative yaw turns cluster in `55–278 s`, while `>280 s` has only positive
+       turns (`350–500 s`: `45 s` pos / `0 s` neg). Vehicle moves by `0.4–1.4 s`
+       (`0.56 m/s`), blocking initial static gyro-bias subtraction; planar
+       motion (`omega_z = 0.124` vs `0.013/0.015 rad/s` x/y) leaves `T_LI.z`
+       coupled `-1 m/m` to the unmeasured `imu_sensor_height = 0.70 m` prior.
+    4. **Bidirectional continuous-frontend splits still drift `0.241 m`:** on
+       identical `full_0_500s` continuous states, bidirectional halves `2–265 s`
+       vs `265–500 s` agree in yaw (`89.58° vs 89.63°`) and `T_LI.x` (`0.7 mm`),
+       yet `T_LI.y` shifts `1.3137 -> 1.0725 m` (`0.241 m`) and low-speed splits
+       `0–169 / 170–286 / 287–500 s` drift `1.394 -> 1.152 -> 1.054 m`.
+  - **Root-cause GRIL batch, ingress, and gate defects isolated on Hongqi:**
+    1. **Butterworth 4-decimal DC gain inflation (`Gril_Calib.h:343-346`, `Gril_Calib.cpp:810-812`):**
+       hardcoded `sum(b) = 0.0049, sum(a) = 0.0048` yields `1.0421` (+4.21%) DC
+       gain per `zero_phase_filt` pass (`1.0860` / +8.60% after two passes on
+       `Lidar.linear_acc` and `IMU.ang_acc`). Enabling `skip_secondary_acc_norm: true`
+       leaves `IMU_meas` gravity inflated from `9.8089` to `10.2181 m/s²`
+       (`+0.413 m/s²` phantom vertical acceleration).
+    2. **Body-frame gravity added to world-frame acceleration (`Gril_Calib.h:290-292`, `FullFrontend.cpp:490`):**
+       `R_GL = FromTwoVectors(e3, normal_lidar)` is in current body frame `L_k`,
+       not world frame `L_0`, so `R_GL * STD_GRAV` lacks `R_LL0 *`. With
+       `--odom-ground-mode disabled`, world-frame odom tilt drift (`0.7°–1.06°`)
+       injects heading-dependent horizontal error; multiplying `R_GL * STD_GRAV`
+       by `R_LL0` reduces `2–265 s` vs `265–500 s` horizontal spread from `0.146 m`
+       to `0.073 m` (`1.7 cm` X).
+    3. **Ground-plane rotation order & transpose (`Gril_Calib.h:221`):**
+       `FusionAhrs` `R_GI` maps `I -> G` (`corr(R_GI^T e3, a_norm) = +0.80/+0.60`),
+       so `R_IL^T * R_GI^T * R_GL * e3` applies `R_GI^T` before `R_IL^T` (wrong by
+       `~90°` mount yaw) and inverted; proper composition is `R_GI * R_IL^T * R_GL * e3`.
+    4. **Hard `±0.01 m/s²` `bias_aL` clamp (`Gril_Calib.cpp:568-569`):** real
+       equivalent forward residual is `-0.04..-0.09 m/s²`, saturating `bias_aL` on
+       all windows and forcing `pitch` and `T_LI.y` drift; replacing biased IIR
+       filtering + fixing gravity/ground frames in Python ablation cuts `A/B/C`
+       horizontal spread `0.369 -> 0.078 m`.
+    5. **Ingress & quality-gate hardening needed:** `tools/gril_record_core_reader/record_ingress.cc:185-205`
+       rejects `::apollo::drivers::flat::PointCloud` (requires protobuf desc), and
+       `lidar2imu/evaluation/quality_gates.py` must check `bias_aL`/`bias_g`
+       saturation, separate `H` vs `C` in `timediff_imu_wrt_lidar`, guard `np.interp`
+       support, and block reuse of the same run/window as independent `repeat`/`holdout`.
+- **Current accuracy & root-cause split (2026-11-23):**
+    - Absolute truth accuracy remains **unknown** (no surveyed extrinsic,
+      unmeasured `imu_sensor_height = 0.70 m` prior, unverified hardware scale
+      sheet; user confirmed canonical `dataset/imu.npz` is already multiplied by
+      the candidate scales).
+    - **Data/input constraints:** planar motion couples `T_LI.z` `-1 m/m` to
+      `imu_sensor_height`; no initial static segment (`0.4–1.4 s` moving);
+      front-2-loops vs rear-2-loops turn asymmetry; `/apollo/sensor/gnss/odometry`
+      and `corrected_imu` are frozen/zero (`ins_status: 1`).
+    - **Algorithmic bottlenecks:** the 4 opt-in batch fixes (`normalize_butterworth_gain`,
+      `world_frame_gravity_in_acc_cost`, `ground_plane_imu_to_ground`,
+      `acc_bias_bound_m_s2`) reduce continuous `A/B/C` spread (`1.624° / 0.369 m ->
+      0.876° / 0.214 m` at `ba=0.01`, `1.127° / 0.212 m` at `ba=0.06` with best
+      cross-half holdout `0.2581 / 0.2754 m/s²`), leaving `~0.5°–1.0°` rotation and
+      `~15–20 cm` longitudinal `T_LI.y` internal spread from 30 Hz LiDAR-only EKF
+      velocity differentiation lag, sustained-turn `FusionAhrs` centrifugal tilt
+      leakage, and `--odom-ground-mode disabled` world tilt drift.
+- **P0/P1/P2 roadmap & P0 execution status (2026-11-23):**
+    - **P0 (code & capture audit — completed on repo side):**
+      1. Added FlatBuffer `::apollo::drivers::flat::PointCloud` (`modules/common_msgs/sensor_msgs/pointcloud.fbs`
+         wire schema) decoding to `tools/gril_record_core_reader/record_ingress.cc`
+         and verified `compare_datasets` (`verdict: equivalent`, `0.0` max error)
+         on Hongqi shards `0/4/8` (`600/600/207` scans) plus Weilan `0827`
+         protobuf regression (`1,375` scans, `35,239,034` pts, `4` static TFs).
+      2. Added the 4 opt-in batch fixes (`native_runner.py` / `gril_native`),
+         anti-leakage/overlap/clock/bias-saturation checks (`quality_gates.py`),
+         23/23 C++ CTest + 68/68 Python unittest coverage, and ran reproducible
+         `362–374 s` 180° turn pure-IMU strapdown thickness comparison
+         (`outputs/gril/hongqi_20261120/review_p0_20261123/turn_submap_ablation.yaml`):
+         `fixed_ba001_H1` (unseen `2–265 s`) improves `med/p90/p95` to
+         `0.0486 / 0.0821 / 0.0947 m` and `fixed_ba006_full` achieves
+         `0.0498 / 0.0787 / 0.0933 m`, outperforming both `baseline_full`
+         (`0.0573 / 0.0888 / 0.0978 m`) and `zero_lever_90z` (`0.0531 / 0.0944 / 0.1064 m`).
+      3. **Remaining hardware P0 checks (external to repo):** verify hardware IMU
+         model/official scale sheet, Hesai-40 ring channel order, and measured
+         IMU-to-LiDAR height offset before any deployment claim.
+    - **P1 (next capture for operational acceptance):** record `60 s` initial
+      static + symmetric figure-8 bidirectional turns + `>= 1.5 m/s²`
+      accel/braking + 2 independent bidirectional repeats (+ controlled pitch/roll
+      if `Z` is required) + `60 s` end static; gate with `evaluate-quality-gates`
+      targeting `<0.2°` / `<5 cm` spread.
+    - **P2 (if P1 still shows `>10 cm` `T_LI.y` drift):** evaluate tightly-coupled
+      IMU preintegration / velocity-level optimization rather than further tuning
+      twice-filtered EKF velocity differentiation.
 
 

@@ -2,7 +2,10 @@
 
 This Bzlmod workspace builds `record_ingress`, the C++ Apollo `.record`
 adapter for GRIL. It uses `wheelos_core::RecordReader` and the record-provided
-protobuf descriptors to decode LiDAR, IMU, and static TF data. The output is a
+protobuf descriptors to decode protobuf LiDAR, IMU, and static TF data, and
+includes bounds-checked FlatBuffer decoding for
+`::apollo::drivers::flat::PointCloud` (`modules/common_msgs/sensor_msgs/pointcloud.fbs`
+wire layout). The output is a
 versioned canonical interchange file; the Python adapter loads it into the
 existing canonical model and writes the established NPZ/YAML artifacts. GRIL
 preprocessing and optimization are not part of this adapter.

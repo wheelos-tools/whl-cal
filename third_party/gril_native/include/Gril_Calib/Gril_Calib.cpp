@@ -420,6 +420,20 @@ void Gril_Calib::acc_interpolate() {
 void Gril_Calib::Butter_filt(const std::deque<CalibState> &signal_in,
                              std::deque<CalibState> &signal_out) {
   Butterworth butter;
+  if (normalize_butterworth_gain) {
+    double sum_b = 0.0;
+    double sum_a = 0.0;
+    for (int j = 0; j < butter.Coeff_size; j++) {
+      sum_b += butter.Coeff_b[j];
+      sum_a += butter.Coeff_a[j];
+    }
+    if (std::abs(sum_b) > 1e-12) {
+      const double scale = sum_a / sum_b;
+      for (int j = 0; j < butter.Coeff_size; j++) {
+        butter.Coeff_b[j] *= scale;
+      }
+    }
+  }
   butter.extend_num = 10 * (butter.Coeff_size - 1);
   auto front = signal_in.begin() + butter.extend_num;
   auto back = signal_in.end() - 1 - butter.extend_num;
@@ -539,7 +553,8 @@ void Gril_Calib::solve_Rot_Trans_calib(double &timediff_imu_wrt_lidar,
     problem.AddResidualBlock(
         Ground_Plane_Cost_IL::Create(
             Lidar_wrt_ground_group[i], IMU_wrt_ground_group[i],
-            distance_Lidar_wrt_ground_group[i], imu_height),
+            distance_Lidar_wrt_ground_group[i], imu_height,
+            ground_plane_imu_to_ground),
         ground_loss, R_IL_quat, Trans_IL);
     problem.AddResidualBlock(
         Angular_Vel_IL_Cost::Create(IMU_state_group[i].ang_vel,
@@ -552,7 +567,8 @@ void Gril_Calib::solve_Rot_Trans_calib(double &timediff_imu_wrt_lidar,
                                  Lidar_wrt_ground_group[i],
                                  use_imu_angular_in_acc_cost,
                                  IMU_state_group[i].ang_vel,
-                                 IMU_state_group[i].ang_acc),
+                                 IMU_state_group[i].ang_acc,
+                                 world_frame_gravity_in_acc_cost),
                              acceleration_loss, R_IL_quat, bias_aL, Trans_IL);
 
     Jacobian.block<3, 3>(3 * i, 0) = -Lidar_state_group[i].rot_end;
@@ -564,9 +580,11 @@ void Gril_Calib::solve_Rot_Trans_calib(double &timediff_imu_wrt_lidar,
     Jacobian.block<3, 3>(3 * i, 6) = translation_jacobian;
   }
 
+  if (!(acc_bias_bound_m_s2 > 0.0) || !std::isfinite(acc_bias_bound_m_s2))
+    throw std::invalid_argument("acc_bias_bound_m_s2 must be positive");
   for (int index = 0; index < 3; index++) {
-    problem.SetParameterUpperBound(bias_aL, index, 0.01);
-    problem.SetParameterLowerBound(bias_aL, index, -0.01);
+    problem.SetParameterUpperBound(bias_aL, index, acc_bias_bound_m_s2);
+    problem.SetParameterLowerBound(bias_aL, index, -acc_bias_bound_m_s2);
     problem.SetParameterUpperBound(bias_g, index, 0.01);
     problem.SetParameterLowerBound(bias_g, index, -0.01);
   }

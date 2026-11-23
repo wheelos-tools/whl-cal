@@ -275,6 +275,14 @@ if(BUILD_TESTING)
       NAME gril_native_rotation_seed
       COMMAND gril_native_trace_test rotation_seed
     )
+    add_test(
+      NAME gril_native_butterworth_unity_gain
+      COMMAND gril_native_trace_test butterworth_unity_gain
+    )
+    add_test(
+      NAME gril_native_gravity_and_ground_frames
+      COMMAND gril_native_trace_test gravity_and_ground_frames
+    )
     add_executable(
       gril_native_full_test tests/full_frontend_test.cpp
     )

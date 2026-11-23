@@ -83,9 +83,10 @@ from LI-Init.
 
 ## Canonical input
 
-Apollo records use the Bzlmod `wheelos_core` C++ ingress. ROS1 bag inputs use
-the offline `rosbags` adapter. Both are converted without starting a ROS
-runtime. Build the record ingress first:
+Apollo records use the Bzlmod `wheelos_core` C++ ingress (supporting both
+protobuf `PointCloud` and FlatBuffer `::apollo::drivers::flat::PointCloud`). ROS1
+bag inputs use the offline `rosbags` adapter. Both are converted without
+starting a ROS runtime. Build the record ingress first:
 
 ```bash
 cd tools/gril_record_core_reader
@@ -244,6 +245,11 @@ departure from the frozen identity rotation initialization. The generated
 batch config records all four LiDAR-to-IMU quaternion components; malformed,
 non-finite, or non-unit seeds are rejected. The field also applies to the
 batch subprocess of `run-native`, without changing the LiDAR-only frontend.
+Similarly, optional stabilization and frame-fix keys under `calibration:`
+(`max_xcorr_lag_s`, `max_time_lag_2_s`, `rot_init_max_iters`,
+`use_imu_angular_in_acc_cost`, `skip_secondary_acc_norm`, `tail_trim_states`,
+`normalize_butterworth_gain`, `world_frame_gravity_in_acc_cost`,
+`ground_plane_imu_to_ground`, `acc_bias_bound_m_s2`) are opt-in only.
 Default configurations emit the original native config unchanged. Compare
 seeded and unseeded solves on the identical frozen batch trace before
 interpreting a result; a seed-supported yaw in planar motion is not evidence
