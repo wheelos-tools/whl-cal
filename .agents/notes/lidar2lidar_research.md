@@ -415,6 +415,44 @@ benchmark outcomes. Method families may target different inputs and tasks;
 verify runnable implementations, provenance, and data compatibility before
 claiming a fair comparison.
 
+## 2026-11-23: Joint v2 L2L-only check on the 2026-05-31 capture
+
+This was an **L2L-only isolation**, not a full Joint v2 run: no GRIL/L2I solve,
+L2I-derived screening, gravity gate, or anisotropic joint graph was used. The
+Apollo FlatBuffer `PointXYZIT` path preserved raw intensity. On
+`left_front -> right_front` and `right_back -> right_front`, 60 ms synchronization
+produced 311 and 306 pairs; each edge selected 4 of 5 time bins after static
+consistency and shared-geometry screening. Joint v1 GICP ran on those windows;
+its transform medoid seeded `register_semantic_l2l` with default configs.
+GICP and semantic outputs were scored on identical windows using 0.15 m
+downsampling and common 0.10/0.25 m correspondence thresholds.
+
+| Edge | GICP window spread P95 (m / deg) | Semantic spread P95 (m / deg) | Median fitness / RMSE at 0.25 m, GICP -> semantic |
+| --- | ---: | ---: | ---: |
+| `left_front -> right_front` | `3.895 / 15.37` | `8.208 / 43.48` | `0.166 / 0.144 -> 0.066 / 0.161` |
+| `right_back -> right_front` | `5.689 / 21.26` | `12.102 / 78.62` | `0.090 / 0.152 -> 0.045 / 0.151` |
+
+All 8 semantic windows had weak support: matches were dominated by ground;
+median facade and intensity matches were zero. Two right-back windows were
+corridor-degenerate. A seed perturbation of 2 deg yaw plus
+`[0.10, -0.05, 0.03] m` changed the semantic solutions by P95
+`7.00 m / 30.14 deg` and `4.08 m / 70.88 deg`. BEV overlays showed no
+improvement in shared geometry.
+
+**Decision for this capture: reject the L2L-only semantic upgrade.** The
+observed failure is consistent with insufficient shared, non-degenerate
+geometry and unstable GICP initialization, not a lack of raw points. This
+does not invalidate the separate Zhongce `Joint v2` result: that experiment
+used another dataset and included L2I-derived initialization/screening and the
+joint graph. For this capture, first collect/select windows with shared
+nonparallel structure and stronger facade/pole/reflectivity support; do not
+try to solve the weak geometry by optimizer tuning alone.
+
+Detailed metrics and overlays are local run artifacts under
+`outputs/lidar2lidar/2026-11-current-joint-v2-l2l-validation/`; the longer
+per-run summary is in the gitignored
+`data/2026-05-31-lidar2lidar_scan2scan_summary.md`.
+
 ## Iteration ladder
 
 ### Round N — Frozen baseline
