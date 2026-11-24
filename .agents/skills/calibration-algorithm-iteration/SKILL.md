@@ -84,6 +84,21 @@ For `lidar2lidar`, prefer this order:
 
 If repeated reruns jump between distinct solution families, stop calling it convergence. Treat it as an observability or pairing problem and change the earlier stages first.
 
+### Data-expansion experiment
+
+Do not remain in diagnosis indefinitely or require a perfect estimator before
+testing more qualified data. Freeze the current estimator and compare A
+(existing windows), B (additional reliable but geometrically redundant
+windows), and C (an equal number of reliable, directionally complementary
+windows). Judge complementarity over the complete set, not a single-window
+score; control motion, timing, preprocessing, and initialization.
+
+Keep theoretical invariants as parallel controls: arbitrary unobservable pose
+representatives must not suppress valid complementary constraints, and sampling
+or background changes must not fabricate physical landmark information.
+Distinguish a proven structural counterexample from a demonstrated cause in
+the current dataset. Do not promote C on training residuals alone.
+
 ## Required output
 
 When proposing or reviewing an iteration, include:

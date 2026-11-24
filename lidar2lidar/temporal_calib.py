@@ -37,8 +37,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from lidar2lidar.auto_calib import build_candidate_pairs  # noqa: E402
 from lidar2lidar.auto_calib import (
-    build_candidate_pairs,  # noqa: E402
     build_extraction_output,
     calibrate_selected_edges,
     choose_target_topic,
@@ -46,18 +46,16 @@ from lidar2lidar.auto_calib import (
     select_edges_for_target,
     summarize_values,
 )
+from lidar2lidar.extrinsic_io import build_extrinsics_payload  # noqa: E402
 from lidar2lidar.extrinsic_io import (
-    build_extrinsics_payload,  # noqa: E402
     extrinsics_filename,
     save_extrinsics_yaml,
     stamp_ns_to_dict,
 )
-from lidar2lidar.lidar2lidar import (
-    calibrate_lidar_extrinsic,  # noqa: E402
-    preprocess_point_cloud,
-)
+from lidar2lidar.lidar2lidar import calibrate_lidar_extrinsic  # noqa: E402
+from lidar2lidar.lidar2lidar import preprocess_point_cloud  # noqa: E402
+from lidar2lidar.record_utils import analyze_pointcloud_roots  # noqa: E402
 from lidar2lidar.record_utils import (
-    analyze_pointcloud_roots,  # noqa: E402
     build_transform_graph,
     collect_pointcloud_metadata,
     compute_information_metrics,
@@ -1850,8 +1848,12 @@ def main() -> None:
         "--methods",
         nargs="+",
         type=int,
+        choices=[1, 2, 3, 4],
         default=[2],
-        help="Pairwise ICP methods to compare (1: point-to-plane, 2: GICP, 3: point-to-point).",
+        help=(
+            "Pairwise methods to compare (1: point-to-plane, 2: GICP, "
+            "3: point-to-point, 4: semantic geometry; no intensity/ring)."
+        ),
     )
     parser.add_argument(
         "--voxel-size",

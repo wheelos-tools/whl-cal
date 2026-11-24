@@ -1527,10 +1527,12 @@ def main() -> None:
         "--methods",
         nargs="+",
         type=int,
+        choices=[1, 2, 3, 4],
         default=[2, 3],
         help=(
             "Calibration methods to compare "
-            "(1: point-to-plane, 2: GICP, 3: point-to-point, 4: semantic-4ch)."
+            "(1: point-to-plane, 2: GICP, 3: point-to-point, "
+            "4: semantic geometry; no intensity/ring)."
         ),
     )
     parser.add_argument(

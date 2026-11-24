@@ -19,3 +19,9 @@ For concise, current engineering guidance, use [`../knowledge/README.md`](../kno
 
 Paths under the gitignored `outputs/` directory refer to local run artifacts
 and may not exist in a clean checkout.
+
+## Current L2L experiment handoff
+
+- [2026-11-24 Zhongce baseline A and data-expansion plan](lidar2lidar/2026-11-24_zhongce_baseline.md):
+  refreshed three-static-window joint v2 research baseline, measured failure
+  modes, structural counterexamples, and pending A/B/C data experiments.

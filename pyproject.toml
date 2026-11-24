@@ -23,6 +23,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+diagnostics = [
+  "matplotlib"
+]
 camera = [
   "opencv-python",
   "pupil-apriltags"
@@ -55,6 +58,7 @@ all = [
   "click",
   "flatbuffers",
   "numpy",
+  "matplotlib",
   "opencv-python",
   "open3d",
   "protobuf==3.19.4",

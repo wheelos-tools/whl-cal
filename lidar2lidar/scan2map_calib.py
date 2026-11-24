@@ -63,7 +63,6 @@ from lidar2lidar.record_utils import (
     voxel_overlap_ratio,
 )
 
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
@@ -1466,8 +1465,12 @@ def main() -> None:
         "--methods",
         nargs="+",
         type=int,
+        choices=[1, 2, 3, 4],
         default=[2],
-        help="Registration methods to compare (1: point-to-plane, 2: GICP, 3: point-to-point).",
+        help=(
+            "Registration methods to compare (1: point-to-plane, 2: GICP, "
+            "3: point-to-point, 4: semantic geometry; no intensity/ring)."
+        ),
     )
     parser.add_argument(
         "--voxel-size",

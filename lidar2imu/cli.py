@@ -594,8 +594,11 @@ def _calibrate_dual_joint(args: argparse.Namespace) -> None:
         label_b=args.label_b,
         mode=args.mode,
         config=cfg,
+        save_l2l_feature_debug=args.save_l2l_feature_debug,
     )
     print(args.output_dir / "joint_calibration_result.yaml")
+    if args.save_l2l_feature_debug:
+        print(args.output_dir / "diagnostics" / "l2l_features" / "index.html")
 
 
 def _add_calibrate_dual_joint(subparsers) -> None:
@@ -622,6 +625,14 @@ def _add_calibrate_dual_joint(subparsers) -> None:
     parser.add_argument("--z-cm-prior-m", type=float)
     parser.add_argument("--max-static-windows", type=int, default=5)
     parser.add_argument("--max-turn-windows", type=int, default=4)
+    parser.add_argument(
+        "--save-l2l-feature-debug",
+        action="store_true",
+        help=(
+            "Export detected primitives, actual stage correspondences and "
+            "interactive/headless L2L galleries (requires v2/v3/all and matplotlib)"
+        ),
+    )
     parser.set_defaults(handler=_calibrate_dual_joint)
 
 

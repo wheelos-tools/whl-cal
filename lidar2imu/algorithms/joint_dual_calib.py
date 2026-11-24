@@ -23,15 +23,16 @@ upgraded LiDAR-to-LiDAR (L2L) constraints across three staged levels:
 - v1: Anisotropic SE(3)^2 factor-graph fusion of L2I info, multi-window GICP L2L,
       multi-heading gravity-ground alignment, and explicit z_cm nullspace prior.
 - v2: Upgrades L2L edges with 4-channel geometric primitives, range/incidence-
-      calibrated intensity, ego-occlusion-aware 3D shared FoV, and X-ICP info.
+      calibrated intensity, ego-occlusion-aware 3D shared FoV, and local info.
 - v3: Turn-window 100 Hz pure-IMU preintegrated cross-time multi-LiDAR plane BA
       refining common-mode lever-arm and continuous-time offsets (tau_A, tau_B).
 """
 
 from __future__ import annotations
 
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +56,13 @@ from lidar2imu.evaluation.quality_gates import (
     parse_detailed_gril_result,
 )
 from lidar2lidar.extrinsic_io import extrinsics_filename, save_extrinsics_yaml
+from lidar2lidar.lie import information_left_to_right, se3_log6, so3_right_jacobian
 from lidar2lidar.semantic_registration import (
     LidarFrameData,
     PrimitiveExtractionConfig,
     SemanticRegistrationConfig,
     VisibilityConfig,
+    extract_geometric_primitives,
     register_semantic_l2l,
 )
 
@@ -211,9 +214,8 @@ def _se3_from_rt(R_mat: np.ndarray, t_vec: np.ndarray) -> np.ndarray:
 
 
 def _se3_log6(T: np.ndarray) -> np.ndarray:
-    """Return 6-vector [rotvec, translation] for SE(3) residual."""
-    rv = Rot.from_matrix(_project_so3(T[:3, :3])).as_rotvec()
-    return np.concatenate([rv, T[:3, 3]], axis=0)
+    """Return SE(3) log coordinates [rotation, translation] in the right tangent."""
+    return se3_log6(T)
 
 
 def _tangent_basis_s2(unit_vec: np.ndarray) -> np.ndarray:
@@ -246,6 +248,8 @@ def _stack_static_frame_with_consistency(
     xyz_list: list[np.ndarray] = []
     int_list: list[np.ndarray] = []
     ring_list: list[np.ndarray] = []
+    scan_indices: list[np.ndarray] = []
+    point_indices: list[np.ndarray] = []
     early_pts: list[np.ndarray] = []
     late_pts: list[np.ndarray] = []
     has_int = True
@@ -264,6 +268,8 @@ def _stack_static_frame_with_consistency(
             continue
         pts_k = xyz[keep]
         xyz_list.append(pts_k)
+        scan_indices.append(np.full(len(pts_k), idx, dtype=np.int64))
+        point_indices.append(np.flatnonzero(keep))
         if idx < center_idx:
             early_pts.append(pts_k)
         elif idx > center_idx:
@@ -294,6 +300,8 @@ def _stack_static_frame_with_consistency(
             points=np.vstack(xyz_list),
             intensity=np.concatenate(int_list) if has_int and int_list else None,
             ring=np.concatenate(ring_list) if has_ring and ring_list else None,
+            scan_indices=np.concatenate(scan_indices),
+            point_indices=np.concatenate(point_indices),
         ),
         consistency,
     )
@@ -331,6 +339,8 @@ def _stack_motion_compensated_frame_with_consistency(
     xyz_list: list[np.ndarray] = []
     int_list: list[np.ndarray] = []
     ring_list: list[np.ndarray] = []
+    scan_indices: list[np.ndarray] = []
+    point_indices: list[np.ndarray] = []
     early_pts: list[np.ndarray] = []
     late_pts: list[np.ndarray] = []
     has_int = True
@@ -352,6 +362,8 @@ def _stack_motion_compensated_frame_with_consistency(
         dp_ci = R_c.T @ (p_i - p_c)
         pts_k = xyz[keep] @ dR_ci.T + dp_ci
         xyz_list.append(pts_k)
+        scan_indices.append(np.full(len(pts_k), idx, dtype=np.int64))
+        point_indices.append(np.flatnonzero(keep))
         if idx < center_idx:
             early_pts.append(pts_k)
         elif idx > center_idx:
@@ -382,6 +394,8 @@ def _stack_motion_compensated_frame_with_consistency(
             points=np.vstack(xyz_list),
             intensity=np.concatenate(int_list) if has_int and int_list else None,
             ring=np.concatenate(ring_list) if has_ring and ring_list else None,
+            scan_indices=np.concatenate(scan_indices),
+            point_indices=np.concatenate(point_indices),
         ),
         consistency,
     )
@@ -493,6 +507,7 @@ def screen_joint_calibration_windows(
     cfg: JointCalibrationConfig = JointCalibrationConfig(),
     *,
     include_turn_windows: bool = True,
+    feature_rejections: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Stage 1: Screen static L2L, multi-heading gravity, and turn-BA windows."""
     R_LI_a = _project_so3(np.asarray(result_a["rotation_LI_matrix"], dtype=np.float64))
@@ -530,6 +545,29 @@ def screen_joint_calibration_windows(
 
     static_windows: list[dict[str, Any]] = []
     static_screening_log: list[dict[str, Any]] = []
+
+    def retain_rejection(
+        reason: str,
+        frame_a: LidarFrameData | None = None,
+        frame_b: LidarFrameData | None = None,
+    ) -> None:
+        if feature_rejections is not None:
+            feature_rejections.append(
+                {
+                    "metadata": {
+                        "window_id": f"rejected_{len(feature_rejections) + 1:03d}",
+                        "rel_time_s": float(t_phys - t0_ref),
+                        "scan_index_a": int(ia),
+                        "scan_index_b": int(ib),
+                        "sync_dt_ms": sync_dt_ms,
+                        "accepted": False,
+                        "skip_reason": reason,
+                    },
+                    "frame_a": frame_a,
+                    "frame_b": frame_b,
+                }
+            )
+
     for t_cand in cand_times:
         ia = int(np.argmin(np.abs((access_a.scan_t_s + tau_a) - t_cand)))
         t_phys = float(access_a.scan_t_s[ia] + tau_a)
@@ -544,6 +582,7 @@ def screen_joint_calibration_windows(
                     "sync_dt_ms": sync_dt_ms,
                 }
             )
+            retain_rejection("sync_dt_exceeded")
             continue
 
         frame_a, cons_a = _stack_static_frame_with_consistency(
@@ -561,6 +600,7 @@ def screen_joint_calibration_windows(
                     "skip_reason": "insufficient_points",
                 }
             )
+            retain_rejection("insufficient_points", frame_a, frame_b)
             continue
         if temporal_consistency < cfg.min_static_temporal_consistency:
             static_screening_log.append(
@@ -571,6 +611,7 @@ def screen_joint_calibration_windows(
                     "temporal_static_consistency": float(temporal_consistency),
                 }
             )
+            retain_rejection("dynamic_traffic_contamination", frame_a, frame_b)
             continue
 
         pa_imu = frame_a.points @ R_LI_a.T + T_LI_a
@@ -603,6 +644,7 @@ def screen_joint_calibration_windows(
                     "shared_cells": int(shared_cells),
                 }
             )
+            retain_rejection("insufficient_shared_vertical_cells", frame_a, frame_b)
             continue
 
         static_windows.append(
@@ -657,6 +699,7 @@ def screen_joint_calibration_windows(
             ib = int(np.argmin(np.abs((access_b.scan_t_s + tau_b) - t_phys)))
             sync_dt_ms = float(((access_b.scan_t_s[ib] + tau_b) - t_phys) * 1e3)
             if abs(sync_dt_ms) > cfg.max_sync_dt_ms:
+                retain_rejection("low_speed_sync_dt_exceeded")
                 continue
             frame_a, cons_a = _stack_motion_compensated_frame_with_consistency(
                 access_a, batch_a, ia, tau_a, half_scans=2
@@ -666,6 +709,7 @@ def screen_joint_calibration_windows(
             )
             temporal_consistency = min(cons_a, cons_b)
             if len(frame_a.points) < 120 or len(frame_b.points) < 120:
+                retain_rejection("low_speed_insufficient_points", frame_a, frame_b)
                 continue
             if temporal_consistency < 0.58:
                 static_screening_log.append(
@@ -676,6 +720,7 @@ def screen_joint_calibration_windows(
                         "temporal_static_consistency": float(temporal_consistency),
                     }
                 )
+                retain_rejection("low_speed_dynamic_contamination", frame_a, frame_b)
                 continue
             pa_imu = frame_a.points @ R_LI_a.T + T_LI_a
             pb_imu = frame_b.points @ R_LI_b.T + T_LI_b
@@ -701,6 +746,9 @@ def screen_joint_calibration_windows(
             )
             shared_cells = len(va & vb)
             if shared_cells < max(cfg.min_static_shared_cells, 16):
+                retain_rejection(
+                    "low_speed_insufficient_shared_vertical_cells", frame_a, frame_b
+                )
                 continue
             existing_t.append(t_cand)
             static_windows.append(
@@ -1107,8 +1155,9 @@ def _evaluate_l2l_edges_gicp(
             ),
             dtype=np.float64,
         )
-        # Convert raw Open3D correspondence-count Hessian into physical Fisher info
-        # ([rx, ry, rz, tx, ty, tz] matches [rot, trans] ordering).
+        # Open3D's point-to-point proxy is in the left-target tangent; the joint
+        # edge residual Log(inv(T_edge) @ T_pred) uses the right-source tangent.
+        raw_info = information_left_to_right(raw_info, T_curr)
         sigma_eff = max(0.04, float(reg.inlier_rmse))
         # Normalize Open3D point-to-point correspondence Hessian onto realistic physical
         # multi-window Huber scale.
@@ -1123,6 +1172,8 @@ def _evaluate_l2l_edges_gicp(
                 "success": True,
                 "transformation": T_curr,
                 "info_matrix_6d": info_6d,
+                "information_tangent": "right_source",
+                "information_model": "scaled_point_to_point_proxy",
                 "fitness": float(reg.fitness),
                 "inlier_rmse_m": float(reg.inlier_rmse),
                 "condition_number_6d": cond,
@@ -1136,6 +1187,9 @@ def _evaluate_l2l_edges_semantic(
     screened: dict[str, Any],
     T_AB_seed: np.ndarray,
     cfg: JointCalibrationConfig,
+    *,
+    feature_traces: list[dict[str, Any]] | None = None,
+    failures: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """v2 L2L edges using 4-channel primitives, calibrated intensity, and 3D FoV."""
     ego_min = (
@@ -1172,6 +1226,7 @@ def _evaluate_l2l_edges_semantic(
     )
     edges: list[dict[str, Any]] = []
     for win in screened["static_windows"]:
+        trace = {} if feature_traces is not None else None
         res = register_semantic_l2l(
             win["frame_b"],
             win["frame_a"],
@@ -1179,8 +1234,29 @@ def _evaluate_l2l_edges_semantic(
             prim_cfg=PrimitiveExtractionConfig(),
             vis_cfg=vis_cfg,
             reg_cfg=SemanticRegistrationConfig(),
+            trace=trace,
         )
+        if feature_traces is not None:
+            feature_traces.append(
+                {
+                    "trace": trace,
+                    "result": res,
+                    "metadata": {
+                        k: v for k, v in win.items() if k not in {"frame_a", "frame_b"}
+                    },
+                }
+            )
         if not res.get("success"):
+            if failures is not None:
+                failures.append(
+                    {
+                        "window_id": win["window_id"],
+                        "rel_time_s": win["rel_time_s"],
+                        "method": "semantic_v2",
+                        "success": False,
+                        "reason": res["reason"],
+                    }
+                )
             continue
         # Check roll/pitch consistency against gravity-grounded L2I prior (T_AB_init):
         # if an L2L static window tilts roll/pitch > 1.2 deg relative to gravity,
@@ -1207,6 +1283,8 @@ def _evaluate_l2l_edges_semantic(
                 "success": True,
                 "transformation": res["transformation"],
                 "info_matrix_6d": res["info_matrix_6d"] * info_scale,
+                "information_tangent": res["information_tangent"],
+                "information_model": "weighted_residual_gauss_newton",
                 "gravity_tilt_delta_deg": float(tilt_err_deg),
                 "downweighted_by_gravity_gate": bool(tilt_err_deg > 1.2),
                 "downweighted_by_weak_support": bool(weak_support),
@@ -1216,9 +1294,14 @@ def _evaluate_l2l_edges_semantic(
                 "localizability": res["localizability"],
                 "directed_overlap": res["directed_overlap"],
                 "channel_matches": res["channel_matches"],
+                "channel_unique_targets": res.get("channel_unique_targets"),
                 "channel_rmse_m": res["channel_rmse_m"],
                 "condition_number_6d": res["localizability"]["condition_number_6d"],
-                "eigenvalues_6d": res["localizability"]["eigenvalues_6d"],
+                "registration_eigenvalues_6d": res["localizability"]["eigenvalues_6d"],
+                "eigenvalues_6d": [
+                    info_scale * value
+                    for value in res["localizability"]["eigenvalues_6d"]
+                ],
             }
         )
 
@@ -1259,6 +1342,9 @@ def _evaluate_l2l_edges_semantic(
                 if dt > 2.0 * dt_gate or dr > 2.0 * dr_gate:
                     cauchy_w = min(cauchy_w, 0.02)
                 edge["info_matrix_6d"] = edge["info_matrix_6d"] * cauchy_w
+                edge["eigenvalues_6d"] = [
+                    value * cauchy_w for value in edge["eigenvalues_6d"]
+                ]
                 edge["consensus_outlier"] = True
                 edge["consensus_weight"] = float(cauchy_w)
     return edges
@@ -1343,8 +1429,15 @@ def _solve_anisotropic_factor_graph(
     )
     T_IA_opt, T_IB_opt = _unpack(sol.x)
 
-    # Observability decomposition in Common-Mode vs Differential-Mode coordinates
-    J = sol.jac
+    # Convert additive solver parameters to left SE(3) tangents in the shared IMU
+    # frame. A common rigid rotation also rotates both lever arms; otherwise L2L
+    # spuriously appears to observe the rig's common-mode rotation.
+    J = sol.jac.copy()
+    for offset, transform in ((0, T_IA_opt), (6, T_IB_opt)):
+        left_jacobian = so3_right_jacobian(-sol.x[offset : offset + 3])
+        J[:, offset : offset + 3] = np.linalg.solve(
+            left_jacobian.T, J[:, offset : offset + 3].T
+        ).T - J[:, offset + 3 : offset + 6] @ _skew(transform[:3, 3])
     H_12 = J.T @ J
     s_half = math.sqrt(0.5)
     # Orthogonal 12x12 transform: [cm(6), diff(6)] = Q @ [xi_A(6), xi_B(6)]
@@ -1364,12 +1457,120 @@ def _solve_anisotropic_factor_graph(
         "tau_b_s": screened["tau_b_init"],
         "z_cm_prior_m": z_cm_prior,
         "cost": float(sol.cost),
+        "solver": {
+            "success": bool(sol.success),
+            "status": int(sol.status),
+            "message": str(sol.message),
+            "nfev": int(sol.nfev),
+        },
         "observability": {
+            "tangent": "left_imu_se3",
             "common_mode_6d_eigenvalues": [float(v) for v in eig_cm],
             "differential_mode_6d_eigenvalues": [float(v) for v in eig_diff],
             "common_mode_z_prior_anchored": True,
         },
     }
+
+
+def _evaluate_l2l_window_influence(
+    *,
+    screened: dict[str, Any],
+    l2l_edges: list[dict[str, Any]],
+    solution: dict[str, Any],
+    H_rot_a: np.ndarray,
+    H_trans_a: np.ndarray,
+    H_rot_b: np.ndarray,
+    H_trans_b: np.ndarray,
+    cfg: JointCalibrationConfig,
+    T_I_A_init: np.ndarray,
+    T_I_B_init: np.ndarray,
+) -> dict[str, Any]:
+    """Post-run deletion sensitivity with the original factors and priors fixed."""
+    window_ids = list(dict.fromkeys(edge["window_id"] for edge in l2l_edges))
+    undownweighted = [
+        edge["window_id"]
+        for edge in l2l_edges
+        if not any(
+            edge.get(flag, False)
+            for flag in (
+                "downweighted_by_gravity_gate",
+                "downweighted_by_weak_support",
+                "consensus_outlier",
+            )
+        )
+    ]
+    report: dict[str, Any] = {
+        "status": "review_only",
+        "scope": "fixed_factor_l2l_window_deletion",
+        "window_count": len(window_ids),
+        "nominal_solver": solution["solver"],
+        "undownweighted_window_ids": list(dict.fromkeys(undownweighted)),
+        "reasons": [],
+        "windows": [],
+        "max_change_from_nominal": None,
+        "notes": [
+            "Delete all L2L factors from one window; keep L2I, gravity, height "
+            "prior, remaining factors/weights and optimizer initialization fixed.",
+            "Does not rerun screening, registration or consensus; not a full "
+            "pipeline jackknife, calibrated covariance or absolute accuracy.",
+            "L2L cannot validate the shared IMU datum or prior-anchored height.",
+            "Distinct target indices are not independent physical objects.",
+            "Diagnostic only; does not change transforms, weights or verdict.",
+        ],
+    }
+    if len(set(undownweighted)) < 2:
+        report["reasons"].append("fewer_than_two_undownweighted_windows")
+    if not solution["solver"]["success"]:
+        report["status"] = "nominal_solver_failed"
+        report["reasons"].append("cannot_compare_to_unconverged_nominal")
+        return report
+    if len(window_ids) < 2:
+        report["status"] = "insufficient_windows"
+        report["reasons"].append("fewer_than_two_l2l_windows")
+        return report
+    for window_id in window_ids:
+        remaining = [edge for edge in l2l_edges if edge["window_id"] != window_id]
+        omitted_solution = _solve_anisotropic_factor_graph(
+            screened=screened,
+            l2l_edges=remaining,
+            H_rot_a=H_rot_a,
+            H_trans_a=H_trans_a,
+            H_rot_b=H_rot_b,
+            H_trans_b=H_trans_b,
+            cfg=cfg,
+            T_I_A_init=T_I_A_init,
+            T_I_B_init=T_I_B_init,
+        )
+        changes = {}
+        if omitted_solution["solver"]["success"]:
+            for key in ("T_I_A", "T_I_B", "T_A_B"):
+                delta = np.linalg.inv(solution[key]) @ omitted_solution[key]
+                changes[key] = {
+                    "translation_m": float(np.linalg.norm(delta[:3, 3])),
+                    "rotation_deg": _rotation_error_deg(np.eye(3), delta[:3, :3]),
+                }
+        else:
+            report["status"] = "solver_failed"
+            report["reasons"].append(f"deletion_solver_failed:{window_id}")
+        report["windows"].append(
+            {
+                "omitted_window_id": window_id,
+                "remaining_window_count": len(window_ids) - 1,
+                "solver": omitted_solution["solver"],
+                "change_from_nominal": changes or None,
+            }
+        )
+    if report["status"] != "solver_failed":
+        report["max_change_from_nominal"] = {
+            key: {
+                metric: max(
+                    row["change_from_nominal"][key][metric] for row in report["windows"]
+                )
+                for metric in ("translation_m", "rotation_deg")
+            }
+            for key in ("T_I_A", "T_I_B", "T_A_B")
+        }
+    return report
 
 
 def _solve_turn_imu_ba_v3(
@@ -2124,7 +2325,72 @@ def _solution_summary(
             "sensor_b_trans_m": dT_b_t,
         },
         "observability": sol.get("observability", {}),
+        "solver": sol.get("solver", {}),
     }
+
+
+def _export_l2l_feature_debug(
+    feature_dir: Path,
+    feature_traces: list[dict[str, Any]],
+    feature_rejections: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    screened: dict[str, Any],
+    provenance: dict[str, Any],
+) -> None:
+    from lidar2lidar.feature_visualization import (
+        export_feature_index,
+        export_feature_window,
+    )
+
+    lookup = {e["window_id"]: e for e in edges if e["method"] == "semantic_v2"}
+    reports = []
+    for record in feature_traces:
+        window = record["metadata"]
+        reports.append(
+            export_feature_window(
+                feature_dir / window["window_id"],
+                record["trace"],
+                record["result"],
+                {**window, **provenance},
+                edge=lookup.get(window["window_id"]),
+            )
+        )
+    for rejected in feature_rejections:
+        metadata = {**rejected["metadata"], **provenance, "screening_rejected": True}
+        if rejected["frame_a"] is None or rejected["frame_b"] is None:
+            reports.append(
+                {
+                    **metadata,
+                    "status": "screening-rejected",
+                    "solver_success": False,
+                    "failure_reason": metadata["skip_reason"],
+                    "has_gallery": False,
+                }
+            )
+            continue
+        trace = {
+            "source": {},
+            "target": {},
+            "stages": [],
+            "T_initial": screened["T_AB_init"],
+            "configs": {"primitive_extraction": asdict(PrimitiveExtractionConfig())},
+        }
+        for side, frame_key in (("source", "frame_b"), ("target", "frame_a")):
+            extract_geometric_primitives(rejected[frame_key], trace=trace[side])
+        reports.append(
+            export_feature_window(
+                feature_dir / metadata["window_id"],
+                trace,
+                {"success": False, "reason": metadata["skip_reason"]},
+                metadata,
+            )
+        )
+    screening = screened["static_screening_log"]
+    if feature_rejections:
+        screening = [r for r in screening if r.get("accepted")] + [
+            r["metadata"] for r in feature_rejections
+        ]
+    export_feature_index(feature_dir, reports, screening, metadata=provenance)
 
 
 def run_joint_dual_calibration(
@@ -2138,10 +2404,20 @@ def run_joint_dual_calibration(
     label_b: str = "right_back",
     mode: str = "v2",
     config: JointCalibrationConfig = JointCalibrationConfig(),
+    save_l2l_feature_debug: bool = False,
 ) -> dict[str, Any]:
     """Run staged Extraction -> Joint Solve (v1/v2/v3) -> Standardized Export."""
     if mode not in {"v1", "v2", "v3", "all"}:
         raise ValueError(f"Unsupported mode: {mode!r}")
+    if save_l2l_feature_debug and mode == "v1":
+        raise ValueError("L2L feature debugging requires semantic mode v2, v3 or all")
+    if save_l2l_feature_debug:
+        from importlib.util import find_spec
+
+        if find_spec("matplotlib") is None:
+            raise RuntimeError(
+                'L2L feature debugging requires pip install -e ".[diagnostics]"'
+            )
 
     output_dir = Path(output_dir)
     diag_dir = output_dir / "diagnostics"
@@ -2155,6 +2431,15 @@ def run_joint_dual_calibration(
     result_b = parse_detailed_gril_result(Path(run_dir_b) / "GRIL_Calib_result.txt")
     batch_a = parse_batch_trace_arrays(Path(run_dir_a) / "GRIL_batch_trace_v1.txt")
     batch_b = parse_batch_trace_arrays(Path(run_dir_b) / "GRIL_batch_trace_v1.txt")
+    feature_rejections: list[dict[str, Any]] = []
+    provenance = {
+        "source_label": label_b,
+        "target_label": label_a,
+        "source_dataset": str(Path(dataset_b).resolve()),
+        "target_dataset": str(Path(dataset_a).resolve()),
+        "run_dir_a": str(Path(run_dir_a).resolve()),
+        "run_dir_b": str(Path(run_dir_b).resolve()),
+    }
 
     screened = screen_joint_calibration_windows(
         access_a,
@@ -2165,8 +2450,18 @@ def run_joint_dual_calibration(
         batch_b,
         config,
         include_turn_windows=(mode in {"v3", "all"}),
+        feature_rejections=feature_rejections if save_l2l_feature_debug else None,
     )
     if not screened["static_windows"]:
+        if save_l2l_feature_debug:
+            _export_l2l_feature_debug(
+                diag_dir / "l2l_features",
+                [],
+                feature_rejections,
+                [],
+                screened,
+                provenance,
+            )
         raise RuntimeError("No valid static shared-FoV windows found for L2L coupling")
 
     H_rot_a, H_trans_a = _compute_l2i_anisotropic_info(result_a, batch_a, config)
@@ -2190,8 +2485,16 @@ def run_joint_dual_calibration(
     final_sol = sol_v1
 
     edges_v2: list[dict[str, Any]] = []
+    feature_traces: list[dict[str, Any]] = []
+    semantic_failures: list[dict[str, Any]] = []
     if mode in {"v2", "v3", "all"}:
-        edges_v2 = _evaluate_l2l_edges_semantic(screened, sol_v1["T_A_B"], config)
+        edges_v2 = _evaluate_l2l_edges_semantic(
+            screened,
+            sol_v1["T_A_B"],
+            config,
+            feature_traces=feature_traces if save_l2l_feature_debug else None,
+            failures=semantic_failures,
+        )
         if edges_v2:
             sol_v2 = _solve_anisotropic_factor_graph(
                 screened=screened,
@@ -2210,7 +2513,10 @@ def run_joint_dual_calibration(
             final_sol = sol_v2
             selected_stage = "v2"
         else:
-            edges_v2 = edges_v1
+            logging.getLogger(__name__).warning(
+                "No semantic L2L edges succeeded; falling back to v1 GICP edges. "
+                "Failure details are recorded in diagnostics/l2l_edges.yaml."
+            )
 
     if mode in {"v3", "all"}:
         sol_v3 = _solve_turn_imu_ba_v3(
@@ -2329,6 +2635,8 @@ def run_joint_dual_calibration(
         "v2_semantic_edges": (
             [_clean_edge(e) for e in edges_v2] if mode in {"v2", "v3", "all"} else []
         ),
+        "v2_semantic_failures": semantic_failures,
+        "semantic_fallback_to_gicp": mode != "v1" and not edges_v2,
     }
     (diag_dir / "l2l_edges.yaml").write_text(
         yaml.safe_dump(l2l_report, sort_keys=False)
@@ -2338,17 +2646,41 @@ def run_joint_dual_calibration(
     excitation_gate = evaluate_common_mode_excitation_gate(
         batch_a, active_edges, config
     )
+    if selected_stage == "v2":
+        window_influence = _evaluate_l2l_window_influence(
+            screened=screened,
+            l2l_edges=edges_v2,
+            solution=sol_v2,
+            H_rot_a=H_rot_a,
+            H_trans_a=H_trans_a,
+            H_rot_b=H_rot_b,
+            H_trans_b=H_trans_b,
+            cfg=config,
+            T_I_A_init=sol_v1["T_I_A"],
+            T_I_B_init=sol_v1["T_I_B"],
+        )
+    else:
+        window_influence = {
+            "status": "not_evaluated",
+            "reason": "requires_selected_v2_graph",
+        }
+    (diag_dir / "l2l_window_influence.yaml").write_text(
+        yaml.safe_dump(window_influence, sort_keys=False)
+    )
 
     report = {
         "schema_version": 1,
         "module": "lidar2imu_joint_dual_calib",
         "verdict": excitation_gate["verdict"],
+        "verdict_scope": "common_mode_excitation_only",
         "requested_mode": mode,
         "selected_stage": selected_stage,
+        "semantic_fallback_to_gicp": mode != "v1" and not edges_v2,
         "frames": {"imu": frame_imu, "sensor_a": frame_a, "sensor_b": frame_b},
         "extrinsic_files": exported_final,
         "stage_extrinsic_files": stage_exports,
         "common_mode_excitation_gate": excitation_gate,
+        "l2l_window_influence": window_influence,
         "screening_summary": {
             "static_windows": len(screened["static_windows"]),
             "gravity_windows": len(screened["gravity_windows"]),
@@ -2360,4 +2692,18 @@ def run_joint_dual_calibration(
     (output_dir / "joint_calibration_result.yaml").write_text(
         yaml.safe_dump(report, sort_keys=False)
     )
+    if save_l2l_feature_debug:
+        _export_l2l_feature_debug(
+            diag_dir / "l2l_features",
+            feature_traces,
+            feature_rejections,
+            edges_v2,
+            screened,
+            {
+                **provenance,
+                "validation_artifacts": {
+                    "Fixed-factor L2L window influence": "../l2l_window_influence.yaml"
+                },
+            },
+        )
     return report

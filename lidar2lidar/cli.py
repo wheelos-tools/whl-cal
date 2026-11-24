@@ -30,11 +30,9 @@ import numpy as np
 import open3d as o3d
 import yaml
 
-
 try:
     from lidar2lidar import lidar2lidar as lc
-    from lidar2lidar.extrinsic_io import (build_extrinsics_payload,
-                                          load_extrinsics_file)
+    from lidar2lidar.extrinsic_io import build_extrinsics_payload, load_extrinsics_file
 except ImportError:
     from extrinsic_io import build_extrinsics_payload, load_extrinsics_file
 
@@ -258,10 +256,11 @@ def main() -> None:
     parser.add_argument(
         "--method",
         type=int,
+        choices=[1, 2, 3, 4],
         default=1,
         help=(
             "Method for registration (1: point_to_plane, 2: GICP, "
-            "3: point_to_point)."
+            "3: point_to_point, 4: semantic geometry; no intensity/ring)."
         ),
     )
     parser.add_argument(

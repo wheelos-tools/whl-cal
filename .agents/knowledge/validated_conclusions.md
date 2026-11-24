@@ -32,6 +32,16 @@ This file lists the current conclusions that are supported by tested data.
   - planar: `x/y/yaw`
   - vertical-attitude: `z/pitch/roll`
 
+### Zhongce joint v2 research baseline
+
+- The refreshed three-static-window baseline A and its exact scope are recorded
+  in the [2026-11-24 handoff](../notes/lidar2lidar/2026-11-24_zhongce_baseline.md).
+  It remains review-only and does not replace the production scan2scan baseline.
+- Native joint `accepted` is scoped to common-mode excitation, not independent
+  L2L accuracy. Additional moving-window groups B/C have not been promoted.
+- The post-gap validation data have been reused across iterations; they are not
+  a fresh blind test. Keep data-expansion effects separate from estimator changes.
+
 ## lidar2imu
 
 ### GRIL/LI-Init research dataset lessons (screened through 2026-09-30)
@@ -117,7 +127,8 @@ float64 per-point time rather than 0827's relative float32 field. These are
   FlatBuffer LiDARs (`left_front`, `right_back`, `10,912` scans each; fused
   cloud excluded) and `108,621` `/apollo/sensor/gnss/corrected_imu` samples at
   `100 Hz` on `measurement_time` (`H = 0`), with a continuous `[0, 680 s]`
-  pre-gap segment and an independent `[785, 1005 s]` post-gap holdout.
+  pre-gap segment and a temporally disjoint `[785, 1005 s]` post-gap validation
+  segment (reused in later L2L iterations, so no longer a fresh blind test).
 - Unmodified GRIL failed repeatability and physical checks due to: (1) async
   `ikd-Tree` rebuild threads + Eigen 3.3.7 `-fopenmp` multi-threaded GEMM 1-ULP
   races, (2) equal-point-count `cut_frame=3` + `kImuHz=200` `dt=0` triggering a

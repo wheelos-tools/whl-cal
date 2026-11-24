@@ -11,6 +11,15 @@ last_tested: 2026-11-20
 [LiDAR-to-LiDAR 设计](lidar2lidar_design.md) ·
 [标定方法论](calibration_methodology.md)
 
+> **当前审计边界**：本文后面的厘米级数字、旧门禁“accepted”和“全局真解”
+> 是历史运行/设计记录，不能作为独立真值精度、唯一解或跨场景泛化的证明。
+> 特征调试已发现重复面/竖直线候选导致的初值多解；局部 Hessian 好并不能排除。
+> 本次修复解后残差/信息矩阵、非零旋转雅可比、GICP 信息坐标及 SE(3) log 后，
+> 旧数值必须重新对照，不能直接沿用为当前精度结论。
+> 数值与信息坐标契约见 [L2L 当前设计](lidar2lidar_design.md#semantic-and-joint-numerical-contract)；
+> 可运行算法清单见 [Quickstart](lidar2lidar_quickstart.md#当前算法与入口)。
+> 本次覆盖 joint v2 和共享 L2L 因子，不代表已完成 v3 转弯 BA 的完整数学审计。
+
 ## 1. 问题背景与核心动机
 
 在双角雷达 + 单 IMU 的典型商用车构型（如中策 `2026-11-17` 数据：`left_front` 与 `right_back` 32 线角雷达 + `corrected_imu`）上，通过 [五维交叉诊断](lidar2imu_quickstart.md#5-pillar-dual-sensor-diagnostics) 发现了单路标定无法察觉的结构性互补与短板：
@@ -19,7 +28,8 @@ last_tested: 2026-11-20
    - 对 **重力对齐的 Roll/Pitch**（多航向坡度对消后 `~0.51°`）、**传感器相对 IMU 3D 旋转角速度对齐**（陀螺 RMSE `0.013~0.019 rad/s`）、**硬件时钟偏置 $\tau_k$**（`-22.1 ms / -22.8 ms`）具有高精度可观性。
    - **核心短板**：在重卡低角加速度机动（$|\omega_z| \le 0.4\text{ rad/s}$）下，松耦合 LiDAR EKF 的 `30 Hz` 恒速平滑与速度数值微分会衰减切向加速度峰值，造成水平杆臂向 IMU 原点**径向收缩 ~13.5%**——双路外参诱导出的雷达间相对基线与直连 L2L 存在 `0.977 m`（`Δx=+0.383 m, Δy=-0.890 m, Δyaw=-0.95°`）的显著残差；同时平路行驶时垂直杆臂 $t_z$ 物理不可观。
 2. **现有 `lidar2lidar` (`L2L`) 的能力与短板**：
-   - 在静止多帧叠加下，直连几何可将两雷达之间的 **6-DoF 相对位姿** $T_{AB} = T_{IA}^{-1} T_{IB}$ 钉死到 `±2 cm / ±0.08°`。
+   - 历史静止多帧叠加试验得到厘米级表面残差和一定的窗口一致性，但尚不能将
+     **6-DoF 相对位姿** $T_{AB} = T_{IA}^{-1} T_{IB}$ 的独立精度声明为 `±2 cm / ±0.08°`。
    - **现有实现短板**（详见 `lidar2lidar/lidar2lidar.py`, `fov.py`, `loop_closure.py`, `record_utils.py`）：
      1. 入口丢弃了 FlatBuffer/PointCloud2 已解析的 `intensity` 与 `ring`；
      2. 未区分地面、建筑立面、竖直杆/墙角与散射噪点（树冠/杂波），地面点过量淹没水平约束，走廊场景信息矩阵条件数高达 `822~914`；
@@ -32,7 +42,7 @@ last_tested: 2026-11-20
 
 | 角色 | 代表文献 / 开源范式 | 核心数学机制 | 在本方案中的作用 |
 | :--- | :--- | :--- | :--- |
-| **结构基元 + 退化感知** | **M-LOAM** (Jiao et al., *IEEE T-RO* 2021) / **X-ICP** (Tuna et al., *IEEE T-RO* 2024) | 分离地面/立面/边缘线基元；对 $6\times 6$ 海森矩阵 $\mathbf{H}$ 做特征值-特征向量本征分解，在退化方向显式降权或施加先验 | **采纳并落地为 `v2`**：免深度学习提取 4 类几何语义基元，并以 X-ICP 特征分解量化每个窗口的可定位自由度 |
+| **结构基元 + 退化感知** | **M-LOAM** (Jiao et al., *IEEE T-RO* 2021) / **X-ICP** (Tuna et al., *IEEE T-RO* 2024) | 分离地面/立面/边缘线基元；分析局部约束贡献和退化方向 | **v2 借鉴方向**：免深度学习的几何基元及局部信息块谱，尚非完整 X-ICP 贡献分类/退化约束 |
 | **物理归一化反射率配准** | **Colored-ICP** (Park et al., *ICCV* 2017) / **Intensity-ICP** | 切向光度/强度残差辅助平坦表面切向滑移约束 | **适配改进为 `v2`**：先做距离/入射角补偿与传感器内分位数归一化（消除不同雷达硬件增益差），再用高反射率边缘点约束标线/反光牌 |
 | **流形因子图融合** | **Kalibr** / **Lie-Group $\mathrm{SE}(3)$ Factor Graph** (Barfoot) | 在 $\mathrm{SE}(3)$ 切空间按完整 $6\times 6$ Fisher 信息矩阵融合异构观测并对零空间正则 | **核心底座 `v1`**：正交分解共模/差模自由度，按真实各向异性信息融合 `2×L2I + L2L + 重力` |
 | **纯 IMU 预积分 + 多雷达 BA** | **Forster Preintegration** (*T-RO* 2017) / **BALM2 & MLCC** (HKU MARS, *T-RO* 2022) / **iKalibr** (2024) | 直接用原始 `100 Hz` IMU 预积分驱动跨时间多雷达点云平面锐度（最小特征值/点到面 BA），不经由里程计低通微分 | **创造性破局 `v3`**：在 `2.5 s` 急转弯窗口绕开 `30 Hz` EKF 带宽收缩，消除共模杆臂残余偏差与跨传感器时延差 |
@@ -42,13 +52,13 @@ last_tested: 2026-11-20
 ## 3. 升级版 `L2L` 设计（`lidar2lidar/semantic_registration.py`）
 
 ### 3.1 四通道物理语义过滤与基元提取
-输入保留 `(x, y, z, intensity, ring)`，首先按体素（默认 `0.35 m`）计算局部协方差特征值 $\lambda_1 \ge \lambda_2 \ge \lambda_3$：
+Joint 输入保留 `(x, y, z, intensity, ring)`，首先按体素（当前默认 `0.50 m`）计算局部协方差特征值 $\lambda_1 \ge \lambda_2 \ge \lambda_3$：
 - **散射噪点剔除**：球度 $\lambda_3 / \lambda_1 > 0.28$ 的树冠/灌木杂点直接剔除；
-- **通道 1 — 地面基元 $\mathcal{P}_{\text{ground}}$**：RANSAC 拟合主地面并筛选 $|n_z| \ge 0.90$、平面度 $(\lambda_2-\lambda_3)/\lambda_1 \ge 0.45$ 的面元，设置均衡上限点数（如 `400` 点），仅提供法向点到面约束 $[\Delta z, \Delta\text{roll}, \Delta\text{pitch}]$；
-- **通道 2 — 结构立面 $\mathcal{P}_{\text{facade}}$**：$|n_z| < 0.30$ 且平面度 $\ge 0.45$ 的墙体/箱体面元，构建高精度点到面残差 $r_{\mathcal{P}} = \mathbf{n}_q^\top(\mathbf{R}_{AB}\mathbf{p} + \mathbf{t}_{AB} - \mathbf{q})$；
-- **通道 3 — 竖直杆/墙角棱线 $\mathcal{E}_{\text{pole}}$**：线性度 $(\lambda_1-\lambda_2)/\lambda_1 \ge 0.55$ 且主方向 $|v_{1,z}| \ge 0.85$ 的立柱/路灯杆/墙角，构建 2D 水平点到线正交残差：
-  $$\mathbf{r}_{\mathcal{E}} = \left(\mathbf{I}_3 - \mathbf{v}_q\mathbf{v}_q^\top\right)\left(\mathbf{R}_{AB}\mathbf{p} + \mathbf{t}_{AB} - \mathbf{q}\right)$$
-  单根竖杆即可打破长直走廊的轴向平移退化；
+- **通道 1 — 地面点 $\mathcal{P}_{\text{ground}}$**：RANSAC 拟合主地面（$|n_z| \ge 0.90$），按距离主平面 `<= 0.08 m` 取原始点，均匀采样上限 `1600`。这些点共享主地面法向，不是 `1600` 个独立面元；提供法向点到面约束；
+- **通道 2 — 结构立面 $\mathcal{P}_{\text{facade}}$**：$|n_z| \le 0.35$ 且平面度 $\ge 0.42$ 的局部体素面元（上限 `2400`），构建点到面残差 $r_{\mathcal{P}} = \mathbf{n}_q^\top(\mathbf{R}_{AB}\mathbf{p} + \mathbf{t}_{AB} - \mathbf{q})$；
+- **通道 3 — 竖直线候选 $\mathcal{E}_{\text{pole}}$**：线性度 $(\lambda_1-\lambda_2)/\lambda_1 \ge 0.55$ 且主方向 $|v_{1,z}| \ge 0.82$（上限 `600`），构建两个正交分量：
+  $$\mathbf{r}_{\mathcal{E}} = \mathbf{B}_q\left(\mathbf{R}_{AB}\mathbf{p} + \mathbf{t}_{AB} - \mathbf{q}\right),\quad \mathbf{B}_q\in\mathbb{R}^{2\times3},\quad \mathbf{B}_q\mathbf{v}_q=0,\quad \mathbf{B}_q\mathbf{B}_q^\top=\mathbf{I}_2$$
+  仅当它是真实、唯一且稳定关联的竖杆/棱线时，才能补足墙面切向约束；墙面采样条或重复杆不会自动消除退化。Huber 作用于实际两个残差分量，而非三维投影向量的三个分量；
 - **通道 4 — 距离/入射角补偿与传感器内归一化反射率特征 $\mathcal{M}_{\text{intensity}}$**：
   $$\tilde{I}(\mathbf{p}) = I(\mathbf{p}) \cdot \frac{\max(\|\mathbf{p}\|, 1.0)^\gamma}{\max(|\hat{\mathbf{p}}\cdot\mathbf{n}|, \cos 75^\circ)^\beta}, \quad z_I = \frac{\tilde{I} - \mathrm{median}(\tilde{I})}{\max(\mathrm{IQR}(\tilde{I}), 10^{-3})}$$
   取 $z_I \ge \tau_{\text{retro}}$ 的稳定高反光点（车道线、反光牌轮廓），抑制饱和拖尾后与目标高反光近邻匹配。
@@ -56,12 +66,23 @@ last_tested: 2026-11-20
 ### 3.2 三重 3D 物理共视域门控
 1. **本车包围盒自遮挡射线剔除（Ego AABB Occlusion）**：检测传感器原点到目标点的射线是否穿过卡车车体包围盒 $\mathcal{B}_{\text{truck}}$，防止“穿透车厢匹配对侧点”。
 2. **初值协方差自适应 3D 视锥交集（Uncertainty-Buffered 3D Frustum）**：同时覆盖水平方位角与垂直俯仰角 $[\phi_{\min}, \phi_{\max}]$、有效距离 $[r_{\min}, r_{\max}]$，并随外参不确定度 $(\sigma_\theta^{(k)}, \sigma_t^{(k)})$ 动态缩放角裕量 $\Delta\alpha = 3\sigma_\theta^{(k)} + \frac{3\sigma_t^{(k)}}{\max(\|\mathbf{p}\|, 2.0)}$，避免早期有偏初值误删真实共视墙面。
-3. **法向同侧一致性门控**：要求 $\mathbf{n}_A^\top(\hat{\mathbf{R}}_{AB}\mathbf{n}_B) > \cos 35^\circ$，根除薄墙正反面误吸合。
+3. **法向同侧一致性门控**：要求 $\mathbf{n}_A^\top(\hat{\mathbf{R}}_{AB}\mathbf{n}_B) \ge 0.819$（约 $\cos 35^\circ$），减少薄墙正反面误匹配，但不保证消除全部错误关联。
 
-### 3.3 X-ICP 可定位性诊断
+当前求解中，视锥/可选 AABB 门控只用于地面和立面；法向同侧只用于立面，
+不能称所有通道都经过三重门控。立面 reciprocal 是回查源位置距离
+`<= max(max_corr, 0.75 m)` 的软检查，不是严格互为最近邻。
+柱候选只有距离 `<= max(1.35 * max_corr, 0.45 m)` 与方向内积 `>= 0.88`；
+反射点只有距离 `<= max(1.25 * max_corr, 0.35 m)` 与归一化强度差 `<= 2.5`，
+两者没有同样的共视/reciprocal 检查。默认 ego AABB 为 `None`，并未开启车体遮挡。
+
+### 3.3 当前局部信息谱诊断（不是完整 X-ICP）
 在最优解处构建加权 Gauss-Newton 信息矩阵 $\mathbf{H}_{\text{L2L}} = \frac{1}{\hat{\sigma}^2}\mathbf{J}^\top\mathbf{W}\mathbf{J} \in \mathbb{R}^{6\times 6}$ 并做特征分解 $\mathbf{H}_{\text{L2L}} = \mathbf{V}\operatorname{diag}(\lambda_1,\dots,\lambda_6)\mathbf{V}^\top$，输出：
 - 条件数 $\kappa = \lambda_6 / \max(\lambda_1, 10^{-9})$；
 - 平移与旋转子空间的最小/最大特征值及对应的**退化方向特征向量**（例如长直走廊沿道路切线方向平移可定位性弱）。
+
+当前实现只分析旋转/平移对角块，不做交叉项边缘化或 X-ICP 对应贡献分类。
+它也没有解决重复目标匹配的相关性或全局多解；`corridor_degenerate: false`
+不能等同于外参唯一、准确。`*_direction_target` 已按求解后旋转映射到目标系。
 
 ---
 
@@ -92,6 +113,20 @@ $$\min_{\mathcal{X}_{\text{calib}},\, \mathcal{X}_{\text{aux}}} \sum_{k\in\{A,B\
    - **效果**：直接消除双雷达对角基线 `0.98 m` 闭环残差，保留重力水平精度。
 2. **`v2`（特征与视野升级）— 语义基元 + 归一化反射率 + 3D 共视域 `L2L`**：
    - 将 `v1` 中的裸 GICP 边替换为 `semantic_registration` 输出的 4 通道基元 + 归一化强度 + 车体自遮挡 3D 共视域 + X-ICP 信息矩阵边，解决走廊退化与弱重叠漂移。
+   - **当前执行边界**：始终先解 `v1 GICP` 图，再用其 `T_A_B` 初始化语义边，
+     最后解 `v2` 图；不是独立于 GICP 的语义入口。v1/v2 优化两个空间外参
+     （`12` 维），时间偏置沿用已有 L2I 结果，未在 v2 中重新优化。
+     上述“解决退化”是设计目标；目前信息谱诊断并非完整 X-ICP。
+     - **跨窗证据边界**：`channel_matches` 是匹配条数，
+       `channel_unique_targets` 才是被匹配的不同目标特征索引数，
+       二者都不是独立物体数。不能把重复命中同一反射点当成新增独立证据。
+       求解后自动输出 `diagnostics/l2l_window_influence.yaml`：
+       固定 L2I、重力、高度先验、剩余边及其权重和初始化，依次删除一个窗口的
+       L2L 因子，报告 `T_I_A/T_I_B/T_A_B` 的变化。
+       它不重跑筛选、关联或 consensus，不是全流水线删窗重放，也不是绝对精度或
+       标定协方差。只有一个未降权窗口、无法删窗或删窗求解未收敛均会明确记录。
+       该诊断不改变最终外参、权重或原有激励 verdict；所选结果不是 v2 时，
+       明确标为未评估，不能把它当作 v3 的审计结果。
 3. **`v3`（紧耦合精化）— 急转弯 `100 Hz` 纯 IMU 预积分 + 双雷达跨时间 BA**：
    - 以 `v2` 结果为初值，在多个大角速度转弯窗口（`~2.6 s`）内用 `100 Hz` IMU 预积分 $(\Delta\mathbf{R}_I(t), \Delta\mathbf{p}_I(t), \Delta\mathbf{v}_{\text{spec}}(t))$ 将双雷达结构化点云（立面/地面/竖杆）统一投影到窗口首帧 $I_{u,0}$：
      $$\mathbf{p}_{k,j}^{I_{u,0}} = \Delta\mathbf{p}_I(t_j+\tau_k) + \mathbf{v}_{u,0}(t_j+\tau_k-t_0) + \frac{1}{2}\mathbf{g}_{u,0}(t_j+\tau_k-t_0)^2 + \Delta\mathbf{R}_I(t_j+\tau_k)\left(\mathbf{R}_{Ik}\mathbf{p}_{k,j} + \mathbf{t}_{Ik}\right)$$
@@ -104,7 +139,7 @@ $$\min_{\mathcal{X}_{\text{calib}},\, \mathcal{X}_{\text{aux}}} \sum_{k\in\{A,B\
 严格保持本仓 **Extraction → Algorithm → Evaluation** 解耦：
 
 1. **Stage 1（数据筛选与多模态提取）**：`screen_joint_calibration_windows` 提取静止共视窗口 $\mathcal{W}_{\text{static}}$、多航向重力窗口 $\mathcal{W}_{\text{grav}}$、高角速度转弯窗口 $\mathcal{W}_{\text{turn}}$，并显式记录每个候选窗口的 `skip_reason`。
-2. **Stage 2（联合求解）**：`lidar2imu calibrate-dual-joint` 支持 `--mode v1 | v2 | v3 | all`（默认 `v2` 核心联合图，`< 5 s`；传 `--mode all` 可同时输出 `v1/v2/v3` 三档消融对比与标准 `extrinsics/*.yaml`）。
+2. **Stage 2（联合求解）**：`lidar2imu calibrate-dual-joint` 支持 `--mode v1 | v2 | v3 | all`（默认 `v2` 核心联合图；传 `--mode all` 可同时输出 `v1/v2/v3` 三档对比与标准 `extrinsics/*.yaml`，各阶段不是独立算法消融）。
 3. **Stage 3（交叉诊断与未见 Holdout 验证）**：使用 `lidar2imu evaluate-dual-diagnostics --extrinsic-a-yaml ... --extrinsic-b-yaml ...` 在**独立未见 Holdout 片段**（如 `[785, 1005 s]`）运行完全一致的五维定量与双色 `.pcd`/切片图评估。
 
 ### 典型运行命令
@@ -130,9 +165,18 @@ lidar2imu evaluate-dual-diagnostics \
   --output-dir outputs/gril/joint_dual_calib_holdout_diag
 ```
 
+仅关注 L2L 的调试时，在上述联合命令增加 `--save-l2l-feature-debug`
+（需要 `diagnostics` 安装 extra，且模式为 `v2/v3/all`）。
+离线入口为 `diagnostics/l2l_features/index.html`：提供检测面元和竖直线候选、
+逐阶段真实匹配、仅立面/柱棱线匹配图、标定前后叠加、原始点索引及交互式查询。
+记录是可选旁路，不改变求解、门限、联合图降权或最终外参。
+筛选拒绝和求解失败窗口保留，且明确区分“参与 L2L 求解”与
+“在联合因子图中被降权”。详见
+[L2L 特征调试指南](lidar2lidar_quickstart.md#4-面元柱棱线与实际匹配调试)。
+
 ---
 
-## 6. 全量 23 分片实测经验总结、路线淘汰结论与门禁后正式标定值
+## 6. 历史 23 分片运行记录（数值修复前，非独立精度证明）
 
 在中策 `2026-11-17` 全量 23 个 `.record` 分片（`1092.2 s / 10,912` 帧，划分 4 个独立 `~220 s` 片段 `S1..S4` + 全段 `Full_0_680s` + 全段 4 处跨 18 分钟停车点 + 未见 Holdout `[785, 1005 s]`）上的系统级 A/B 实测确立了以下工程结论：
 
@@ -158,6 +202,11 @@ lidar2imu evaluate-dual-diagnostics \
 - 水平动态加速：`p95_planar_acc >= 0.50 m/s²`（`0.3 s` 平滑去均值）；
 - 峰值横摆角速度：`max_abs_wz >= 0.32 rad/s` 且健康 `L2L` 边 $\ge 1$；
 - 垂直高度 $z_{\text{cm}}$ 单独评估 `p99(|\omega_{xy}|) >= 0.30 rad/s`，未达标明确报告 `z_cm_observable: false (prior_anchored_planar_nullspace)`。
+
+该 `accepted` 仅表示上述共模激励门禁通过，输出明确标注
+`verdict_scope: common_mode_excitation_only`；未检验 L2L 初值稳定性或物理真值。
+全部语义边失败时 `semantic_fallback_to_gicp: true`，失败原因保存在
+`diagnostics/l2l_edges.yaml`，GICP 边不再混入 `v2_semantic_edges`。
 
 #### 中策 `2026-11-17` 门禁筛选实测与正式接受标定值
 

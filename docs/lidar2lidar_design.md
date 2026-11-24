@@ -29,6 +29,107 @@ Treat `lidar2lidar` as three separable layers:
 
 This matches the current preferred calibration pattern in the repo.
 
+### Semantic and joint numerical contract
+
+- Semantic refinement uses the right retraction
+  `R = R_base @ Exp(phi)`, `t = t_base + R_base @ dt`.
+  This is not the coupled SE(3) exponential. Additive `phi` derivatives include
+  the SO(3) right Jacobian; translation derivatives use **R_base**, not R.
+- Freeze each stage's correspondences, then compute residuals, Huber weights,
+  noise scale and information at the **optimized transform**, relinearized
+  with zero local increment. `info_matrix_6d` has `[rotation, translation]`
+  ordering and `information_tangent: right_source`.
+- Joint factors use the actual coupled logarithm
+  `Log(inv(T_edge) @ T_pred)`. Open3D information is a left-target,
+  point-to-point proxy: convert with
+  `H_right = Ad(T_edge).T @ H_left @ Ad(T_edge)` before whitening.
+  It is not the exact GICP covariance.
+- Before common/differential-mode spectral decomposition, convert the joint
+  optimizer's additive parameters to left SE(3) tangents in the shared IMU
+  frame (`observability.tangent: left_imu_se3`). A shared rig rotation includes
+  `delta_t = -skew(t) @ delta_rotation + delta_translation`. L2L factors alone
+  cannot observe this common rigid motion.
+- Weak-direction fields ending in `_target` are rotated from the source tangent
+  into the target frame. The existing block-spectrum test is **not full X-ICP**:
+  it does not marginalize rotation/translation coupling, account for correlated
+  samples or prove global correspondence uniqueness.
+- Semantic failures are retained in `v2_semantic_failures`. If all semantic
+  windows fail, keep the supported GICP fallback but log it explicitly; do not
+  relabel GICP edges as successful semantic edges.
+- Edge `eigenvalues_6d` describes the effective information **after** gravity,
+  weak-support and consensus scaling; `registration_eigenvalues_6d` preserves the
+  unscaled registration spectrum. `localizability` remains the registration
+  diagnostic, not the joint factor's effective strength.
+- Joint `verdict` retains its common-mode excitation-gate meaning, with
+  `verdict_scope: common_mode_excitation_only`. It is not an independent
+  extrinsic-accuracy or release-readiness result.
+- `channel_matches` counts source-to-target associations;
+  `channel_unique_targets` counts distinct matched target feature indices at
+  the last optimized stage. Many source points may share one target. Neither
+  count represents independent objects, especially for a shared ground plane
+  or repeated returns from one reflector. These counts do not change weights.
+- Joint v2 exports `diagnostics/l2l_window_influence.yaml` after solving.
+  It removes each window's L2L factors in turn and reports changes in all three
+  transforms, with L2I/gravity/height priors, remaining factors/weights and
+  optimizer initialization fixed. It does not rerun associations or consensus
+  and is not a full-pipeline jackknife or calibrated uncertainty.
+  Fewer than two undownweighted windows is reported explicitly; a lone window
+  cannot be deletion-tested. Non-converged deletion solves do not produce a
+  success-shaped maximum. The diagnostic never selects an extrinsic, changes
+  a weight or overrides the excitation verdict; non-v2 selected stages are
+  explicitly `not_evaluated`.
+
+Focused regression:
+`python -m tools.run_lidar2lidar_feature_smoke` verifies additive derivatives
+against finite differences, solved-pose residual/information consistency,
+SE(3) logarithms against matrix exponentials, Open3D tangent conversion,
+joint whitening and common-mode gauge, failure/fallback accounting and optional
+trace equivalence.
+
+### Semantic L2L review trace
+
+Local vertical-line PCA candidates are checked against non-ground support in a
+radius of two voxel widths. If that context satisfies the existing facade
+planarity/normal tests **and the candidate lies on that plane**, the candidate
+is a wall sampling strip rather than an
+independent point-to-line constraint and is excluded from the pole channel.
+Coplanarity uses the existing plane-inlier distance tolerance
+(`ground_inlier_dist_m`, 0.08 m by default); a separate pole near a wall must
+not be removed merely because the background dominates its neighborhood.
+No correspondence schedule or channel weight is changed. The trace preserves
+all checked candidates, context normals/planarity, rejection flags and raw
+support CSR under `source/target.line_context`; these arrays are included in
+`features.npz`. Counts are reported as `planar_line_rejected_voxels`.
+`line_context.png` shows excluded planar-context candidates and retained line
+candidates on the same raw scene, before any matching or optimization.
+Sparse or non-planar context is not proof of a physical cylinder; sub-tolerance
+pole/wall separation and true wall boundaries remain ambiguous. Retained candidates are
+shown before count caps, not as confirmed objects or matches. This check does
+not resolve cross-window disagreement, common-mode IMU observability or
+correlated plane samples.
+
+The joint `lidar2imu calibrate-dual-joint` entry can export feature diagnostics
+with `--save-l2l-feature-debug` for semantic modes. The algorithm stays unchanged:
+
+- `semantic_registration.py` records extraction support indices and the actual
+  candidates selected at each outer stage, without replacing correspondence search.
+- `feature_trace.py` snapshots first rejection reasons, evaluated gates, frozen
+  solver pairs and post-solve geometric residuals / Huber component weights.
+- `feature_visualization.py` renders headless projections and offline interactive
+  galleries from those snapshots, after joint optimization has completed.
+- Static and motion-compensated stacks retain canonical scan / point indices.
+  Failed registration windows and screening rejects remain reviewable; rejects
+  are never sent to the optimizer merely to produce an image.
+
+Diagnostic plane/line grouping is separate from the solver's local primitives.
+Objects are not matched one-to-one: their associations are summaries of real
+local correspondences. Vertical line candidates are not confirmed cylinders.
+The final match view refers to the last *optimized* stage, not a failed trailing
+stage or a post-hoc Open3D nearest-neighbor evaluation.
+
+Artifact definitions and usage are in the
+[feature-debug quick start](lidar2lidar_quickstart.md#4-面元柱棱线与实际匹配调试).
+
 ## 2. Implemented commands
 
 ### `lidar2lidar-auto`

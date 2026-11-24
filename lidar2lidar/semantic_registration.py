@@ -17,14 +17,14 @@
 # Created Date: 2026-11-20
 # Author: daohu527
 
-"""Upgraded L2L registration with 4-channel primitives, calibrated reflectivity,
-self-occlusion-aware 3D shared-FoV, and X-ICP localizability diagnostics.
+"""L2L registration with 4-channel primitives, calibrated reflectivity,
+self-occlusion-aware 3D shared-FoV, and local information-spectrum diagnostics.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -32,7 +32,14 @@ from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R
 
+from lidar2lidar.feature_trace import (
+    capture_features,
+    record_candidates,
+    record_pole_huber,
+    record_stage_residuals,
+)
 from lidar2lidar.fov import AngularSupport, estimate_angular_support
+from lidar2lidar.lie import so3_right_jacobian
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,8 @@ class LidarFrameData:
     intensity: np.ndarray | None = None
     ring: np.ndarray | None = None
     normals: np.ndarray | None = None
+    scan_indices: np.ndarray | None = None
+    point_indices: np.ndarray | None = None
 
 
 @dataclass
@@ -253,6 +262,7 @@ def extract_geometric_primitives(
     *,
     prim_cfg: PrimitiveExtractionConfig = PrimitiveExtractionConfig(),
     refl_cfg: ReflectivityConfig = ReflectivityConfig(),
+    trace: dict[str, Any] | None = None,
 ) -> GeometricPrimitives:
     """Decompose raw scan/submap into ground, structural facade, pole/edge, and
     calibrated reflectivity channels while rejecting high-sphericity clutter.
@@ -269,13 +279,27 @@ def extract_geometric_primitives(
     r_xy = np.linalg.norm(pts[:, :2], axis=1)
     range_mask = (r_xy >= prim_cfg.min_range_m) & (r_xy <= prim_cfg.max_range_m)
     pts = pts[range_mask]
+    frame_indices = (
+        np.flatnonzero(finite_mask)[range_mask] if trace is not None else None
+    )
+    supports: dict[str, list[np.ndarray]] = {
+        c: [] for c in ("ground", "facade", "pole", "intensity")
+    }
+    pca: dict[str, list[np.ndarray]] = {c: [] for c in supports}
+    voxel_counts = {
+        "too_sparse": 0,
+        "degenerate": 0,
+        "scatter": 0,
+        "unclassified": 0,
+        "planar_line_context": 0,
+    }
     if intensity is not None:
         intensity = intensity[range_mask]
 
     if len(pts) == 0:
         empty3 = np.zeros((0, 3), dtype=np.float64)
         empty1 = np.zeros((0,), dtype=np.float64)
-        return GeometricPrimitives(
+        primitives = GeometricPrimitives(
             ground_points=empty3,
             ground_normals=empty3,
             facade_points=empty3,
@@ -293,8 +317,20 @@ def extract_geometric_primitives(
                 "pole": 0,
                 "intensity": 0,
                 "scatter_rejected_voxels": 0,
+                "planar_line_rejected_voxels": 0,
             },
         )
+        if trace is not None:
+            capture_features(
+                trace,
+                frame,
+                primitives,
+                supports,
+                pca,
+                {c: 0 for c in supports},
+                voxel_counts,
+            )
+        return primitives
 
     ground_mask, ground_normal = _fit_dominant_ground(
         pts,
@@ -302,6 +338,9 @@ def extract_geometric_primitives(
         dist_thresh_m=prim_cfg.ground_inlier_dist_m,
     )
     g_idx = _uniform_cap(np.flatnonzero(ground_mask), prim_cfg.max_ground_points)
+    before_cap = {"ground": int(ground_mask.sum())}
+    if trace is not None:
+        supports["ground"] = [frame_indices[i : i + 1] for i in g_idx]
     ground_pts = pts[g_idx]
     ground_normals = np.tile(ground_normal, (len(ground_pts), 1))
 
@@ -316,8 +355,16 @@ def extract_geometric_primitives(
     pole_pts_list: list[np.ndarray] = []
     pole_dirs_list: list[np.ndarray] = []
     scatter_rejected = 0
+    planar_line_rejected = 0
+    line_context_points = []
+    line_context_normals = []
+    line_context_planarity = []
+    line_context_plane_distances = []
+    line_context_rejected = []
+    line_context_supports = []
 
     if len(non_ground_pts) >= prim_cfg.min_voxel_points:
+        context_tree = cKDTree(non_ground_pts)
         vox_keys = np.floor(non_ground_pts / prim_cfg.voxel_size_m).astype(np.int64)
         order = np.lexsort((vox_keys[:, 2], vox_keys[:, 1], vox_keys[:, 0]))
         s_keys = vox_keys[order]
@@ -329,6 +376,8 @@ def extract_geometric_primitives(
         for s, e in zip(bounds[:-1], bounds[1:]):
             cnt = int(e - s)
             if cnt < prim_cfg.min_voxel_points:
+                if trace is not None:
+                    voxel_counts["too_sparse"] += 1
                 continue
             block = s_pts[s:e]
             mu = block.mean(axis=0)
@@ -337,10 +386,14 @@ def extract_geometric_primitives(
             eigvals, eigvecs = np.linalg.eigh(cov)
             l3, l2, l1 = float(eigvals[0]), float(eigvals[1]), float(eigvals[2])
             if l1 < 1e-6:
+                if trace is not None:
+                    voxel_counts["degenerate"] += 1
                 continue
             sphericity = l3 / l1
             if sphericity > prim_cfg.max_sphericity:
                 scatter_rejected += 1
+                if trace is not None:
+                    voxel_counts["scatter"] += 1
                 continue
 
             planarity = (l2 - l3) / l1
@@ -361,12 +414,55 @@ def extract_geometric_primitives(
             ):
                 facade_pts_list.append(mu)
                 facade_normals_list.append(normal)
+                if trace is not None:
+                    supports["facade"].append(frame_indices[s_orig_idx[s:e]])
+                    pca["facade"].append(np.array([planarity, linearity, sphericity]))
             elif (
                 linearity >= prim_cfg.min_linearity
                 and abs(float(axis_dir[2])) >= prim_cfg.min_pole_vz
             ):
+                # A thin voxel on a wall is not a line constraint: verify its
+                # shape using non-ground support spanning two voxel widths.
+                context_indices = context_tree.query_ball_point(
+                    mu, 2.0 * prim_cfg.voxel_size_m
+                )
+                context = non_ground_pts[context_indices]
+                context_center = context.mean(axis=0)
+                context_centered = context - context_center
+                context_values, context_vectors = np.linalg.eigh(
+                    context_centered.T @ context_centered / len(context)
+                )
+                context_planarity = (context_values[1] - context_values[0]) / max(
+                    float(context_values[2]), 1e-12
+                )
+                plane_distance = abs(
+                    float((mu - context_center) @ context_vectors[:, 0])
+                )
+                rejected_as_planar = (
+                    context_planarity >= prim_cfg.min_planarity
+                    and abs(float(context_vectors[2, 0])) <= prim_cfg.max_facade_nz
+                    and plane_distance <= prim_cfg.ground_inlier_dist_m
+                )
+                if trace is not None:
+                    line_context_points.append(mu)
+                    line_context_normals.append(context_vectors[:, 0])
+                    line_context_planarity.append(context_planarity)
+                    line_context_plane_distances.append(plane_distance)
+                    line_context_rejected.append(rejected_as_planar)
+                    line_context_supports.append(
+                        frame_indices[non_ground_idx[context_indices]]
+                    )
+                if rejected_as_planar:
+                    planar_line_rejected += 1
+                    voxel_counts["planar_line_context"] += 1
+                    continue
                 pole_pts_list.append(mu)
                 pole_dirs_list.append(axis_dir)
+                if trace is not None:
+                    supports["pole"].append(frame_indices[s_orig_idx[s:e]])
+                    pca["pole"].append(np.array([planarity, linearity, sphericity]))
+            elif trace is not None:
+                voxel_counts["unclassified"] += 1
 
     facade_pts = (
         np.asarray(facade_pts_list, dtype=np.float64)
@@ -378,10 +474,14 @@ def extract_geometric_primitives(
         if facade_normals_list
         else np.zeros((0, 3), dtype=np.float64)
     )
+    before_cap["facade"] = len(facade_pts)
     if len(facade_pts) > prim_cfg.max_facade_points:
         keep_f = _uniform_cap(np.arange(len(facade_pts)), prim_cfg.max_facade_points)
         facade_pts = facade_pts[keep_f]
         facade_normals = facade_normals[keep_f]
+        if trace is not None:
+            supports["facade"] = [supports["facade"][i] for i in keep_f]
+            pca["facade"] = [pca["facade"][i] for i in keep_f]
 
     pole_pts = (
         np.asarray(pole_pts_list, dtype=np.float64)
@@ -393,21 +493,28 @@ def extract_geometric_primitives(
         if pole_dirs_list
         else np.zeros((0, 3), dtype=np.float64)
     )
+    before_cap["pole"] = len(pole_pts)
     if len(pole_pts) > prim_cfg.max_pole_points:
         keep_p = _uniform_cap(np.arange(len(pole_pts)), prim_cfg.max_pole_points)
         pole_pts = pole_pts[keep_p]
         pole_dirs = pole_dirs[keep_p]
+        if trace is not None:
+            supports["pole"] = [supports["pole"][i] for i in keep_p]
+            pca["pole"] = [pca["pole"][i] for i in keep_p]
 
     z_intensity, _ = normalize_reflectivity(pts, intensity, point_normals, refl_cfg)
     retro_idx = np.flatnonzero(z_intensity >= refl_cfg.retro_z_threshold)
+    before_cap["intensity"] = len(retro_idx)
     if len(retro_idx) > refl_cfg.max_retro_points:
         top_order = np.argsort(z_intensity[retro_idx])[::-1]
         retro_idx = retro_idx[top_order[: refl_cfg.max_retro_points]]
     int_pts = pts[retro_idx]
     int_z = z_intensity[retro_idx]
     int_normals = point_normals[retro_idx]
+    if trace is not None:
+        supports["intensity"] = [frame_indices[i : i + 1] for i in retro_idx]
 
-    return GeometricPrimitives(
+    primitives = GeometricPrimitives(
         ground_points=ground_pts,
         ground_normals=ground_normals,
         facade_points=facade_pts,
@@ -425,8 +532,30 @@ def extract_geometric_primitives(
             "pole": int(len(pole_pts)),
             "intensity": int(len(int_pts)),
             "scatter_rejected_voxels": int(scatter_rejected),
+            "planar_line_rejected_voxels": int(planar_line_rejected),
         },
     )
+    if trace is not None:
+        capture_features(
+            trace, frame, primitives, supports, pca, before_cap, voxel_counts
+        )
+        trace["line_context"] = {
+            "points": np.asarray(line_context_points).reshape(-1, 3),
+            "normals": np.asarray(line_context_normals).reshape(-1, 3),
+            "planarity": np.asarray(line_context_planarity),
+            "plane_distance_m": np.asarray(line_context_plane_distances),
+            "rejected_as_planar": np.asarray(line_context_rejected, dtype=bool),
+            "support_offsets": np.r_[
+                0, np.cumsum([len(indices) for indices in line_context_supports])
+            ].astype(np.int64),
+            "support_indices": (
+                np.concatenate(line_context_supports)
+                if line_context_supports
+                else np.empty(0, dtype=np.int64)
+            ),
+            "radius_m": 2.0 * prim_cfg.voxel_size_m,
+        }
+    return primitives
 
 
 def ray_intersects_aabb_mask(
@@ -537,6 +666,7 @@ def compute_3d_shared_visibility_mask(
 def _analyze_localizability(
     info_matrix: np.ndarray,
     reg_cfg: SemanticRegistrationConfig,
+    rotation_target_source: np.ndarray,
 ) -> dict[str, Any]:
     eigvals_6, eigvecs_6 = np.linalg.eigh(0.5 * (info_matrix + info_matrix.T))
     eigvals_6 = np.maximum(eigvals_6, 0.0)
@@ -565,8 +695,12 @@ def _analyze_localizability(
         "rotation_condition_number": rot_cond,
         "translation_eigenvalues": [float(v) for v in eig_t],
         "translation_condition_number": trans_cond,
-        "weakest_translation_direction_target": [float(v) for v in vec_t[:, 0]],
-        "weakest_rotation_direction_target": [float(v) for v in vec_r[:, 0]],
+        "weakest_translation_direction_target": (
+            rotation_target_source @ vec_t[:, 0]
+        ).tolist(),
+        "weakest_rotation_direction_target": (
+            rotation_target_source @ vec_r[:, 0]
+        ).tolist(),
         "corridor_degenerate": corridor_degenerate,
     }
 
@@ -706,15 +840,38 @@ def register_semantic_l2l(
     refl_cfg: ReflectivityConfig = ReflectivityConfig(),
     vis_cfg: VisibilityConfig = VisibilityConfig(),
     reg_cfg: SemanticRegistrationConfig = SemanticRegistrationConfig(),
+    trace: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Register source (B) into target (A) using 4-channel primitives, calibrated
     intensity features, 3D visibility/self-occlusion gating, and X-ICP analysis.
     """
+    if trace is not None:
+        trace.clear()
+        trace.update(
+            {
+                "source": {},
+                "target": {},
+                "stages": [],
+                "T_initial": np.asarray(initial_T_target_source).copy(),
+            }
+        )
+        trace["configs"] = {
+            "primitive_extraction": asdict(prim_cfg),
+            "reflectivity": asdict(refl_cfg),
+            "visibility": asdict(vis_cfg),
+            "registration": asdict(reg_cfg),
+        }
     prim_src = extract_geometric_primitives(
-        source_frame, prim_cfg=prim_cfg, refl_cfg=refl_cfg
+        source_frame,
+        prim_cfg=prim_cfg,
+        refl_cfg=refl_cfg,
+        trace=trace["source"] if trace is not None else None,
     )
     prim_tgt = extract_geometric_primitives(
-        target_frame, prim_cfg=prim_cfg, refl_cfg=refl_cfg
+        target_frame,
+        prim_cfg=prim_cfg,
+        refl_cfg=refl_cfg,
+        trace=trace["target"] if trace is not None else None,
     )
     if (len(prim_src.facade_points) + len(prim_src.ground_points)) < 15 or (
         len(prim_tgt.facade_points) + len(prim_tgt.ground_points)
@@ -793,12 +950,38 @@ def register_semantic_l2l(
                     T_curr = T_coarse
 
     last_diag: dict[str, Any] = {}
+    if trace is not None:
+        trace["T_coarse"] = T_curr.copy()
 
     for stage_idx, (max_corr, (sig_rot_deg, sig_t_m)) in enumerate(
         zip(reg_cfg.correspondence_schedule_m, reg_cfg.uncertainty_schedule)
     ):
         R_curr = T_curr[:3, :3]
         t_curr = T_curr[:3, 3]
+        stage = None
+        if trace is not None:
+            stage = {
+                "index": stage_idx,
+                "T_matching": T_curr.copy(),
+                "T_after": T_curr.copy(),
+                "optimized": False,
+                "max_correspondence_m": max_corr,
+                "sigma_rotation_deg": sig_rot_deg,
+                "sigma_translation_m": sig_t_m,
+                "channels": {},
+            }
+            trace["stages"].append(stage)
+        for channel in ("ground", "facade", "pole", "intensity"):
+            reason = "insufficient_target_features"
+            if channel == "intensity" and len(prim_src.intensity_points) < 8:
+                reason = "insufficient_source_features"
+            record_candidates(
+                stage,
+                channel,
+                len(getattr(prim_src, f"{channel}_points")),
+                unavailable_reason=reason,
+            )
+        unique_targets = dict.fromkeys(("ground", "facade", "pole", "intensity"), 0)
 
         # 1) Ground correspondences (no self-occlusion clip needed at medium distance,
         #    use 3D frustum visibility)
@@ -817,6 +1000,15 @@ def register_semantic_l2l(
                 ego_bbox_max_other=ego_max_tgt,
             )
             g_idx_vis = np.flatnonzero(vis_g)
+            if len(g_idx_vis) == 0:
+                record_candidates(
+                    stage,
+                    "ground",
+                    len(g_src_pts),
+                    queried=g_idx_vis,
+                    target=np.empty(0, dtype=int),
+                    distance=np.empty(0),
+                )
             if len(g_idx_vis) > 0:
                 dists, nn_idx = tree_gnd_tgt.query(g_pred[g_idx_vis], k=1)
                 n_dot = np.sum(
@@ -837,10 +1029,35 @@ def register_semantic_l2l(
                     & (plane_dist <= max_corr)
                     & (n_dot >= vis_cfg.normal_covisibility_cos)
                 )
+                record_candidates(
+                    stage,
+                    "ground",
+                    len(g_src_pts),
+                    queried=g_idx_vis,
+                    target=nn_idx,
+                    distance=dists,
+                    gates={
+                        "distance": dists <= gnd_search_m,
+                        "plane_distance": plane_dist <= max_corr,
+                        "normal": n_dot >= vis_cfg.normal_covisibility_cos,
+                    },
+                    values={"plane_distance_m": plane_dist, "normal_dot": n_dot},
+                    accepted=g_idx_vis[valid],
+                    thresholds={
+                        "distance_m": gnd_search_m,
+                        "plane_distance_m": max_corr,
+                        "normal_dot": vis_cfg.normal_covisibility_cos,
+                    },
+                )
                 if np.any(valid):
+                    unique_targets["ground"] = int(len(np.unique(nn_idx[valid])))
                     g_src_sel = g_src_pts[g_idx_vis[valid]]
                     g_tgt_pts = prim_tgt.ground_points[nn_idx[valid]]
                     g_tgt_n = prim_tgt.ground_normals[nn_idx[valid]]
+            if stage is not None:
+                stage["channels"]["ground"]["gates"]["shared_visibility"] = (
+                    vis_g.astype(np.int8)
+                )
 
         # 2) Facade correspondences with same-side normal & reciprocal gate
         f_src_sel = np.zeros((0, 3), dtype=np.float64)
@@ -857,11 +1074,22 @@ def register_semantic_l2l(
                 ego_bbox_max_other=ego_max_tgt,
             )
             f_idx_vis = np.flatnonzero(vis_f)
+            if len(f_idx_vis) == 0:
+                record_candidates(
+                    stage,
+                    "facade",
+                    len(f_pred),
+                    queried=f_idx_vis,
+                    target=np.empty(0, dtype=int),
+                    distance=np.empty(0),
+                )
             if len(f_idx_vis) > 0:
                 dists, nn_idx = tree_fac_tgt.query(f_pred[f_idx_vis], k=1)
                 n_src_rot = prim_src.facade_normals[f_idx_vis] @ R_curr.T
                 n_dot = np.sum(n_src_rot * prim_tgt.facade_normals[nn_idx], axis=1)
                 valid = (dists <= max_corr) & (n_dot >= vis_cfg.normal_covisibility_cos)
+                reciprocal_values = np.full(len(f_idx_vis), np.nan)
+                reciprocal_gate = np.full(len(f_idx_vis), -1, dtype=np.int8)
                 if (
                     vis_cfg.reciprocal_check
                     and tree_fac_src is not None
@@ -879,13 +1107,49 @@ def register_semantic_l2l(
                         axis=1,
                     )
                     valid_idx = np.flatnonzero(valid)[back_dist <= max(max_corr, 0.75)]
+                    if stage is not None:
+                        reciprocal_values[valid] = back_dist
+                        reciprocal_gate[valid] = (
+                            back_dist <= max(max_corr, 0.75)
+                        ).astype(np.int8)
                 else:
                     valid_idx = np.flatnonzero(valid)
+                record_candidates(
+                    stage,
+                    "facade",
+                    len(f_pred),
+                    queried=f_idx_vis,
+                    target=nn_idx,
+                    distance=dists,
+                    gates={
+                        "distance": dists <= max_corr,
+                        "normal": n_dot >= vis_cfg.normal_covisibility_cos,
+                    },
+                    values={
+                        "normal_dot": n_dot,
+                        "reciprocal_distance_m": reciprocal_values,
+                    },
+                    accepted=f_idx_vis[valid_idx],
+                    thresholds={
+                        "distance_m": max_corr,
+                        "normal_dot": vis_cfg.normal_covisibility_cos,
+                        "reciprocal_distance_m": max(max_corr, 0.75),
+                    },
+                )
+                if stage is not None:
+                    rec_check = np.full(len(f_pred), -1, dtype=np.int8)
+                    rec_check[f_idx_vis] = reciprocal_gate
+                    stage["channels"]["facade"]["gates"]["reciprocal"] = rec_check
 
                 if len(valid_idx) > 0:
+                    unique_targets["facade"] = int(len(np.unique(nn_idx[valid_idx])))
                     f_src_sel = prim_src.facade_points[f_idx_vis[valid_idx]]
                     f_tgt_pts = prim_tgt.facade_points[nn_idx[valid_idx]]
                     f_tgt_n = prim_tgt.facade_normals[nn_idx[valid_idx]]
+            if stage is not None:
+                stage["channels"]["facade"]["gates"]["shared_visibility"] = (
+                    vis_f.astype(np.int8)
+                )
 
         # 3) Vertical pole/corner point-to-line correspondences
         p_src_sel = np.zeros((0, 3), dtype=np.float64)
@@ -902,7 +1166,26 @@ def register_semantic_l2l(
                 )
             )
             valid = (dists <= max(max_corr * 1.35, 0.45)) & (dir_dot >= 0.88)
+            record_candidates(
+                stage,
+                "pole",
+                len(p_pred),
+                queried=np.arange(len(p_pred)),
+                target=nn_idx,
+                distance=dists,
+                gates={
+                    "distance": dists <= max(max_corr * 1.35, 0.45),
+                    "direction": dir_dot >= 0.88,
+                },
+                values={"direction_dot": dir_dot},
+                accepted=np.flatnonzero(valid),
+                thresholds={
+                    "distance_m": max(max_corr * 1.35, 0.45),
+                    "direction_dot": 0.88,
+                },
+            )
             if np.any(valid):
+                unique_targets["pole"] = int(len(np.unique(nn_idx[valid])))
                 p_src_sel = prim_src.pole_points[valid]
                 p_tgt_pts = prim_tgt.pole_points[nn_idx[valid]]
                 p_tgt_b = np.array(
@@ -917,7 +1200,26 @@ def register_semantic_l2l(
             dists, nn_idx = tree_int_tgt.query(m_pred, k=1)
             z_diff = np.abs(prim_src.intensity_z - prim_tgt.intensity_z[nn_idx])
             valid = (dists <= max(max_corr * 1.25, 0.35)) & (z_diff <= 2.5)
+            record_candidates(
+                stage,
+                "intensity",
+                len(m_pred),
+                queried=np.arange(len(m_pred)),
+                target=nn_idx,
+                distance=dists,
+                gates={
+                    "distance": dists <= max(max_corr * 1.25, 0.35),
+                    "intensity_delta": z_diff <= 2.5,
+                },
+                values={"intensity_delta": z_diff},
+                accepted=np.flatnonzero(valid),
+                thresholds={
+                    "distance_m": max(max_corr * 1.25, 0.35),
+                    "intensity_delta": 2.5,
+                },
+            )
             if np.any(valid):
+                unique_targets["intensity"] = int(len(np.unique(nn_idx[valid])))
                 m_src_sel = prim_src.intensity_points[valid]
                 m_tgt_pts = prim_tgt.intensity_points[nn_idx[valid]]
 
@@ -925,6 +1227,8 @@ def register_semantic_l2l(
             len(g_src_sel) + len(f_src_sel) + len(p_src_sel) + len(m_src_sel)
         )
         if total_matches < 12:
+            if stage is not None:
+                stage["reason"] = "insufficient_covisible_correspondences"
             if stage_idx == 0:
                 return {
                     "success": False,
@@ -934,12 +1238,20 @@ def register_semantic_l2l(
                 }
             break
 
-        # Inner Gauss-Newton / TRF solve using right-perturbation T_curr @ exp(xi)
-        def _eval_res_and_jac(xi: np.ndarray, compute_jac: bool = True):
+        # Right retraction T_base @ [Exp(phi), dt], not a coupled SE(3) exponential.
+        def _eval_res_and_jac(
+            xi: np.ndarray,
+            compute_jac: bool = True,
+            *,
+            base_transform: np.ndarray | None = None,
+        ):
+            R_base = R_curr if base_transform is None else base_transform[:3, :3]
+            t_base = t_curr if base_transform is None else base_transform[:3, 3]
             dR = R.from_rotvec(xi[:3]).as_matrix()
             dt = xi[3:6]
-            R_try = R_curr @ dR
-            t_try = R_curr @ dt + t_curr
+            R_try = R_base @ dR
+            t_try = R_base @ dt + t_base
+            rotation_jacobian = so3_right_jacobian(xi[:3]) if compute_jac else None
 
             res_chunks: list[np.ndarray] = []
             jac_chunks: list[np.ndarray] = []
@@ -956,8 +1268,8 @@ def register_semantic_l2l(
                 if compute_jac:
                     n_in_curr = tgt_n @ R_try
                     # n^T R_try (dphi x p) = (p x (R_try^T n))^T dphi
-                    j_rot = np.cross(src_p, n_in_curr)
-                    j_t = n_in_curr
+                    j_rot = np.cross(src_p, n_in_curr) @ rotation_jacobian
+                    j_t = tgt_n @ R_base
                     jac_chunks.append(w * np.hstack([j_rot, j_t]))
 
             if len(p_src_sel) > 0:
@@ -969,13 +1281,14 @@ def register_semantic_l2l(
                 res_chunks.append(r_pole)
                 if compute_jac:
                     b_in_curr = np.einsum("kij,jl->kil", p_tgt_b, R_try)  # (K, 2, 3)
-                    j1_rot = np.cross(p_src_sel, b_in_curr[:, 0, :])
-                    j2_rot = np.cross(p_src_sel, b_in_curr[:, 1, :])
+                    b_translation = np.einsum("kij,jl->kil", p_tgt_b, R_base)
+                    j1_rot = np.cross(p_src_sel, b_in_curr[:, 0, :]) @ rotation_jacobian
+                    j2_rot = np.cross(p_src_sel, b_in_curr[:, 1, :]) @ rotation_jacobian
                     j_pole = np.empty((len(p_src_sel) * 2, 6), dtype=np.float64)
                     j_pole[0::2, :3] = j1_rot
-                    j_pole[0::2, 3:6] = b_in_curr[:, 0, :]
+                    j_pole[0::2, 3:6] = b_translation[:, 0, :]
                     j_pole[1::2, :3] = j2_rot
-                    j_pole[1::2, 3:6] = b_in_curr[:, 1, :]
+                    j_pole[1::2, 3:6] = b_translation[:, 1, :]
                     jac_chunks.append(w_p * j_pole)
 
             if len(m_src_sel) > 0:
@@ -989,8 +1302,8 @@ def register_semantic_l2l(
                     j_m = np.empty((n_m * 3, 6), dtype=np.float64)
                     for ax in range(3):
                         e_ax = np.tile(R_try[ax, :], (n_m, 1))
-                        j_m[ax::3, :3] = np.cross(m_src_sel, e_ax)
-                        j_m[ax::3, 3:6] = e_ax
+                        j_m[ax::3, :3] = np.cross(m_src_sel, e_ax) @ rotation_jacobian
+                        j_m[ax::3, 3:6] = R_base[ax, :]
                     jac_chunks.append(w_m * j_m)
 
             res_vec = np.concatenate(res_chunks)
@@ -1014,7 +1327,11 @@ def register_semantic_l2l(
         T_step[:3, 3] = xi_opt[3:6]
         T_curr = T_curr @ T_step
 
-        res_final, jac_final = _eval_res_and_jac(np.zeros(6), compute_jac=True)
+        # Relinearize at the estimate in its right-source tangent, not at the seed
+        # or in the optimizer's additive parameter coordinates.
+        res_final, jac_final = _eval_res_and_jac(
+            np.zeros(6), compute_jac=True, base_transform=T_curr
+        )
         mad_m = float(1.4826 * np.median(np.abs(res_final))) if len(res_final) else 0.05
         sigma_eff = max(reg_cfg.noise_floor_m, mad_m)
         # Huber weights at solution
@@ -1055,12 +1372,32 @@ def register_semantic_l2l(
             if len(p_src_sel)
             else np.zeros(0)
         )
+        if stage is not None:
+            record_stage_residuals(
+                stage,
+                prim_src,
+                prim_tgt,
+                T_curr,
+                {
+                    "ground": reg_cfg.ground_weight,
+                    "facade": reg_cfg.facade_weight,
+                    "pole": reg_cfg.pole_weight,
+                    "intensity": reg_cfg.intensity_weight,
+                },
+                reg_cfg.huber_scale_m,
+            )
+            record_pole_huber(stage, p_res, reg_cfg.pole_weight, reg_cfg.huber_scale_m)
+            stage["info_matrix_6d"] = H_info.copy()
+            stage["information_tangent"] = "right_source"
+            stage["solver_success"] = bool(sol.success)
+            stage["solver_status"] = int(sol.status)
 
-        loc = _analyze_localizability(H_info, reg_cfg)
+        loc = _analyze_localizability(H_info, reg_cfg, T_curr[:3, :3])
         last_diag = {
             "success": True,
             "transformation": T_curr.copy(),
             "info_matrix_6d": H_info,
+            "information_tangent": "right_source",
             "sigma_eff_m": float(sigma_eff),
             "mad_residual_m": float(mad_m),
             "localizability": loc,
@@ -1070,6 +1407,7 @@ def register_semantic_l2l(
                 "pole": int(len(p_src_sel)),
                 "intensity": int(len(m_src_sel)),
             },
+            "channel_unique_targets": unique_targets,
             "channel_rmse_m": {
                 "facade": _rms(f_res),
                 "ground": _rms(g_res),

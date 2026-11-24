@@ -56,6 +56,18 @@ When a candidate has multiple changes, isolate them:
 
 This prevents accidental credit assignment to the wrong idea.
 
+For data-expansion comparisons, separate quantity from complementary geometry:
+keep a frozen original group, an added-data control, and an equal-size
+complementary-data group where feasible. Match motion/deskew and stack duration;
+otherwise report the confound rather than crediting geometry alone. Moving
+windows require explicit point-time and compensation qualification and must
+not silently replace static windows.
+
+Preserve the raw baseline before any promotion. Pin the actual source tree
+when the worktree is dirty, not just HEAD, and record command, inputs,
+environment, numerical tolerances, failure cases, and timing scope. Repeatedly
+used validation is no longer a fresh blind test.
+
 ## Required outputs
 
 When writing a benchmark plan or result summary, include:

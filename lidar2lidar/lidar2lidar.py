@@ -352,6 +352,8 @@ def perform_icp_registration(
             o3d.pipelines.registration.TransformationEstimationForGeneralizedICP(),
             criteria,
         )
+    if method != 3:
+        raise ValueError(f"Unsupported ICP method: {method!r}; expected 1, 2 or 3")
     logging.info("  -> Using point-to-point ICP")
     return o3d.pipelines.registration.registration_icp(
         source_pcd,
@@ -475,6 +477,8 @@ def calibrate_lidar_extrinsic(
             - Initial coarse transformation matrix.
             - Final registration result.
     """
+    if method not in {1, 2, 3, 4}:
+        raise ValueError(f"Unsupported registration method: {method!r}")
     if preprocessing_params is None:
         preprocessing_params = {
             "voxel_size": 0.04,
